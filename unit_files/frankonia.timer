@@ -3,7 +3,7 @@ Description="Run frankonia.service everyday at noon UTC."
 
 [Timer]
 OnCalendar=*-*-* 10:00:00
-Unit=helloworld.service
+Unit=frankonia.service
 
 [Install]
 WantedBy=multi-user.target
