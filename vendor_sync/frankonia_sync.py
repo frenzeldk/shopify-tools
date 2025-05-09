@@ -1,3 +1,5 @@
+#!/opt/shopify-python/bin/python3
+
 """Provides the base configuration values for shopify integration"""
 import csv
 import os
