@@ -1,0 +1,9 @@
+[Unit]
+Description="Run entirem.service everyday at noon UTC."
+
+[Timer]
+OnCalendar=*-*-* 10:00:00
+Unit=entirem.service
+
+[Install]
+WantedBy=multi-user.target
