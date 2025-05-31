@@ -29,7 +29,7 @@ def fetch_helikon_stock():
         on_stock = float(getattr(item, "OnStock", 0))
         if sku:
             stock_dict[sku] = on_stock
-    print(f"Loaded {len(stock_dict)} Helikon-Tex SKUs from SOAP API.")
+    #print(f"Loaded {len(stock_dict)} Helikon-Tex SKUs from SOAP API.")
     return stock_dict
 
 def get_helikon_and_update_shopify():
@@ -134,8 +134,8 @@ def get_helikon_and_update_shopify():
                         errors = mutation_result.get("productVariantsBulkUpdate", {}).get("userErrors", [])
                         if errors:
                             print(f"Error updating variants for product {product_node['title']}: {errors}")
-                        else:
-                            print(f"Updated variants for product {product_node['title']}")
+                        #else:
+                        #    print(f"Updated variants for product {product_node['title']}")
                     except TransportQueryError as e:
                         print(f"GraphQL transport error while updating variants for product {product_node['title']}: {e}")
                     except requests.exceptions.RequestException as e:
