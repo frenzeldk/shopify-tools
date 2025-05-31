@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/shopify-python/bin/python3
 
 """Sync Helikon-Tex product inventory policy with Shopify using SOAP API described in entirem.wsdl."""
 
@@ -158,8 +158,8 @@ def get_helikon_and_update_shopify():
             print(f"Unexpected error fetching product variants for vendor {vendor}: {e}")
             break
 
-#def main():
-#    get_helikon_and_update_shopify()
+def main():
+    get_helikon_and_update_shopify()
 
-#if __name__ == "__main__":
-#    main()
+if __name__ == "__main__":
+    main()
