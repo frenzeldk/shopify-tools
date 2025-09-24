@@ -1,0 +1,9 @@
+[Unit]
+Description="Run mtac.service everyday at noon UTC."
+
+[Timer]
+OnCalendar=*-*-* 10:10:00
+Unit=mtac.service
+
+[Install]
+WantedBy=multi-user.target

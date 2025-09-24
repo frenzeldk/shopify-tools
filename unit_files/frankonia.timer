@@ -2,7 +2,7 @@
 Description="Run frankonia.service everyday at noon UTC."
 
 [Timer]
-OnCalendar=*-*-* 10:00:00
+OnCalendar=*-*-* 10:05:00
 Unit=frankonia.service
 
 [Install]
