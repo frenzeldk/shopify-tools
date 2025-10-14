@@ -1,0 +1,9 @@
+[Unit]
+Description="Run order-resume.service every 30 minutes."
+
+[Timer]
+OnCalendar=*:0/30
+Unit=order-resume.service
+
+[Install]
+WantedBy=multi-user.target
