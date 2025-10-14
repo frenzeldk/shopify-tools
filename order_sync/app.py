@@ -45,6 +45,8 @@ def enforce_host_restriction() -> None:
 def shopify_webhook() -> Response:
     """Receive a shopify webhook, print its payload, and acknowledge."""
     retrieved_hmac = request.headers.get("X-Shopify-Hmac-Sha256")
+    if not retrieved_hmac:
+        abort(403, description="Missing HMAC header")
     calculated_hmac = base64.b64encode(
         hmac.new(
             SECRET.encode(),
@@ -55,16 +57,17 @@ def shopify_webhook() -> Response:
     if not hmac.compare_digest(retrieved_hmac, calculated_hmac):
         abort(403, description="HMAC verification failed")
     topic = request.headers.get("X-Shopify-Topic", "(unknown)")
-    if not topic == "orders/create":
-        abort(400, description="Unexpected topic")
-
     payload = request.get_json(silent=True)
     if payload is None:
         abort(400, description="Expected JSON body")
-    queue.enqueue_in(timedelta(seconds=600),
+    match topic:
+        case "orders/create":
+            queue.enqueue_in(timedelta(seconds=600),
                      handle_order,
                      payload.get("id"),
                      int(payload.get("name")[1:]))
+        case _:
+            abort(400, description="Unexpected topic")
     return jsonify({"status": "ok"}), 200
 
 
