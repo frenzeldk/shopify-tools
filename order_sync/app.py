@@ -1,3 +1,5 @@
+#!/opt/shopify-python/bin/python3
+
 """Minimal Flask application to receive shopify webhook events.
 
 The server only accepts requests targeting the expected public domain and
