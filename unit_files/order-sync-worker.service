@@ -1,0 +1,11 @@
+[Unit]
+Description="Schedules workers for order-sync.service"
+
+[Service]
+Type=simple
+User=shopify
+WorkingDirectory=/opt/shopify-tools/order_sync
+ExecStart=/opt/shopify-python/bin/rq worker --with-scheduler
+
+[Install]
+WantedBy=multi-user.target
