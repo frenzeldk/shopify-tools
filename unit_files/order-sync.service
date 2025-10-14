@@ -1,0 +1,11 @@
+[Unit]
+Description="Syncronizes order state from shopify to shipmondo"
+
+[Service]
+Type=simple
+User=shopify
+WorkingDirectory=/opt/shopify-tools
+ExecStart=/opt/shopify-tools/order_sync/app.py
+
+[Install]
+WantedBy=multi-user.target
