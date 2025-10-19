@@ -166,5 +166,5 @@ def handle_order(order_id: str | int, sid: int) -> None:
 def _pause_order(order_id: str | int, sid: int) -> None:
     """Pause the order by adding a "paused" tag and pausing it
     in shipmondo."""
-    _add_tag_to_order(order_id, "paused")
     pause_order(sid)
+    _add_tag_to_order(order_id, "paused")

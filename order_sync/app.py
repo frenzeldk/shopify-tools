@@ -14,7 +14,7 @@ import base64
 from datetime import timedelta
 from flask import Flask, Request, Response, abort, jsonify, request
 from valkey import Valkey
-from rq import Queue
+from rq import Retry, Queue
 from shopify import handle_order
 
 EXPECTED_HOST = os.environ.get("EXPECTED_HOST")
@@ -62,10 +62,10 @@ def shopify_webhook() -> Response:
         abort(400, description="Expected JSON body")
     match topic:
         case "orders/create":
-            queue.enqueue_in(timedelta(seconds=600),
-                     handle_order,
+            queue.enqueue(handle_order,
                      payload.get("id"),
-                     int(payload.get("name")[1:]))
+                     int(payload.get("name")[1:]),
+                     retry=Retry(max=4, interval=[60, 120, 180, 240]),)
         case _:
             abort(400, description="Unexpected topic")
     return jsonify({"status": "ok"}), 200
