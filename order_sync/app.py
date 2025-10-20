@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import hashlib
 import hmac
+import jwt
 import base64
 from datetime import timedelta
 from flask import Flask, Request, Response, abort, jsonify, request
@@ -18,8 +19,9 @@ from rq import Queue
 from shopify import handle_order
 
 EXPECTED_HOST = os.environ.get("EXPECTED_HOST")
-WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH")
+WEBHOOK_PATHS = os.environ.get("WEBHOOK_PATHS").split(",")
 SECRET = os.environ.get("SHOPIFY_APP_SECRET")
+JWTKEY = os.environ.get("SHIPMONDO_JWT_KEY")
 
 app: Flask = Flask(__name__)
 
@@ -41,7 +43,7 @@ def enforce_host_restriction() -> None:
         abort(403, description="Host not allowed")
 
 
-@app.route(WEBHOOK_PATH, methods=["POST"])
+@app.route(WEBHOOK_PATHS[0], methods=["POST"])
 def shopify_webhook() -> Response:
     """Receive a shopify webhook, print its payload, and acknowledge."""
     retrieved_hmac = request.headers.get("X-Shopify-Hmac-Sha256")
@@ -70,6 +72,16 @@ def shopify_webhook() -> Response:
             abort(400, description="Unexpected topic")
     return jsonify({"status": "ok"}), 200
 
+@app.route(WEBHOOK_PATHS[1], methods=["POST"])
+def shipmondo_webhook() -> Response:
+    """Receive a shipmondo webhook, print its payload, and acknowledge."""
+    payload = request.get_json(silent=True)
+    if payload is None:
+        abort(400, description="Expected JSON body")
+    # Here you would process the Shipmondo webhook payload as needed.
+    data = jwt.decode(payload.get("data"), JWTKEY, algorithms="HS256")
+    print("Received Shipmondo webhook:", data)
+    return jsonify({"status": "ok"}), 200
 
 @app.errorhandler(403)
 def forbidden(error: Exception) -> Response:  # pragma: no cover - simple mapping
