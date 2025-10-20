@@ -56,7 +56,7 @@ def shipmondo_webhook() -> Response:
         return jsonify({"status": "ignored"}), 200
     queue.enqueue(handle_order,
                 int(data.get("id")),
-                int(payload.get("order_id")))
+                int(data.get("order_id")))
     return jsonify({"status": "ok"}), 200
 
 
