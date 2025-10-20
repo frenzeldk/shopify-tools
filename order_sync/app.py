@@ -49,6 +49,8 @@ def shipmondo_webhook() -> Response:
     data = jwt.decode(payload.get("data"), JWTKEY, algorithms="HS256")
     if not isinstance(data, dict):
         abort(400, description="Invalid JWT payload")
+    if data.get("id") is None or data.get("order_id") is None:
+        return jsonify({"status": "ignored"}), 200
     queue.enqueue(handle_order,
                 int(data.get("id")),
                 int(payload.get("order_id")))
