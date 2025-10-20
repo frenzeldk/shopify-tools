@@ -8,18 +8,14 @@ prints the JSON payload of each accepted webhook to standard output.
 
 from __future__ import annotations
 import os
-import hashlib
-import hmac
 import jwt
-import base64
-from datetime import timedelta
 from flask import Flask, Request, Response, abort, jsonify, request
 from valkey import Valkey
 from rq import Queue
 from shopify import handle_order
 
 EXPECTED_HOST = os.environ.get("EXPECTED_HOST")
-WEBHOOK_PATHS = os.environ.get("WEBHOOK_PATHS").split(",")
+WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH")
 SECRET = os.environ.get("SHOPIFY_APP_SECRET")
 JWTKEY = os.environ.get("SHIPMONDO_JWT_KEY")
 
@@ -43,36 +39,7 @@ def enforce_host_restriction() -> None:
         abort(403, description="Host not allowed")
 
 
-@app.route(WEBHOOK_PATHS[0], methods=["POST"])
-def shopify_webhook() -> Response:
-    """Receive a shopify webhook, print its payload, and acknowledge."""
-    retrieved_hmac = request.headers.get("X-Shopify-Hmac-Sha256")
-    if not retrieved_hmac:
-        abort(403, description="Missing HMAC header")
-    calculated_hmac = base64.b64encode(
-        hmac.new(
-            SECRET.encode(),
-            request.data,
-            hashlib.sha256
-        ).digest()
-    ).decode('utf-8')
-    if not hmac.compare_digest(retrieved_hmac, calculated_hmac):
-        abort(403, description="HMAC verification failed")
-    topic = request.headers.get("X-Shopify-Topic", "(unknown)")
-    payload = request.get_json(silent=True)
-    if payload is None:
-        abort(400, description="Expected JSON body")
-    match topic:
-        case "orders/create":
-            queue.enqueue_in(timedelta(seconds=600),
-                     handle_order,
-                     payload.get("id"),
-                     int(payload.get("name")[1:]))
-        case _:
-            abort(400, description="Unexpected topic")
-    return jsonify({"status": "ok"}), 200
-
-@app.route(WEBHOOK_PATHS[1], methods=["POST"])
+@app.route(WEBHOOK_PATH + "/create", methods=["POST"])
 def shipmondo_webhook() -> Response:
     """Receive a shipmondo webhook, print its payload, and acknowledge."""
     payload = request.get_json(silent=True)
@@ -80,8 +47,13 @@ def shipmondo_webhook() -> Response:
         abort(400, description="Expected JSON body")
     # Here you would process the Shipmondo webhook payload as needed.
     data = jwt.decode(payload.get("data"), JWTKEY, algorithms="HS256")
-    print("Received Shipmondo webhook:", data)
+    if not isinstance(data, dict):
+        abort(400, description="Invalid JWT payload")
+    queue.enqueue(handle_order,
+                int(data.get("id")),
+                int(payload.get("order_id")))
     return jsonify({"status": "ok"}), 200
+
 
 @app.errorhandler(403)
 def forbidden(error: Exception) -> Response:  # pragma: no cover - simple mapping

@@ -22,11 +22,8 @@ def _get_order_id(sid: str):
     except (IndexError, KeyError):
         return None
 
-def pause_order(sid: str):
+def pause_order(oid: str):
     """Pause an order in Shipmondo."""
-    oid = _get_order_id(sid)
-    if not oid:
-        raise ValueError(f"Order with sid {sid} not found in Shipmondo")
     url = BASE_URL + f"sales_orders/{oid}"
     response = requests.put(url,
                             headers={"Content-Type": "application/json",

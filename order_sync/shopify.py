@@ -158,13 +158,48 @@ def _check_availability(order_id: str | int) -> bool:
 
     return True  # All items are available
 
-def handle_order(order_id: str | int, sid: int) -> None:
-    """Handle the order by checking inventory and pausing if needed."""
-    if not _check_availability(order_id):
-        _pause_order(order_id, sid)
+def _get_shopify_id_from_handle(handle: int) -> str:
+    """Fetch the Shopify order ID from its handle."""
+    query = gql(
+        """
+        query GetOrderByName($name: String!) {
+          orders(first: 1, query: $name) {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
+        """
+    )
 
-def _pause_order(order_id: str | int, sid: int) -> None:
+    variables = {"name": f"name:{handle}"}
+
+    try:
+        result = gql_client.execute(query, variable_values=variables)
+    except TransportQueryError as exc:  # pragma: no cover - network interaction
+        raise RuntimeError(f"Failed to fetch order with handle {handle}: {exc}") from exc
+
+    orders = result.get("orders", {}).get("edges", [])
+    if not orders:
+        raise RuntimeError(f"Order with handle {handle} not found")
+
+    order_node = orders[0].get("node", {})
+    shopify_id = order_node.get("id")
+    if not shopify_id:
+        raise RuntimeError(f"Order with handle {handle} has no ID")
+
+    return shopify_id
+
+def handle_order(shipmondo_id: int, handle: int) -> None:
+    """Handle the order by checking inventory and pausing if needed."""
+    shopify_id = _get_shopify_id_from_handle(handle)
+    if not _check_availability(shopify_id):
+        _pause_order(shopify_id, shipmondo_id)
+
+def _pause_order(shopify_id: str | int, shipmondo_id: int) -> None:
     """Pause the order by adding a "paused" tag and pausing it
     in shipmondo."""
-    _add_tag_to_order(order_id, "paused")
-    pause_order(sid)
+    _add_tag_to_order(shopify_id, "paused")
+    pause_order(shipmondo_id)
