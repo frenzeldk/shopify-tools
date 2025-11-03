@@ -42,7 +42,7 @@ def get_vendors_and_product_variants():
     print(f"Loaded {len(csv_variants)} variants from CSV.")
 
     # Query Shopify for product variants by vendor with pagination
-    for vendor in ["Parforce Traditional Hunting", "Parforce", "Highmoor", "Wald & Forst"]:
+    for vendor in ["Parforce Traditional Hunting", "Parforce", "Highmoor", "Wald & Forst", "Merkel Gear"]:
         has_next_page = True
         after_cursor = None
 
