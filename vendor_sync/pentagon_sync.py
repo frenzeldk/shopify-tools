@@ -1,6 +1,6 @@
 #!/opt/shopify-python/bin/python3
 
-"""Sync Helikon-Tex product inventory policy with Shopify based on M-Tac XML feed"""
+"""Sync Helikon-Tex product inventory policy with Shopify based on Pentagon XML feed"""
 import os
 import requests
 import xmltodict
@@ -12,8 +12,8 @@ from gql.transport.exceptions import TransportQueryError
 
 def get_vendors_and_product_variants():
     """
-    Fetch all vendors from the CSV located at frankonia_url and retrieve all product variants
-    for those vendors from Shopify. Check if the variant exists in the CSV and update its
+    Retrieve all product variants for Pentagon Tactical from Shopify. 
+    Check if the variant exists in the XML and update its
     inventory policy if necessary.
     """
     ## Shopify GraphQL setup
@@ -23,11 +23,15 @@ def get_vendors_and_product_variants():
     transport = AIOHTTPTransport(url=shopify_url, headers=shopify_header)
     gql_client = Client(transport=transport, fetch_schema_from_transport=True)
 
-    mtac_url = "https://m-tac.pl/xml?id=42"
+    pentagon_url = "https://b2b.pentagon.com.gr/index.php?route=feed/xml_stock"
 
     # load xml and convert it to dict
     try:
-        response = requests.get(mtac_url, timeout=30)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36"
+        }
+        response = requests.get(pentagon_url, headers=headers, timeout=120)
         response.raise_for_status()
     except requests.exceptions.HTTPError as errh:
         print("HTTP Error")
@@ -36,19 +40,17 @@ def get_vendors_and_product_variants():
     # Check if the request was successful
     if response.status_code != 200:
         raise response.HTTPError(
-            f"Failed to fetch the sitemap. Status code: {response.status_code}"
-        )
-    mtac_variants = xmltodict.parse(response.text).get("feed").get("entry")
-    mtac_variants = {
-        x.get("g:gtin"): x.get("g:stock")
-        for x in mtac_variants
-        if int(x.get("g:stock")) > 1
-    }
+            f"Failed to fetch the xml. Status code: {response.status_code}"
+            )
+    pentagon_variants = xmltodict.parse(response.text).get("SHOP").get("SHOPITEM")
+    pentagon_variants = [x.get("OPTIONS").get("COMB") if (x.get("OPTIONS") and x["OPTIONS"].get("COMB")) else x.get("OPTIONS") for x in pentagon_variants]
+    pentagon_variants = [x for xs in pentagon_variants for x in (xs if isinstance(xs, list) else [xs]) if x]
+    pentagon_variants = [x.get("BARCODE") for x in pentagon_variants if x.get("BARCODE") and x.get("STOCK") == "IN STOCK"]
 
     # Query Shopify for product variants by vendor with pagination
     has_next_page = True
     after_cursor = None
-    vendor = "M-Tac"
+    vendor = "Pentagon Tactical"
     while has_next_page:
         query = gql(
             """
@@ -99,7 +101,7 @@ def get_vendors_and_product_variants():
                     current_policy = variant_node["inventoryPolicy"]
 
                     # Check if the variant exists in the XML data
-                    if mtac_variants.get(variant_gtin):
+                    if variant_gtin in pentagon_variants:
                         expected_policy = "CONTINUE"
                     else:
                         expected_policy = "DENY"  # Default to "DENY" if not in CSV

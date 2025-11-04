@@ -1,6 +1,5 @@
 #!/opt/shopify-python/bin/python3
-
-"""Provides the base configuration values for shopify integration"""
+"""Sync Helikon-Tex product inventory policy with Shopify based on Frankonia CSV feed"""
 import csv
 import os
 import requests

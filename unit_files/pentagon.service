@@ -1,0 +1,8 @@
+[Unit]
+Description="Syncronizes availability from Pentagon Tactical to Shopify"
+
+[Service]
+Type=simple
+User=shopify
+WorkingDirectory=/opt/shopify-tools
+ExecStart=/opt/shopify-tools/vendor_sync/pentagon_sync.py

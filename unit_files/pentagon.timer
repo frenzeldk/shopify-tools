@@ -1,0 +1,9 @@
+[Unit]
+Description="Run pentagon.service everyday at noon UTC."
+
+[Timer]
+OnCalendar=*-*-* 10:15:00
+Unit=pentagon.service
+
+[Install]
+WantedBy=multi-user.target
