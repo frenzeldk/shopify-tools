@@ -183,5 +183,5 @@ def main() -> None:
     print(f"Fetched {len(orders)} unfulfilled orders.")
     _resume_orders(orders)
 
-#if __name__ == "__main__":
-#    main()
+if __name__ == "__main__":
+    main()
