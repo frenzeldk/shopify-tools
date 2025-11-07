@@ -62,7 +62,7 @@ def _update_inventory_cache(line_items: list[dict]) -> None:
         if inventory_item_id not in _inventory_cache:
             _get_inventory_level(inventory_item_id)
         _inventory_cache[inventory_item_id] = _inventory_cache.get(inventory_item_id, 0)\
-            - item["quantity"]
+            - item["currentQuantity"]
 
 def _can_fulfill_order(line_items: list[dict]) -> bool:
     """Return True if all line items can be fulfilled from available stock.
@@ -139,7 +139,7 @@ def get_orders() -> list[dict]:
                         lineItems(first: 100) {
                             edges {
                                 node {
-                                    quantity
+                                    currentQuantity
                                     variant {
                                         inventoryItem {
                                             id
@@ -183,5 +183,5 @@ def main() -> None:
     print(f"Fetched {len(orders)} unfulfilled orders.")
     _resume_orders(orders)
 
-if __name__ == "__main__":
-    main()
+#if __name__ == "__main__":
+#    main()
