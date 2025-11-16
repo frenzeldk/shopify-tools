@@ -1,0 +1,1529 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Purchase Orders</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-alpine.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/purchase_orders.css') }}">
+  </head>
+  <body>
+    <header>
+      <h1>Purchase Orders</h1>
+    </header>
+    <main id="app"></main>
+
+    <script id="purchase-orders-data" type="application/json">{{ purchase_orders|tojson }}</script>
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.noStyle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script>
+      const { createApp } = Vue;
+      const dataElement = document.getElementById("purchase-orders-data");
+      let initialPurchaseOrders = [];
+      if (dataElement) {
+        try {
+          const parsed = JSON.parse(dataElement.textContent || "null");
+          if (Array.isArray(parsed)) {
+            initialPurchaseOrders = parsed;
+          }
+        } catch (error) {
+          console.error("Failed to parse initial purchase order payload", error);
+        }
+      }
+      const DATA_ENDPOINT = "/purchase-orders/data/";
+
+      const FILTER_TYPES = {
+        STARTS_WITH: "starts_with",
+        CONTAINS: "contains",
+        NOT_CONTAINS: "not_contains",
+      };
+
+      function parseFilterInput(rawValue) {
+        if (typeof rawValue !== "string") {
+          return null;
+        }
+        const value = rawValue.trim();
+        if (!value) {
+          return null;
+        }
+        if (value.startsWith("!") && value.length > 1) {
+          return { type: FILTER_TYPES.NOT_CONTAINS, value: value.slice(1).toLowerCase() };
+        }
+        if (value.startsWith("*") && value.length > 1) {
+          return { type: FILTER_TYPES.CONTAINS, value: value.slice(1).toLowerCase() };
+        }
+        return { type: FILTER_TYPES.STARTS_WITH, value: value.toLowerCase() };
+      }
+
+      function toComparableString(value) {
+        if (value === null || value === undefined) {
+          return "";
+        }
+        return String(value).toLowerCase();
+      }
+
+      function AdvancedTextFilter() {}
+
+      AdvancedTextFilter.prototype.init = function init(params) {
+        this.params = params;
+        this.valueGetter = params.valueGetter;
+        this.text = "";
+        this.condition = null;
+        this.eGui = document.createElement("div");
+        this.eGui.className = "advanced-filter-placeholder";
+        this.eGui.textContent = "Use the header inputs to filter.";
+      };
+
+      AdvancedTextFilter.prototype.getGui = function getGui() {
+        return this.eGui;
+      };
+
+      AdvancedTextFilter.prototype.parse = function parse(value) {
+        return parseFilterInput(value);
+      };
+
+      AdvancedTextFilter.prototype.setValue = function setValue(value, fromFloatingFilter = false) {
+        const nextValue = typeof value === "string" ? value : "";
+        if (this.text === nextValue) {
+          return;
+        }
+        this.text = nextValue;
+        this.condition = this.parse(nextValue);
+        if (this.params && typeof this.params.filterChangedCallback === "function") {
+          this.params.filterChangedCallback({ afterFloatingFilter: fromFloatingFilter });
+        }
+      };
+
+      AdvancedTextFilter.prototype.setFilterValueFromFloating = function setFilterValueFromFloating(value) {
+        this.setValue(value, true);
+      };
+
+      AdvancedTextFilter.prototype.isFilterActive = function isFilterActive() {
+        return Boolean(this.condition);
+      };
+
+      AdvancedTextFilter.prototype.doesFilterPass = function doesFilterPass(params) {
+        if (!this.condition) {
+          return true;
+        }
+        const rawValue = this.valueGetter ? this.valueGetter(params) : params.data?.[this.params.colDef.field];
+        const candidate = toComparableString(rawValue);
+        const expected = this.condition.value;
+        switch (this.condition.type) {
+          case FILTER_TYPES.NOT_CONTAINS:
+            return !candidate.includes(expected);
+          case FILTER_TYPES.CONTAINS:
+            return candidate.includes(expected);
+          case FILTER_TYPES.STARTS_WITH:
+            return candidate.startsWith(expected);
+          default:
+            return true;
+        }
+      };
+
+      AdvancedTextFilter.prototype.getModel = function getModel() {
+        return this.isFilterActive() ? { text: this.text } : null;
+      };
+
+      AdvancedTextFilter.prototype.setModel = function setModel(model) {
+        const nextValue = model && typeof model.text === "string" ? model.text : "";
+        this.setValue(nextValue, false);
+      };
+
+      AdvancedTextFilter.prototype.getModelAsString = function getModelAsString() {
+        return this.isFilterActive() ? this.text : "";
+      };
+
+      AdvancedTextFilter.prototype.afterGuiAttached = function afterGuiAttached() {};
+      AdvancedTextFilter.prototype.destroy = function destroy() {};
+
+      function AdvancedFloatingFilter() {}
+
+      AdvancedFloatingFilter.prototype.init = function init(params) {
+        this.params = params;
+        this.eGui = document.createElement("div");
+        this.eGui.className = "advanced-floating-filter";
+        this.eInput = document.createElement("input");
+        this.eInput.type = "text";
+        this.eInput.className = "advanced-floating-input";
+        this.eInput.placeholder = "Search...";
+        this.eGui.appendChild(this.eInput);
+
+        this.onInput = (event) => {
+          const value = event.target.value ?? "";
+          params.parentFilterInstance((instance) => {
+            if (!instance) {
+              return;
+            }
+            if (typeof instance.setFilterValueFromFloating === "function") {
+              instance.setFilterValueFromFloating(value);
+            } else if (typeof instance.setValue === "function") {
+              instance.setValue(value, true);
+            }
+          });
+        };
+
+        this.eInput.addEventListener("input", this.onInput);
+
+        const initialModel = params.currentParentModel();
+        this.onParentModelChanged(initialModel);
+      };
+
+      AdvancedFloatingFilter.prototype.onParentModelChanged = function onParentModelChanged(model) {
+        const value = model && typeof model.text === "string" ? model.text : "";
+        if (this.eInput && this.eInput.value !== value) {
+          this.eInput.value = value;
+        }
+      };
+
+      AdvancedFloatingFilter.prototype.getGui = function getGui() {
+        return this.eGui;
+      };
+
+      AdvancedFloatingFilter.prototype.destroy = function destroy() {
+        if (this.eInput && this.onInput) {
+          this.eInput.removeEventListener("input", this.onInput);
+        }
+      };
+
+      createApp({
+        data() {
+          return {
+            rowData: initialPurchaseOrders,
+            gridApi: null,
+            gridOptions: null,
+            gridInstance: null,
+            allColumns: [],
+            selectedColumns: [],
+            isModalOpen: false,
+            availableSortable: null,
+            selectedSortable: null,
+            savedConfigurations: [],
+            selectedConfigId: "",
+            newConfigName: "",
+            isSavingConfig: false,
+            pendingFilterModel: null,
+            showDeleteModal: false,
+            deleteTargetConfig: null,
+            columnLabels: {},
+            activeFilterModel: {},
+            activeSortModel: [],
+            pendingSortModel: null,
+            isLoadingData: false,
+            dataFetchError: "",
+          };
+        },
+        computed: {
+          columnDefs() {
+            if (!this.allColumns.length) {
+              return [];
+            }
+            const visibleSet = new Set(this.selectedColumns);
+            const orderedVisible = [...this.selectedColumns];
+            const hiddenColumns = this.allColumns.filter((column) => !visibleSet.has(column));
+            const fullOrder = [...orderedVisible, ...hiddenColumns];
+            return fullOrder.map((key) => ({
+              field: key,
+              headerName: this.columnLabels[key] || this.formatHeader(key),
+              filter: "advancedTextFilter",
+              floatingFilterComponent: "advancedFloatingFilter",
+              suppressHeaderMenuButton: true,
+              suppressColumnsToolPanel: true,
+              headerComponent: "editableHeader",
+              hide: !visibleSet.has(key),
+            }));
+          },
+          sortedAvailableColumns() {
+            const selectedSet = new Set(this.selectedColumns);
+            return this.allColumns
+              .filter((column) => !selectedSet.has(column))
+              .sort((a, b) => a.localeCompare(b));
+          },
+          canSaveConfiguration() {
+            return Boolean(this.newConfigName.trim()) && !this.isSavingConfig;
+          },
+          hiddenFilteredColumns() {
+            const filterModel = this.activeFilterModel || {};
+            const hiddenSet = new Set(
+              this.allColumns.filter((column) => !this.selectedColumns.includes(column))
+            );
+            const filteredFields = new Set(Object.keys(filterModel));
+            return this.allColumns
+              .filter((field) => hiddenSet.has(field) && filteredFields.has(field))
+              .map((field) => this.columnLabels[field] || this.formatHeader(field));
+          },
+        },
+        watch: {
+          selectedColumns: {
+            handler() {
+              this.applyColumnDefinitions();
+            },
+            deep: false,
+          },
+          isModalOpen(value) {
+            if (value) {
+              this.$nextTick(() => {
+                this.initializeSortables();
+                window.addEventListener("keydown", this.onEscapeKey);
+              });
+            } else {
+              this.destroySortables();
+              window.removeEventListener("keydown", this.onEscapeKey);
+            }
+          },
+        },
+        created() {
+          this.bootstrapInitialData(initialPurchaseOrders);
+          void this.fetchConfigurations();
+          void this.loadPurchaseOrders();
+        },
+        mounted() {
+          if (!this.$refs.gridContainer) {
+            return;
+          }
+          this.gridOptions = this.buildGridOptions();
+          const options = this.gridOptions;
+          if (typeof agGrid.createGrid === "function") {
+            this.gridApi = agGrid.createGrid(this.$refs.gridContainer, options);
+            this.setGridRowData(this.rowData);
+            this.applyColumnDefinitions();
+          } else {
+            this.gridInstance = new agGrid.Grid(this.$refs.gridContainer, options);
+            if (options.api) {
+              this.gridApi = options.api;
+              this.setGridRowData(this.rowData);
+              this.applyColumnDefinitions();
+            }
+          }
+        },
+        beforeUnmount() {
+          this.destroySortables();
+          window.removeEventListener("keydown", this.onEscapeKey);
+        },
+        methods: {
+          bootstrapInitialData(initialData) {
+            if (!Array.isArray(initialData) || !initialData.length) {
+              return;
+            }
+            this.ingestRowData(initialData, { reconcileConfigurations: false });
+          },
+          async loadPurchaseOrders() {
+            this.isLoadingData = true;
+            this.dataFetchError = "";
+            try {
+              const response = await fetch(DATA_ENDPOINT, {
+                credentials: "same-origin",
+                cache: "no-store",
+              });
+              if (!response.ok) {
+                throw new Error(
+                  `Failed to load purchase orders (status ${response.status})`
+                );
+              }
+              const payload = await response.json();
+              if (payload && !Array.isArray(payload) && typeof payload.error === "string") {
+                throw new Error(payload.error);
+              }
+              this.ingestRowData(payload, { reconcileConfigurations: true });
+            } catch (error) {
+              console.error("Failed to load purchase orders", error);
+              const message =
+                (error && typeof error.message === "string" && error.message) ||
+                "Failed to load purchase orders.";
+              this.dataFetchError = message;
+            } finally {
+              this.isLoadingData = false;
+            }
+          },
+          async refreshData() {
+            if (this.isLoadingData) {
+              return;
+            }
+            await this.loadPurchaseOrders();
+          },
+          ingestRowData(data, options = {}) {
+            const safeData = Array.isArray(data) ? data : [];
+            this.rowData = safeData;
+            this.setGridRowData(safeData);
+            if (safeData.length) {
+              const columns = this.extractColumns(safeData);
+              this.updateColumnsFromData(columns);
+            }
+            if (options.reconcileConfigurations) {
+              this.reconcileSavedConfigurations();
+            }
+          },
+          setGridRowData(data) {
+            if (!this.gridApi) {
+              if (this.gridOptions) {
+                this.gridOptions.rowData = data;
+              }
+              return;
+            }
+            if (typeof this.gridApi.setGridOption === "function") {
+              this.gridApi.setGridOption("rowData", data);
+            } else if (typeof this.gridApi.setRowData === "function") {
+              this.gridApi.setRowData(data);
+            } else if (this.gridOptions?.api?.setRowData) {
+              this.gridOptions.api.setRowData(data);
+            }
+          },
+          updateColumnsFromData(columns) {
+            if (!Array.isArray(columns) || !columns.length) {
+              return;
+            }
+            const previousColumns = Array.isArray(this.allColumns) ? this.allColumns : [];
+            const wasEmpty = previousColumns.length === 0;
+            const merged = wasEmpty
+              ? [...columns]
+              : Array.from(new Set([...previousColumns, ...columns]));
+            const columnsChanged =
+              merged.length !== previousColumns.length ||
+              merged.some((column, index) => column !== previousColumns[index]);
+            if (columnsChanged) {
+              this.allColumns = merged;
+            }
+            if (wasEmpty || !this.selectedColumns.length) {
+              this.selectedColumns = [...merged];
+            } else {
+              const filteredSelected = this.selectedColumns.filter((column) =>
+                merged.includes(column)
+              );
+              if (filteredSelected.length !== this.selectedColumns.length) {
+                this.selectedColumns = filteredSelected;
+              }
+            }
+            if (columnsChanged && this.gridApi) {
+              this.applyColumnDefinitions();
+            }
+          },
+          reconcileSavedConfigurations() {
+            if (!this.savedConfigurations.length) {
+              return;
+            }
+            const activeId = this.selectedConfigId ? String(this.selectedConfigId) : "";
+            const normalized = this.savedConfigurations
+              .map((config) => this.normalizeConfiguration(config))
+              .filter((config) => config !== null);
+            normalized.sort((a, b) => a.name.localeCompare(b.name));
+            this.savedConfigurations = normalized;
+            if (activeId) {
+              const activeConfig = normalized.find(
+                (item) => String(item.id) === activeId
+              );
+              if (activeConfig) {
+                this.applyConfiguration(activeConfig);
+              } else {
+                this.selectedConfigId = "";
+              }
+            }
+          },
+          openModal() {
+            this.isModalOpen = true;
+          },
+          closeModal() {
+            this.isModalOpen = false;
+          },
+          resetColumns() {
+            this.selectedColumns = [...this.allColumns];
+            if (this.gridApi && typeof this.gridApi.setFilterModel === "function") {
+              this.gridApi.setFilterModel({});
+            }
+            if (this.gridApi && typeof this.gridApi.applyColumnState === "function") {
+              this.gridApi.applyColumnState({
+                defaultState: { sort: null },
+                state: [],
+              });
+            }
+            if (this.gridApi && typeof this.gridApi.refreshHeader === "function") {
+              this.gridApi.refreshHeader();
+            }
+            this.pendingFilterModel = null;
+            this.selectedConfigId = "";
+            this.columnLabels = {};
+            this.activeFilterModel = {};
+            this.activeSortModel = [];
+            this.pendingSortModel = null;
+          },
+          async fetchConfigurations() {
+            try {
+              const response = await fetch("/purchase-orders/configurations/", {
+                credentials: "same-origin",
+              });
+              if (!response.ok) {
+                throw new Error(`Failed to load configurations (status ${response.status})`);
+              }
+              const configs = await response.json();
+              const normalized = Array.isArray(configs)
+                ? configs
+                    .map((config) => this.normalizeConfiguration(config))
+                    .filter((config) => config !== null)
+                : [];
+              normalized.sort((a, b) => a.name.localeCompare(b.name));
+              this.savedConfigurations = normalized;
+              this.reconcileSavedConfigurations();
+            } catch (error) {
+              console.error("Failed to load configurations", error);
+            }
+          },
+          normalizeConfiguration(raw) {
+            if (!raw || typeof raw !== "object") {
+              return null;
+            }
+            const numericId = Number(raw.id);
+            if (!Number.isFinite(numericId)) {
+              return null;
+            }
+            const name = typeof raw.name === "string" ? raw.name.trim() : "";
+            if (!name) {
+              return null;
+            }
+            const knownColumns = Array.isArray(this.allColumns) ? this.allColumns : [];
+            const hasKnownColumns = knownColumns.length > 0;
+            const allowedColumns = hasKnownColumns ? new Set(knownColumns) : null;
+            let columns = Array.isArray(raw.columns) ? [...raw.columns] : [];
+            if (hasKnownColumns && allowedColumns) {
+              columns = columns.filter((column) => allowedColumns.has(column));
+            }
+            if (!columns.length) {
+              columns = hasKnownColumns ? [...knownColumns] : Array.isArray(raw.columns) ? [...raw.columns] : [];
+            }
+            const filters = this.sanitizeFilterModel(
+              raw.filters || {},
+              hasKnownColumns ? knownColumns : null
+            );
+            const sortModel = this.sanitizeSortModel(
+              raw.sortModel || [],
+              hasKnownColumns ? knownColumns : null
+            );
+            let columnLabels = {};
+            if (raw.columnLabels && typeof raw.columnLabels === "object") {
+              const entries = Object.entries(raw.columnLabels);
+              if (hasKnownColumns && allowedColumns) {
+                columnLabels = Object.fromEntries(
+                  entries.filter(([field]) => allowedColumns.has(field))
+                );
+              } else {
+                columnLabels = Object.fromEntries(entries);
+              }
+            }
+            return {
+              id: numericId,
+              name,
+              columns,
+              columnLabels,
+              filters,
+              sortModel,
+            };
+          },
+          sanitizeFilterModel(rawFilters, allowedColumns = null) {
+            if (!rawFilters || typeof rawFilters !== "object") {
+              return {};
+            }
+            const resolvedAllowed = Array.isArray(allowedColumns)
+              ? allowedColumns
+              : Array.isArray(this.allColumns)
+              ? this.allColumns
+              : [];
+            const hasAllowed = Array.isArray(resolvedAllowed) && resolvedAllowed.length > 0;
+            const allowedSet = hasAllowed ? new Set(resolvedAllowed) : null;
+            const safeFilters = {};
+            Object.entries(rawFilters).forEach(([field, state]) => {
+              if (hasAllowed && allowedSet && !allowedSet.has(field)) {
+                return;
+              }
+              if (state && typeof state === "object") {
+                safeFilters[field] = JSON.parse(JSON.stringify(state));
+              }
+            });
+            return safeFilters;
+          },
+          sanitizeSortModel(rawSortModel, allowedColumns = null) {
+            if (!Array.isArray(rawSortModel)) {
+              return [];
+            }
+            const resolvedAllowed = Array.isArray(allowedColumns)
+              ? allowedColumns
+              : Array.isArray(this.allColumns)
+              ? this.allColumns
+              : [];
+            const hasAllowed = Array.isArray(resolvedAllowed) && resolvedAllowed.length > 0;
+            const allowedSet = hasAllowed ? new Set(resolvedAllowed) : null;
+            const sanitized = rawSortModel
+              .map((entry, index) => {
+                if (!entry || typeof entry !== "object") {
+                  return null;
+                }
+                const colId = typeof entry.colId === "string" ? entry.colId : entry.field || null;
+                const sort = entry.sort === "asc" || entry.sort === "desc" ? entry.sort : null;
+                let sortIndex = null;
+                if (Number.isFinite(entry.sortIndex)) {
+                  sortIndex = entry.sortIndex;
+                } else if (Number.isFinite(entry.sortOrder)) {
+                  sortIndex = entry.sortOrder;
+                }
+                if (!colId || !sort || (hasAllowed && allowedSet && !allowedSet.has(colId))) {
+                  return null;
+                }
+                return {
+                  colId,
+                  sort,
+                  sortIndex: Number.isFinite(sortIndex) ? sortIndex : null,
+                };
+              })
+              .filter((item) => item !== null);
+            const uniqueByColumn = new Map();
+            sanitized.forEach((entry) => {
+              if (!uniqueByColumn.has(entry.colId)) {
+                uniqueByColumn.set(entry.colId, entry);
+              }
+            });
+            const deduped = Array.from(uniqueByColumn.values());
+            deduped.sort((a, b) => {
+              const indexA = Number.isFinite(a.sortIndex) ? a.sortIndex : Number.MAX_SAFE_INTEGER;
+              const indexB = Number.isFinite(b.sortIndex) ? b.sortIndex : Number.MAX_SAFE_INTEGER;
+              if (indexA !== indexB) {
+                return indexA - indexB;
+              }
+              return a.colId.localeCompare(b.colId);
+            });
+            return deduped;
+          },
+          collectCurrentFilters() {
+            if (this.gridApi && typeof this.gridApi.getFilterModel === "function") {
+              const rawModel = this.gridApi.getFilterModel() || {};
+              const sanitized = this.sanitizeFilterModel(rawModel, this.allColumns);
+              this.activeFilterModel = sanitized;
+              return sanitized;
+            }
+            return {};
+          },
+          collectCurrentSortModel() {
+            if (!this.gridApi || typeof this.gridApi.getColumnState !== "function") {
+              this.activeSortModel = [];
+              return [];
+            }
+            const columnState = this.gridApi.getColumnState() || [];
+            const rawSortModel = Array.isArray(columnState)
+              ? columnState
+                  .filter(
+                    (state) =>
+                      state && typeof state === "object" && (state.sort === "asc" || state.sort === "desc")
+                  )
+                  .map((state) => ({
+                    colId: state.colId,
+                    sort: state.sort,
+                    sortIndex: Number.isFinite(state.sortIndex) ? state.sortIndex : null,
+                  }))
+              : [];
+            const sanitized = this.sanitizeSortModel(rawSortModel);
+            const normalized = sanitized.map((entry, index) => ({
+              colId: entry.colId,
+              sort: entry.sort,
+              sortIndex: Number.isFinite(entry.sortIndex) ? entry.sortIndex : index,
+            }));
+            this.activeSortModel = normalized;
+            return normalized;
+          },
+          applyPendingFilters() {
+            if (!this.pendingFilterModel) {
+              return;
+            }
+            if (!this.gridApi || typeof this.gridApi.setFilterModel !== "function") {
+              return;
+            }
+            const sanitized = this.sanitizeFilterModel(
+              this.pendingFilterModel,
+              this.allColumns
+            );
+            this.gridApi.setFilterModel(sanitized);
+            this.pendingFilterModel = null;
+            this.activeFilterModel = sanitized;
+          },
+          applyPendingSortModel() {
+            if (!this.pendingSortModel) {
+              return;
+            }
+            if (!this.gridApi || typeof this.gridApi.applyColumnState !== "function") {
+              return;
+            }
+            const sanitized = this.sanitizeSortModel(this.pendingSortModel);
+            const state = sanitized.map((entry, index) => ({
+              colId: entry.colId,
+              sort: entry.sort,
+              sortIndex: Number.isFinite(entry.sortIndex) ? entry.sortIndex : index,
+            }));
+            this.gridApi.applyColumnState({
+              defaultState: { sort: null },
+              state,
+            });
+            this.pendingSortModel = null;
+            this.activeSortModel = sanitized.map((entry, index) => ({
+              colId: entry.colId,
+              sort: entry.sort,
+              sortIndex: Number.isFinite(entry.sortIndex) ? entry.sortIndex : index,
+            }));
+            if (typeof this.gridApi.refreshHeader === "function") {
+              this.gridApi.refreshHeader();
+            }
+          },
+          async saveConfiguration() {
+            const trimmedName = this.newConfigName.trim();
+            if (!trimmedName || !this.gridApi) {
+              return;
+            }
+            const sortModel = this.collectCurrentSortModel();
+            const payload = {
+              name: trimmedName,
+              columns: [...this.selectedColumns],
+              filters: this.sanitizeFilterModel(
+                this.collectCurrentFilters(),
+                this.allColumns
+              ),
+              columnLabels: this.collectColumnLabels(),
+              sortModel,
+            };
+            this.isSavingConfig = true;
+            try {
+              const response = await fetch("/purchase-orders/configurations/", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "same-origin",
+                body: JSON.stringify(payload),
+              });
+              if (!response.ok) {
+                throw new Error(`Failed to save configuration (status ${response.status})`);
+              }
+              const saved = await response.json();
+              const normalized = this.upsertConfiguration(saved);
+              if (normalized) {
+                this.applyConfiguration(normalized);
+              }
+              this.newConfigName = "";
+            } catch (error) {
+              console.error("Failed to save configuration", error);
+            } finally {
+              this.isSavingConfig = false;
+            }
+          },
+          applyConfiguration(config) {
+            const normalized = this.normalizeConfiguration(config);
+            if (!normalized) {
+              return;
+            }
+            this.selectedConfigId = String(normalized.id);
+            this.selectedColumns = [...normalized.columns];
+            this.columnLabels = { ...normalized.columnLabels };
+            this.pendingFilterModel = normalized.filters;
+            this.pendingSortModel = normalized.sortModel
+              ? normalized.sortModel.map((entry) => ({ ...entry }))
+              : [];
+            this.$nextTick(() => {
+              this.applyPendingFilters();
+              this.applyPendingSortModel();
+            });
+          },
+          onConfigurationSelect() {
+            if (!this.selectedConfigId) {
+              return;
+            }
+            const config = this.savedConfigurations.find(
+              (item) => String(item.id) === String(this.selectedConfigId)
+            );
+            if (config) {
+              this.applyConfiguration(config);
+            }
+          },
+          clearSelectedConfiguration() {
+            this.selectedConfigId = "";
+            this.deleteTargetConfig = null;
+            this.resetColumns();
+          },
+          upsertConfiguration(config) {
+            const normalized = this.normalizeConfiguration(config);
+            if (!normalized) {
+              return null;
+            }
+            const index = this.savedConfigurations.findIndex(
+              (item) => item.id === normalized.id
+            );
+            if (index >= 0) {
+              this.savedConfigurations.splice(index, 1, normalized);
+            } else {
+              this.savedConfigurations.push(normalized);
+              this.savedConfigurations.sort((a, b) => a.name.localeCompare(b.name));
+            }
+            return normalized;
+          },
+          confirmDeleteConfiguration() {
+            if (!this.selectedConfigId) {
+              return;
+            }
+            const config = this.savedConfigurations.find(
+              (item) => String(item.id) === String(this.selectedConfigId)
+            );
+            if (!config) {
+              return;
+            }
+            this.deleteTargetConfig = config;
+            this.showDeleteModal = true;
+          },
+          closeDeleteModal() {
+            this.showDeleteModal = false;
+            this.deleteTargetConfig = null;
+          },
+          async deleteConfiguration() {
+            if (!this.deleteTargetConfig) {
+              return;
+            }
+            const configId = this.deleteTargetConfig.id;
+            try {
+              const response = await fetch(
+                `/purchase-orders/configurations/${configId}/`,
+                {
+                  method: "DELETE",
+                  credentials: "same-origin",
+                }
+              );
+              if (!response.ok) {
+                throw new Error(`Failed to delete configuration (status ${response.status})`);
+              }
+              this.savedConfigurations = this.savedConfigurations.filter(
+                (item) => item.id !== configId
+              );
+              if (String(this.selectedConfigId) === String(configId)) {
+                this.resetColumns();
+              }
+            } catch (error) {
+              console.error("Failed to delete configuration", error);
+            } finally {
+              this.closeDeleteModal();
+            }
+          },
+          exportAsCsv() {
+            if (!this.gridApi || typeof this.gridApi.exportDataAsCsv !== "function") {
+              console.error("CSV export is unavailable without a grid instance.");
+              return;
+            }
+            this.gridApi.exportDataAsCsv({
+              columnKeys: [...this.selectedColumns],
+              columnSeparator: ";",
+              fileName: "purchase_orders.csv",
+              suppressQuotes: true,
+              processCellCallback: (params) => {
+                const value = params.value;
+                return value === null || value === undefined ? "" : String(value);
+              },
+              processHeaderCallback: (params) => {
+                const field = params.column?.getColId();
+                if (!field) {
+                  return params.column?.getColDef()?.headerName ?? "";
+                }
+                return this.columnLabels[field] || this.formatHeader(field);
+              },
+            });
+          },
+          exportAsXlsx() {
+            if (typeof XLSX === "undefined") {
+              console.error("XLSX export requires the SheetJS library.");
+              return;
+            }
+            const rows = this.collectRowsForExport();
+            const headers = this.selectedColumns.map((column) =>
+              this.columnLabels[column] || this.formatHeader(column)
+            );
+            const worksheetData = [headers, ...rows];
+            const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "Purchase Orders");
+            XLSX.writeFile(workbook, "purchase_orders.xlsx", { bookType: "xlsx" });
+          },
+          collectRowsForExport() {
+            if (!this.gridApi) {
+              return [];
+            }
+            const columnKeys = [...this.selectedColumns];
+            const rows = [];
+            this.gridApi.forEachNodeAfterFilterAndSort((node) => {
+              if (!node || !node.data) {
+                rows.push(new Array(columnKeys.length).fill(""));
+                return;
+              }
+              const row = columnKeys.map((column) => {
+                const value = node.data[column];
+                return value === null || value === undefined ? "" : value;
+              });
+              rows.push(row);
+            });
+            return rows;
+          },
+          buildEditableHeader() {
+            const vm = this;
+            function EditableHeader() {}
+
+            EditableHeader.prototype.init = function init(params) {
+              this.params = params;
+              this.field = params.column.getColId();
+              this.label = vm.columnLabels[this.field] || vm.formatHeader(this.field);
+              this.eGui = document.createElement("div");
+              this.eGui.className = "editable-header-cell";
+              this.eGui.title = "Double-click to rename";
+              this.eGui.innerHTML = `
+                <span class="editable-header-text"></span>
+                <span class="header-sort-icons">
+                  <span class="sort-icon sort-icon-asc" aria-hidden="true">▲</span>
+                  <span class="sort-icon sort-icon-desc" aria-hidden="true">▼</span>
+                </span>
+              `;
+              this.textEl = this.eGui.querySelector(".editable-header-text");
+              if (this.textEl) {
+                this.textEl.textContent = this.label;
+              }
+              this.iconsContainer = this.eGui.querySelector(".header-sort-icons");
+              this.ascIcon = this.eGui.querySelector(".sort-icon-asc");
+              this.descIcon = this.eGui.querySelector(".sort-icon-desc");
+              this.inputEl = document.createElement("input");
+              this.inputEl.type = "text";
+              this.inputEl.className = "editable-header-input";
+              this.inputEl.value = this.label;
+              this.inputEl.setAttribute("maxlength", "120");
+              this.inputEl.style.display = "none";
+              this.eGui.appendChild(this.inputEl);
+
+              this.editing = false;
+              this.clickTimeout = null;
+
+              this.updateSortIndicators = () => {
+                const sort = this.params.column.getSort();
+                if (!this.ascIcon || !this.descIcon) {
+                  return;
+                }
+                if (sort === "asc") {
+                  this.ascIcon.style.visibility = "visible";
+                  this.descIcon.style.visibility = "hidden";
+                  this.ascIcon.classList.add("bold");
+                  this.descIcon.classList.remove("bold");
+                } else if (sort === "desc") {
+                  this.ascIcon.style.visibility = "hidden";
+                  this.descIcon.style.visibility = "visible";
+                  this.descIcon.classList.add("bold");
+                  this.ascIcon.classList.remove("bold");
+                } else {
+                  this.ascIcon.style.visibility = "visible";
+                  this.descIcon.style.visibility = "visible";
+                  this.ascIcon.classList.remove("bold");
+                  this.descIcon.classList.remove("bold");
+                }
+              };
+
+              this.applySortCycle = () => {
+                const column = this.params.column;
+                const api = this.params.api;
+                if (!column || !api) {
+                  return;
+                }
+                const currentSort = column.getSort();
+                let nextSort;
+                if (currentSort === "asc") {
+                  nextSort = "desc";
+                } else if (currentSort === "desc") {
+                  nextSort = null;
+                } else {
+                  nextSort = "asc";
+                }
+                const state = nextSort
+                  ? [
+                      {
+                        colId: column.getColId(),
+                        sort: nextSort,
+                        sortIndex: 0,
+                      },
+                    ]
+                  : [];
+                api.applyColumnState({
+                  defaultState: { sort: null },
+                  state,
+                });
+                this.updateSortIndicators();
+                vm.updateActiveSortModel();
+              };
+
+              this.startEditing = (event) => {
+                if (event) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }
+                if (this.editing || !this.inputEl) {
+                  return;
+                }
+                this.editing = true;
+                if (this.textEl) {
+                  this.textEl.style.display = "none";
+                }
+                this.inputEl.style.display = "inline-block";
+                this.inputEl.value = vm.columnLabels[this.field] || vm.formatHeader(this.field);
+                window.setTimeout(() => {
+                  this.inputEl?.focus();
+                  this.inputEl?.select();
+                }, 0);
+              };
+
+              this.finishEditing = () => {
+                if (!this.inputEl) {
+                  return;
+                }
+                this.editing = false;
+                this.inputEl.style.display = "none";
+                if (this.textEl) {
+                  this.textEl.style.display = "";
+                }
+              };
+
+              this.commitEdit = () => {
+                if (!this.editing) {
+                  return;
+                }
+                const value = this.inputEl ? this.inputEl.value : "";
+                this.finishEditing();
+                const displayLabel = vm.updateColumnLabel(this.field, value);
+                this.label = displayLabel;
+                if (this.textEl) {
+                  this.textEl.textContent = this.label;
+                }
+                if (this.inputEl) {
+                  this.inputEl.value = this.label;
+                }
+              };
+
+              this.cancelEdit = () => {
+                if (!this.editing) {
+                  return;
+                }
+                this.finishEditing();
+                if (this.inputEl) {
+                  this.inputEl.value = this.label;
+                }
+              };
+
+              this.onDoubleClick = (event) => {
+                if (this.clickTimeout) {
+                  window.clearTimeout(this.clickTimeout);
+                  this.clickTimeout = null;
+                }
+                this.startEditing(event);
+              };
+              this.onClick = (event) => {
+                if (this.editing) {
+                  return;
+                }
+                if (this.clickTimeout) {
+                  window.clearTimeout(this.clickTimeout);
+                  this.clickTimeout = null;
+                }
+                this.clickTimeout = window.setTimeout(() => {
+                  this.applySortCycle();
+                  this.clickTimeout = null;
+                }, 250);
+              };
+              this.onInputKeyDown = (event) => {
+                event.stopPropagation();
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  this.commitEdit();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  this.cancelEdit();
+                }
+              };
+              this.onInputBlur = () => {
+                this.commitEdit();
+              };
+
+              this.eGui.addEventListener("click", this.onClick);
+              this.eGui.addEventListener("dblclick", this.onDoubleClick);
+              if (this.inputEl) {
+                this.inputEl.addEventListener("keydown", this.onInputKeyDown);
+                this.inputEl.addEventListener("blur", this.onInputBlur);
+              }
+              this.updateSortIndicators();
+            };
+
+            EditableHeader.prototype.getGui = function getGui() {
+              return this.eGui;
+            };
+
+            EditableHeader.prototype.refresh = function refresh(params) {
+              this.field = params.column.getColId();
+              this.label = vm.columnLabels[this.field] || vm.formatHeader(this.field);
+              if (this.textEl) {
+                this.textEl.textContent = this.label;
+              }
+              if (this.inputEl && !this.editing) {
+                this.inputEl.value = this.label;
+              }
+              if (typeof this.updateSortIndicators === "function") {
+                this.updateSortIndicators();
+              }
+              return true;
+            };
+
+            EditableHeader.prototype.destroy = function destroy() {
+              if (this.eGui && this.onDoubleClick) {
+                this.eGui.removeEventListener("dblclick", this.onDoubleClick);
+              }
+              if (this.eGui && this.onClick) {
+                this.eGui.removeEventListener("click", this.onClick);
+              }
+              if (this.inputEl) {
+                if (this.onInputKeyDown) {
+                  this.inputEl.removeEventListener("keydown", this.onInputKeyDown);
+                }
+                if (this.onInputBlur) {
+                  this.inputEl.removeEventListener("blur", this.onInputBlur);
+                }
+              }
+              if (this.clickTimeout) {
+                window.clearTimeout(this.clickTimeout);
+                this.clickTimeout = null;
+              }
+              this.eGui = null;
+              this.textEl = null;
+              this.params = null;
+              this.onDoubleClick = null;
+              this.onClick = null;
+              this.inputEl = null;
+              this.onInputKeyDown = null;
+              this.onInputBlur = null;
+              this.updateSortIndicators = null;
+              this.applySortCycle = null;
+              this.iconsContainer = null;
+              this.ascIcon = null;
+              this.descIcon = null;
+            };
+
+            return EditableHeader;
+          },
+          updateColumnLabel(field, value) {
+            if (!field || !this.selectedColumns.includes(field)) {
+              return this.formatHeader(field);
+            }
+            const fallback = this.formatHeader(field);
+            const previous = this.columnLabels[field] ?? "";
+            const raw = typeof value === "string" ? value : "";
+            const trimmed = raw.trim();
+            const nextStored = trimmed && trimmed !== fallback ? trimmed : "";
+            if (nextStored) {
+              this.columnLabels[field] = nextStored;
+            } else {
+              delete this.columnLabels[field];
+            }
+            if ((previous || "") !== nextStored) {
+              this.refreshColumnHeader(field);
+              this.selectedConfigId = "";
+            }
+            return this.columnLabels[field] || fallback;
+          },
+          refreshColumnHeader(field) {
+            if (!this.gridApi) {
+              return;
+            }
+            const column = this.gridApi.getColumn(field);
+            if (!column) {
+              this.applyColumnDefinitions();
+              return;
+            }
+            const colDef = column.getColDef();
+            colDef.headerName = this.columnLabels[field] || this.formatHeader(field);
+            if (typeof this.gridApi.refreshHeader === "function") {
+              this.gridApi.refreshHeader();
+            }
+          },
+          updateActiveFilters() {
+            if (!this.gridApi || typeof this.gridApi.getFilterModel !== "function") {
+              this.activeFilterModel = {};
+              return;
+            }
+            const rawModel = this.gridApi.getFilterModel() || {};
+            this.activeFilterModel = this.sanitizeFilterModel(rawModel, this.allColumns);
+          },
+          updateActiveSortModel() {
+            this.collectCurrentSortModel();
+          },
+          extractColumns(data) {
+            if (!Array.isArray(data) || !data.length) {
+              return [];
+            }
+            return Object.keys(data[0]);
+          },
+          collectColumnLabels() {
+            const labels = {};
+            Object.entries(this.columnLabels).forEach(([field, label]) => {
+              if (!this.allColumns.includes(field)) {
+                return;
+              }
+              if (label && typeof label === "string" && label.trim()) {
+                labels[field] = label.trim();
+              }
+            });
+            return labels;
+          },
+          formatHeader(key) {
+            return key
+              .split("_")
+              .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+              .join(" ");
+          },
+          buildGridOptions() {
+            const vm = this;
+            return {
+              columnDefs: vm.columnDefs,
+              rowData: vm.rowData,
+              components: {
+                advancedTextFilter: AdvancedTextFilter,
+                advancedFloatingFilter: AdvancedFloatingFilter,
+                editableHeader: vm.buildEditableHeader(),
+              },
+              defaultColDef: {
+                sortable: true,
+                resizable: true,
+                filter: "advancedTextFilter",
+                floatingFilter: true,
+                suppressMenu: true,
+                suppressHeaderMenuButton: true,
+                floatingFilterComponent: "advancedFloatingFilter",
+                filterParams: {
+                  buttons: [],
+                  closeOnApply: true,
+                },
+                floatingFilterComponentParams: {
+                  suppressFilterButton: true,
+                },
+              },
+              onGridReady(params) {
+                vm.gridApi = params.api;
+                vm.setGridRowData(vm.rowData);
+                vm.applyColumnDefinitions();
+                vm.updateActiveFilters();
+              },
+              onFilterChanged() {
+                vm.updateActiveFilters();
+              },
+              onSortChanged() {
+                if (vm.gridApi && typeof vm.gridApi.refreshHeader === "function") {
+                  vm.gridApi.refreshHeader();
+                }
+                vm.updateActiveSortModel();
+              },
+            };
+          },
+          applyColumnDefinitions() {
+            if (!this.gridApi) {
+              return;
+            }
+            const defs = this.columnDefs;
+            if (typeof this.gridApi.setGridOption === "function") {
+              this.gridApi.setGridOption("columnDefs", defs);
+            } else if (typeof this.gridApi.setColumnDefs === "function") {
+              this.gridApi.setColumnDefs(defs);
+            } else if (this.gridOptions?.api?.setColumnDefs) {
+              this.gridOptions.api.setColumnDefs(defs);
+            }
+            if (this.gridApi && typeof this.gridApi.refreshHeader === "function") {
+              this.gridApi.refreshHeader();
+            }
+            this.applyPendingFilters();
+            this.applyPendingSortModel();
+            if (!this.pendingFilterModel) {
+              this.updateActiveFilters();
+            }
+            if (!this.pendingSortModel) {
+              this.updateActiveSortModel();
+            }
+          },
+          onEscapeKey(event) {
+            if (event.key === "Escape" && this.isModalOpen) {
+              this.closeModal();
+            }
+          },
+          initializeSortables() {
+            if (typeof Sortable === "undefined") {
+              return;
+            }
+            const available = this.$refs.availableList;
+            const selected = this.$refs.selectedList;
+            const vm = this;
+
+            if (available) {
+              if (this.availableSortable) {
+                this.availableSortable.destroy();
+              }
+              this.availableSortable = new Sortable(available, {
+                group: { name: "purchase-columns", pull: true, put: true },
+                animation: 150,
+                sort: false,
+                onAdd() {
+                  vm.syncFromDom();
+                },
+                onRemove() {
+                  vm.syncFromDom();
+                },
+                onEnd() {
+                  vm.syncFromDom();
+                },
+                onUpdate() {
+                  vm.syncFromDom();
+                },
+              });
+            }
+
+            if (selected) {
+              if (this.selectedSortable) {
+                this.selectedSortable.destroy();
+              }
+              this.selectedSortable = new Sortable(selected, {
+                group: { name: "purchase-columns", pull: true, put: true },
+                animation: 150,
+                sort: true,
+                onAdd() {
+                  vm.syncFromDom();
+                },
+                onRemove() {
+                  vm.syncFromDom();
+                },
+                onEnd() {
+                  vm.syncFromDom();
+                },
+                onUpdate() {
+                  vm.syncFromDom();
+                },
+              });
+            }
+          },
+          destroySortables() {
+            if (this.availableSortable) {
+              this.availableSortable.destroy();
+              this.availableSortable = null;
+            }
+            if (this.selectedSortable) {
+              this.selectedSortable.destroy();
+              this.selectedSortable = null;
+            }
+          },
+          syncFromDom() {
+            this.$nextTick(() => {
+              const selectedEls = this.$refs.selectedList
+                ? Array.from(this.$refs.selectedList.querySelectorAll("[data-column]"))
+                : [];
+
+              const validColumns = new Set(this.allColumns);
+              const selected = [];
+              const seen = new Set();
+
+              selectedEls.forEach((el) => {
+                const col = el.getAttribute("data-column");
+                if (col && validColumns.has(col) && !seen.has(col)) {
+                  seen.add(col);
+                  selected.push(col);
+                }
+              });
+
+              this.selectedColumns = selected;
+              this.selectedConfigId = "";
+            });
+          }
+        },
+        template: `
+          <section>
+            <div id="controls">
+              <div class="view-controls">
+                <div class="control-group">
+                  <label class="sr-only" for="saved-configurations">Saved views</label>
+                  <div class="select-wrapper">
+                    <select
+                      id="saved-configurations"
+                      v-model="selectedConfigId"
+                      @change="onConfigurationSelect"
+                    >
+                      <option
+                        v-for="config in savedConfigurations"
+                        :key="config.id"
+                        :value="String(config.id)"
+                        v-text="config.name"
+                      ></option>
+                    </select>
+                    <span
+                      class="select-placeholder"
+                      v-if="!selectedConfigId"
+                    >
+                      Select saved view...
+                    </span>
+                  </div>
+                  <button
+                    v-if="selectedConfigId"
+                    type="button"
+                    class="secondary"
+                    @click="clearSelectedConfiguration"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    v-if="selectedConfigId"
+                    type="button"
+                    class="danger"
+                    @click="confirmDeleteConfiguration"
+                  >
+                    Delete
+                  </button>
+                </div>
+                <div class="control-group save-group">
+                  <input
+                    type="text"
+                    v-model="newConfigName"
+                    placeholder="Name current view"
+                    aria-label="Configuration name"
+                  />
+                  <button
+                    type="button"
+                    @click="saveConfiguration"
+                    :disabled="!canSaveConfiguration"
+                  >
+                    <span v-if="isSavingConfig">Saving...</span>
+                    <span v-else>Save View</span>
+                  </button>
+                </div>
+              </div>
+              <div class="actions-group">
+                <div class="export-buttons">
+                  <button
+                    type="button"
+                    class="secondary"
+                    aria-label="Refresh purchase order data"
+                    @click="refreshData"
+                    :disabled="isLoadingData"
+                  >
+                    <span v-if="isLoadingData">Refreshing...</span>
+                    <span v-else>Refresh</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Export current view as XLSX"
+                    @click="exportAsXlsx"
+                  >
+                    XLSX
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary"
+                    aria-label="Export current view as CSV"
+                    @click="exportAsCsv"
+                  >
+                    CSV
+                  </button>
+                </div>
+                <button type="button" class="configure-button" @click="openModal">Configure Columns</button>
+              </div>
+            </div>
+            <div
+              v-if="hiddenFilteredColumns.length"
+              class="hidden-filter-banner"
+            >
+              Hidden columns filtered:
+              <span v-text="hiddenFilteredColumns.join(', ')"></span>
+            </div>
+            <div
+              v-if="isModalOpen"
+              class="modal-overlay"
+              @click.self="closeModal"
+            >
+              <div class="modal" role="dialog" aria-modal="true">
+                <header>
+                  <h2 class="modal-title">Column Selection</h2>
+                  <button type="button" aria-label="Close" @click="closeModal">&times;</button>
+                </header>
+                <div class="modal-body">
+                  <div class="column-manager">
+                    <h2>Available Columns</h2>
+                    <div class="column-list">
+                      <ul ref="availableList">
+                        <li
+                          v-for="column in sortedAvailableColumns"
+                          :key="'available-' + column"
+                          class="column-item"
+                          :data-column="column"
+                        >
+                          <span v-text="formatHeader(column)"></span>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div class="column-manager">
+                    <h2>Selected Columns</h2>
+                    <div class="column-list">
+                      <ul ref="selectedList">
+                        <li
+                          v-for="column in selectedColumns"
+                          :key="'selected-' + column"
+                          class="column-item"
+                          :data-column="column"
+                        >
+                          <span v-text="formatHeader(column)"></span>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="secondary" @click="resetColumns">Reset</button>
+                  <button type="button" @click="closeModal">Done</button>
+                </div>
+              </div>
+            </div>
+            <div
+              v-if="isLoadingData"
+              class="data-status-banner loading-banner"
+              role="status"
+            >
+              Loading purchase orders…
+            </div>
+            <div
+              v-if="dataFetchError"
+              class="data-status-banner error-banner"
+              role="alert"
+              v-text="dataFetchError"
+            ></div>
+            <div
+              id="grid-wrapper"
+              class="ag-theme-alpine"
+              ref="gridContainer"
+            ></div>
+            <div
+              v-if="showDeleteModal"
+              class="modal-overlay"
+              @click.self="closeDeleteModal"
+            >
+              <div class="modal" role="dialog" aria-modal="true">
+                <header>
+                  <h2 class="modal-title">Delete View</h2>
+                  <button type="button" aria-label="Close" @click="closeDeleteModal">&times;</button>
+                </header>
+                <div class="modal-body">
+                  <p>
+                    Are you sure you want to delete the view
+                    <strong v-text="deleteTargetConfig?.name"></strong>?
+                  </p>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="secondary" @click="closeDeleteModal">Cancel</button>
+                  <button type="button" class="danger" @click="deleteConfiguration">Delete</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        `,
+      }).mount("#app");
+    </script>
+  </body>
+</html>
