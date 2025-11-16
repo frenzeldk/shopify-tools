@@ -224,4 +224,4 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
-    serve(app, host="0.0.0.0", port=8000, url_scheme='https')
+    serve(app, host="0.0.0.0", port=int(os.getenv("WAITRESS_PORT", 8000)), url_scheme='https')
