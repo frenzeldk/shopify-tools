@@ -336,6 +336,19 @@ h1 {
   user-select: text;
 }
 
+/* Visual vertical dividers between columns */
+.ag-theme-alpine .ag-cell,
+.ag-theme-alpine .ag-header-cell,
+.ag-theme-alpine .ag-header-group-cell {
+  border-right: 1px solid #d5dbe7;
+}
+
+.ag-theme-alpine .ag-row .ag-cell:last-child,
+.ag-theme-alpine .ag-header-row .ag-header-cell:last-child,
+.ag-theme-alpine .ag-header-row .ag-header-group-cell:last-child {
+  border-right: none;
+}
+
 .advanced-filter-placeholder {
   padding: 0.75rem;
   font-size: 0.9rem;
