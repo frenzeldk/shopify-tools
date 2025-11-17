@@ -70,17 +70,16 @@ def fetch_missing_inventory():
                         available += q["quantity"] or 0
                     elif q["name"] == "incoming":
                         incoming += q["quantity"] or 0
-            # Define your threshold for "missing" (e.g., less than 1 in stock after incoming)
+            # Define your threshold for "missing" (e.g., less than 0 in stock after incoming)
             total = available + incoming
             if total < 0:
                 missing.append({
-                    "variant_id": node["id"],
                     "sku": node["sku"],
                     "title": node["title"],
                     "barcode": node["barcode"],
                     "product_title": node["product"]["title"],
                     "product_vendor": node["product"]["vendor"],
-                    "missing_qty": 0 - total  # Order enough to reach 1 in stock
+                    "missing_qty": 0 - total  # Order enough to reach 0 in stock
                 })
         page_info = result["productVariants"]["pageInfo"]
         if not page_info["hasNextPage"]:
