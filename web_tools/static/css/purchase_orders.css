@@ -327,6 +327,15 @@ h1 {
   width: 100%;
 }
 
+/* Allow copying text from grid cells */
+.ag-theme-alpine .ag-cell,
+.ag-theme-alpine .ag-cell-value,
+.ag-theme-alpine .ag-center-cols-container {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+}
+
 .advanced-filter-placeholder {
   padding: 0.75rem;
   font-size: 0.9rem;
