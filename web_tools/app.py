@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from datetime import timedelta
 from waitress import serve
-from flask import Flask, current_app, g, jsonify, render_template, request, redirect, url_for
+from flask import Flask, current_app, g, jsonify, render_template, request, redirect, url_for, session
 from flask_oidc import OpenIDConnect
 from flask_session import Session
 
@@ -101,10 +101,11 @@ def create_app() -> Flask:
     @oidc.require_login
     def purchase_orders() -> str:
         """Render the purchase orders grid."""
+        profile = session.get("oidc_auth_profile") or {}
         user_name = (
-            oidc.user_getfield("name")
-            or oidc.user_getfield("preferred_username")
-            or oidc.user_getfield("email")
+            profile.get("name")
+            or profile.get("preferred_username")
+            or profile.get("email")
             or "User"
         )
         return render_template(
@@ -234,4 +235,4 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
-    serve(app, host="0.0.0.0", port=int(os.getenv("WAITRESS_PORT", 8000)), url_scheme='https')
+    serve(app, host="0.0.0.0", port=int(os.getenv("WAITRESS_PORT", "8000")), url_scheme='https')
