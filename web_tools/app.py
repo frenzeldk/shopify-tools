@@ -101,7 +101,17 @@ def create_app() -> Flask:
     @oidc.require_login
     def purchase_orders() -> str:
         """Render the purchase orders grid."""
-        return render_template("purchase_orders.html", purchase_orders=None)
+        user_name = (
+            oidc.user_getfield("name")
+            or oidc.user_getfield("preferred_username")
+            or oidc.user_getfield("email")
+            or "User"
+        )
+        return render_template(
+            "purchase_orders.html",
+            purchase_orders=None,
+            user_name=user_name,
+        )
 
     @application.get("/purchase-orders/data/")
     async def purchase_order_data() -> Any:

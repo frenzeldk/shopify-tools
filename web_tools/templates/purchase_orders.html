@@ -6,16 +6,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-alpine.css">
+    <link rel="stylesheet" href="https://unpkg.com/primeicons@7.0.0/primeicons.css">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/purchase_orders.css') }}">
   </head>
   <body>
-    <header>
-      <h1>Purchase Orders</h1>
-    </header>
-    <main id="app"></main>
+    <div id="app" data-user-name="{{ user_name|e }}"></div>
 
     <script id="purchase-orders-data" type="application/json">{{ purchase_orders|tojson }}</script>
-    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/primevue@4.4.1/umd/primevue.min.js"></script>
+    <script src="https://unpkg.com/@primeuix/themes/umd/lara.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.noStyle.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -34,6 +34,20 @@
         }
       }
       const DATA_ENDPOINT = "/purchase-orders/data/";
+
+      const MENU_MAPPING = {
+        "Dashboard": { path: "/", icon: "pi-home" },
+        "Purchase Orders": { path: "/purchase-orders/", icon: "pi-table" },
+        "Saved Views": { path: "#controls", icon: "pi-sliders-h" },
+        Exports: { path: "#grid-wrapper", icon: "pi-download" },
+      };
+      const MENU_LINKS = Object.entries(MENU_MAPPING).map(([label, meta]) => ({
+        label,
+        ...meta,
+      }));
+
+      const appContainer = document.getElementById("app");
+      const USER_NAME = (appContainer?.dataset?.userName || "User").trim() || "User";
 
       const FILTER_TYPES = {
         STARTS_WITH: "starts_with",
@@ -189,9 +203,12 @@
         }
       };
 
-      createApp({
+      const appInstance = createApp({
         data() {
           return {
+            userName: USER_NAME,
+            menuItems: MENU_LINKS,
+            isSidebarCollapsed: false,
             rowData: initialPurchaseOrders,
             gridApi: null,
             gridOptions: null,
@@ -304,6 +321,9 @@
           window.removeEventListener("keydown", this.onEscapeKey);
         },
         methods: {
+          toggleSidebar() {
+            this.isSidebarCollapsed = !this.isSidebarCollapsed;
+          },
           bootstrapInitialData(initialData) {
             if (!Array.isArray(initialData) || !initialData.length) {
               return;
@@ -1337,7 +1357,50 @@
           }
         },
         template: `
-          <section>
+          <div :class="['app-shell', { 'sidebar-collapsed': isSidebarCollapsed }]">
+            <aside
+              class="app-sidebar"
+              :class="{ collapsed: isSidebarCollapsed }"
+              aria-label="Primary"
+            >
+              <div class="sidebar-top">
+                <a class="sidebar-logo" href="/" aria-label="Go to home">
+                  <img
+                    src="https://xtragrej.dk/cdn/shop/files/XG_no_slogan.png?v=1729865318"
+                    alt="Xtra Grej"
+                  />
+                </a>
+                <button
+                  type="button"
+                  class="sidebar-toggle"
+                  @click="toggleSidebar"
+                  :aria-label="isSidebarCollapsed ? 'Expand menu' : 'Collapse menu'"
+                >
+                  <i :class="['pi', isSidebarCollapsed ? 'pi-angle-right' : 'pi-angle-left']"></i>
+                </button>
+              </div>
+              <nav class="sidebar-nav">
+                <a
+                  v-for="item in menuItems"
+                  :key="item.path + item.label"
+                  class="sidebar-link"
+                  :href="item.path"
+                  :title="item.label"
+                >
+                  <i :class="['pi', item.icon]" aria-hidden="true"></i>
+                  <span v-if="!isSidebarCollapsed" v-text="item.label"></span>
+                </a>
+              </nav>
+              <div class="sidebar-user">
+                <i v-if="isSidebarCollapsed" class="pi pi-user" aria-hidden="true"></i>
+                <span v-else v-text="userName"></span>
+              </div>
+            </aside>
+            <div class="app-main">
+              <header class="page-header">
+                <h1>Purchase Orders</h1>
+              </header>
+              <section class="content-section">
             <div id="controls">
               <div class="view-controls">
                 <div class="control-group">
@@ -1522,9 +1585,19 @@
                 </div>
               </div>
             </div>
-          </section>
+              </section>
+            </div>
+          </div>
         `,
-      }).mount("#app");
+      });
+
+      appInstance.use(PrimeVue.Config, {
+        theme: {
+          preset: PrimeUIX.Themes.Lara,
+        },
+      });
+
+      appInstance.mount("#app");
     </script>
   </body>
 </html>
