@@ -123,7 +123,7 @@ def _check_availability(order_id: str | int) -> bool:
               edges {
                 node {
                   title
-                  quantity
+                  currentQuantity
                   variant {
                     inventoryQuantity
                   }
@@ -152,8 +152,7 @@ def _check_availability(order_id: str | int) -> bool:
         variant = node.get("variant")
         if not variant:
             continue  # Skip items without a variant (e.g., custom items)
-        available_quantity = variant.get("inventoryQuantity", 0)
-        if available_quantity < 0:
+        if variant.get("inventoryQuantity", 0) < 0 < variant.get("currentQuantity", 0):
             return False  # Not enough inventory for this item
 
     return True  # All items are available
