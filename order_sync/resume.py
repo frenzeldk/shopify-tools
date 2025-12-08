@@ -58,7 +58,15 @@ def _update_inventory_cache(line_items: list[dict]) -> None:
         line_items: List of line items as returned by Shopify GraphQL API.
     """
     for item in [node["node"] for node in line_items]:
-        inventory_item_id = item["variant"]["inventoryItem"]["id"]
+        variant = item.get("variant")
+        if variant is None:
+            continue
+        inventory_item = variant.get("inventoryItem")
+        if inventory_item is None:
+            continue
+        inventory_item_id = inventory_item.get("id")
+        if inventory_item_id is None:  
+            continue
         if inventory_item_id not in _inventory_cache:
             _get_inventory_level(inventory_item_id)
         _inventory_cache[inventory_item_id] = _inventory_cache.get(inventory_item_id, 0)\
@@ -71,7 +79,15 @@ def _can_fulfill_order(line_items: list[dict]) -> bool:
         line_items: List of line items as returned by Shopify GraphQL API.
     """
     for item in [node["node"] for node in line_items]:
-        inventory_item_id = item["variant"]["inventoryItem"]["id"]
+        variant = item.get("variant")
+        if variant is None:
+            continue
+        inventory_item = variant.get("inventoryItem")
+        if inventory_item is None:
+            continue
+        inventory_item_id = inventory_item.get("id")
+        if inventory_item_id is None:  
+            continue
         available_quantity = _inventory_cache.get(inventory_item_id, 0)
         if available_quantity < 0:
             return False
