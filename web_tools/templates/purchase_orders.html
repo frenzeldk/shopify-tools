@@ -9,10 +9,35 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/purchase_orders.css') }}">
   </head>
   <body>
-    <header>
-      <h1>Purchase Orders</h1>
-    </header>
-    <main id="app"></main>
+    <div class="layout-container">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h2>Shopify Tools</h2>
+        </div>
+        <nav class="sidebar-nav">
+          <a href="/purchase-orders/" class="nav-link active">
+            <span class="nav-icon">📦</span>
+            <span class="nav-text">Purchase Orders</span>
+          </a>
+          <a href="/inventory-tools/" class="nav-link">
+            <span class="nav-icon">🔧</span>
+            <span class="nav-text">Inventory Tools</span>
+          </a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="user-info">
+            <div class="user-avatar">{{ user_name[0].upper() if user_name else 'U' }}</div>
+            <div class="user-name">{{ user_name }}</div>
+          </div>
+        </div>
+      </aside>
+      <div class="main-wrapper">
+        <header>
+          <h1>Purchase Orders</h1>
+        </header>
+        <main id="app"></main>
+      </div>
+    </div>
 
     <script id="purchase-orders-data" type="application/json">{{ purchase_orders|tojson }}</script>
     <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
@@ -1526,5 +1551,7 @@
         `,
       }).mount("#app");
     </script>
+      </div>
+    </div>
   </body>
 </html>

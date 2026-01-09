@@ -86,3 +86,98 @@ def fetch_missing_inventory():
             break
         cursor = page_info["endCursor"]
     return missing
+
+
+# Query for inventory items with costs
+__INVENTORY_VALUE_QUERY__ = gql("""
+query ($cursor: String, $query: String!) {
+  productVariants(first: 100, after: $cursor, query: $query) {
+    edges {
+      node {
+        id
+        sku
+        title
+        inventoryQuantity
+        inventoryItem {
+          id
+          tracked
+          unitCost {
+            amount
+          }
+          inventoryLevels(first: 10) {
+            edges {
+              node {
+                quantities(names: ["available"]) {
+                  name
+                  quantity
+                }
+              }
+            }
+          }
+        }
+        product {
+          title
+          vendor
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+""")
+
+
+def calculate_brand_inventory_value(brand_name: str) -> float:
+    """
+    Calculate the total inventory value for all products of a specific brand.
+    
+    Args:
+        brand_name: The vendor/brand name to filter products by
+        
+    Returns:
+        The total value of inventory for the brand (cost * quantity)
+    """
+    total_value = 0.0
+    cursor = None
+    
+    # Build query to filter by vendor (brand)
+    query = f'vendor:"{brand_name}"'
+    
+    while True:
+        variables = {"cursor": cursor, "query": query}
+        result = __gql_client__.execute(__INVENTORY_VALUE_QUERY__, variable_values=variables)
+        variants = result["productVariants"]["edges"]
+        
+        for v in variants:
+            node = v["node"]
+            inventory_item = node.get("inventoryItem", {})
+            
+            # Get unit cost
+            unit_cost_data = inventory_item.get("unitCost")
+            if unit_cost_data and unit_cost_data.get("amount"):
+                unit_cost = float(unit_cost_data["amount"])
+            else:
+                unit_cost = 0.0
+            
+            # Sum available quantities across all inventory levels
+            available_qty = 0
+            inventory_levels = inventory_item.get("inventoryLevels", {}).get("edges", [])
+            for level in inventory_levels:
+                quantities = level["node"].get("quantities", [])
+                for q in quantities:
+                    if q["name"] == "available":
+                        available_qty += q["quantity"] or 0
+            
+            # Calculate value for this variant
+            variant_value = unit_cost * available_qty
+            total_value += variant_value
+        
+        page_info = result["productVariants"]["pageInfo"]
+        if not page_info["hasNextPage"]:
+            break
+        cursor = page_info["endCursor"]
+    
+    return total_value
