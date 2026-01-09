@@ -18,7 +18,7 @@ from flask import Flask, current_app, g, jsonify, render_template, request, redi
 from flask_oidc import OpenIDConnect
 from flask_session import Session
 
-from shopify import fetch_missing_inventory as fetch_purchase_order_data
+from shopify import fetch_missing_inventory as fetch_purchase_order_data, calculate_brand_inventory_value
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "purchase_orders.db"
@@ -101,7 +101,9 @@ def create_app() -> Flask:
     @oidc.require_login
     def purchase_orders() -> str:
         """Render the purchase orders grid."""
-        return render_template("purchase_orders.html", purchase_orders=None)
+        user_info = oidc.user_getinfo(['name', 'email', 'preferred_username'])
+        user_name = user_info.get('name', user_info.get('preferred_username', 'User'))
+        return render_template("purchase_orders.html", purchase_orders=None, user_name=user_name)
 
     @application.get("/purchase-orders/data/")
     async def purchase_order_data() -> Any:
@@ -219,6 +221,31 @@ def create_app() -> Flask:
         if deleted.rowcount == 0:
             return jsonify({"error": "Configuration not found."}), 404
         return jsonify({"status": "deleted", "id": config_id})
+
+    @application.route("/inventory-tools/")
+    @oidc.require_login
+    def inventory_tools() -> str:
+        """Render the inventory tools page."""
+        user_info = oidc.user_getinfo(['name', 'email', 'preferred_username'])
+        user_name = user_info.get('name', user_info.get('preferred_username', 'User'))
+        return render_template("inventory_tools.html", user_name=user_name)
+
+    @application.post("/inventory-tools/calculate-brand-value/")
+    async def calculate_brand_value() -> Any:
+        """Calculate the total inventory value for a specific brand."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            brand_name = str(payload.get("brand", "")).strip()
+            
+            if not brand_name:
+                return jsonify({"error": "Brand name is required."}), 400
+            
+            total_value = await asyncio.to_thread(calculate_brand_inventory_value, brand_name)
+            
+            return jsonify({"brand": brand_name, "total_value": total_value})
+        except Exception as exc:
+            current_app.logger.exception("Failed to calculate brand inventory value", exc_info=exc)
+            return jsonify({"error": "Failed to calculate inventory value."}), 500
 
     return application
 

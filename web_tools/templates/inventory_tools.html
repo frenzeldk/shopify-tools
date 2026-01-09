@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Inventory Tools</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/inventory_tools.css') }}">
+  </head>
+  <body>
+    <div class="layout-container">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h2>Shopify Tools</h2>
+        </div>
+        <nav class="sidebar-nav">
+          <a href="/purchase-orders/" class="nav-link">
+            <span class="nav-icon">📦</span>
+            <span class="nav-text">Purchase Orders</span>
+          </a>
+          <a href="/inventory-tools/" class="nav-link active">
+            <span class="nav-icon">🔧</span>
+            <span class="nav-text">Inventory Tools</span>
+          </a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="user-info">
+            <div class="user-avatar">[[ user_name[0].upper() if user_name else 'U' ]]</div>
+            <div class="user-name">[[ user_name ]]</div>
+          </div>
+        </div>
+      </aside>
+      <div class="main-wrapper">
+        <header>
+          <h1>Inventory Tools</h1>
+        </header>
+        <main id="app">
+      <div class="tool-section">
+        <h2>Brand Inventory Value Calculator</h2>
+        <p class="tool-description">Calculate the total inventory value for all products of a specific brand.</p>
+        
+        <div class="input-group">
+          <label for="brand-input">Brand Name:</label>
+          <input 
+            type="text" 
+            id="brand-input" 
+            v-model="brandName" 
+            placeholder="Enter brand name"
+            @keyup.enter="calculateValue">
+        </div>
+        
+        <button 
+          id="calculate-btn" 
+          @click="calculateValue" 
+          :disabled="loading || !brandName.trim()">
+          <span v-if="!loading">Calculate Value</span>
+          <span v-else>Calculating...</span>
+        </button>
+        
+        <div v-if="result !== null" class="result-section">
+          <h3>Result</h3>
+          <div v-if="error" class="error-message">[[ error ]]</div>
+          <div v-else class="success-message">
+            <p><strong>Brand:</strong> [[ result.brand ]]</p>
+            <p><strong>Total Inventory Value:</strong> DKK [[ formatCurrency(result.total_value) ]]</p>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+    <script>
+      const { createApp } = Vue;
+
+      createApp({
+        delimiters: ['[[', ']]'],
+        data() {
+          return {
+            brandName: '',
+            result: null,
+            error: null,
+            loading: false
+          };
+        },
+        methods: {
+          async calculateValue() {
+            if (!this.brandName.trim()) {
+              return;
+            }
+
+            this.loading = true;
+            this.result = null;
+            this.error = null;
+
+            try {
+              const response = await fetch('/inventory-tools/calculate-brand-value/', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  brand: this.brandName.trim()
+                })
+              });
+
+              const data = await response.json();
+
+              if (!response.ok) {
+                this.error = data.error || 'Failed to calculate inventory value.';
+                this.result = { error: true };
+              } else {
+                this.result = data;
+              }
+            } catch (err) {
+              this.error = 'An error occurred while calculating inventory value.';
+              this.result = { error: true };
+              console.error('Error:', err);
+            } finally {
+              this.loading = false;
+            }
+          },
+          formatCurrency(value) {
+            return new Intl.NumberFormat('da-DK', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2
+            }).format(value);
+          }
+        }
+      }).mount('#app');
+    </script>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
