@@ -583,6 +583,12 @@ h1 {
   color: #0c5460;
 }
 
+.cache-banner {
+  background-color: #fff3cd;
+  border: 1px solid #ffc107;
+  color: #856404;
+}
+
 .error-banner {
   background-color: #f8d7da;
   border: 1px solid #f5c6cb;

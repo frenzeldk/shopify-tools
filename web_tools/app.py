@@ -12,9 +12,9 @@ import sqlite3
 import os
 from pathlib import Path
 from typing import Any
-from datetime import timedelta
+from datetime import datetime, timedelta
 from waitress import serve
-from flask import Flask, current_app, g, jsonify, render_template, request, redirect, url_for
+from flask import Flask, current_app, g, jsonify, render_template, request, redirect, url_for, session
 from flask_oidc import OpenIDConnect
 from flask_session import Session
 
@@ -22,6 +22,7 @@ from shopify import fetch_missing_inventory as fetch_purchase_order_data, calcul
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "purchase_orders.db"
+CACHE_DURATION_MINUTES = 30
 
 def get_db() -> sqlite3.Connection:
     """Return a per-request SQLite connection."""
@@ -107,13 +108,40 @@ def create_app() -> Flask:
 
     @application.get("/purchase-orders/data/")
     async def purchase_order_data() -> Any:
-        """Fetch purchase order data asynchronously."""
+        """Fetch purchase order data asynchronously with caching."""
+        force_refresh = request.args.get('refresh', 'false').lower() == 'true'
+        
+        # Check cache if not forcing refresh
+        if not force_refresh and 'po_data' in session and 'po_data_timestamp' in session:
+            cache_time = datetime.fromisoformat(session['po_data_timestamp'])
+            cache_age = datetime.now() - cache_time
+            
+            # If cache is less than 30 minutes old, return cached data
+            if cache_age < timedelta(minutes=CACHE_DURATION_MINUTES):
+                current_app.logger.info(f"Returning cached purchase order data (age: {cache_age})")
+                return jsonify({
+                    "data": session['po_data'],
+                    "cached": True,
+                    "cache_timestamp": session['po_data_timestamp']
+                })
+        
+        # Fetch fresh data
         try:
+            current_app.logger.info("Fetching fresh purchase order data")
             data = await asyncio.to_thread(fetch_purchase_order_data)
+            
+            # Store in session cache
+            session['po_data'] = data
+            session['po_data_timestamp'] = datetime.now().isoformat()
+            
+            return jsonify({
+                "data": data,
+                "cached": False,
+                "cache_timestamp": session['po_data_timestamp']
+            })
         except Exception as exc:  # pragma: no cover - defensive logging
             current_app.logger.exception("Failed to load purchase orders", exc_info=exc)
             return jsonify({"error": "Failed to load purchase orders."}), 500
-        return jsonify(data)
 
     @application.get("/purchase-orders/configurations/")
     def list_configurations() -> Any:
