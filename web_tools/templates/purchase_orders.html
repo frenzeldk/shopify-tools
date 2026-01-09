@@ -215,6 +215,7 @@
       };
 
       createApp({
+        delimiters: ['[[', ']]'],
         data() {
           return {
             rowData: initialPurchaseOrders,
@@ -239,6 +240,8 @@
             pendingSortModel: null,
             isLoadingData: false,
             dataFetchError: "",
+            dataCached: false,
+            cacheTimestamp: null,
           };
         },
         computed: {
@@ -335,11 +338,15 @@
             }
             this.ingestRowData(initialData, { reconcileConfigurations: false });
           },
-          async loadPurchaseOrders() {
+          async loadPurchaseOrders(forceRefresh = false) {
             this.isLoadingData = true;
             this.dataFetchError = "";
             try {
-              const response = await fetch(DATA_ENDPOINT, {
+              const url = new URL(DATA_ENDPOINT, window.location.origin);
+              if (forceRefresh) {
+                url.searchParams.set('refresh', 'true');
+              }
+              const response = await fetch(url, {
                 credentials: "same-origin",
                 cache: "no-store",
               });
@@ -349,10 +356,20 @@
                 );
               }
               const payload = await response.json();
-              if (payload && !Array.isArray(payload) && typeof payload.error === "string") {
+              if (payload && typeof payload.error === "string") {
                 throw new Error(payload.error);
               }
-              this.ingestRowData(payload, { reconcileConfigurations: true });
+              
+              // Handle new response format with caching
+              const data = payload.data || payload;
+              this.dataCached = payload.cached || false;
+              this.cacheTimestamp = payload.cache_timestamp || null;
+              
+              if (!Array.isArray(data)) {
+                throw new Error("Invalid data format received");
+              }
+              
+              this.ingestRowData(data, { reconcileConfigurations: true });
             } catch (error) {
               console.error("Failed to load purchase orders", error);
               const message =
@@ -367,7 +384,7 @@
             if (this.isLoadingData) {
               return;
             }
-            await this.loadPurchaseOrders();
+            await this.loadPurchaseOrders(true);
           },
           ingestRowData(data, options = {}) {
             const safeData = Array.isArray(data) ? data : [];
@@ -1201,6 +1218,23 @@
               .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
               .join(" ");
           },
+          formatCacheTime(timestamp) {
+            try {
+              const date = new Date(timestamp);
+              const now = new Date();
+              const diffMinutes = Math.floor((now - date) / 60000);
+              
+              if (diffMinutes < 1) return 'just now';
+              if (diffMinutes === 1) return '1 minute ago';
+              if (diffMinutes < 60) return `${diffMinutes} minutes ago`;
+              
+              const hours = date.getHours().toString().padStart(2, '0');
+              const minutes = date.getMinutes().toString().padStart(2, '0');
+              return `${hours}:${minutes}`;
+            } catch (e) {
+              return 'unknown time';
+            }
+          },
           buildGridOptions() {
             const vm = this;
             return {
@@ -1513,6 +1547,13 @@
               role="status"
             >
               Loading purchase orders…
+            </div>
+            <div
+              v-if="!isLoadingData && dataCached && cacheTimestamp"
+              class="data-status-banner cache-banner"
+              role="status"
+            >
+              Showing cached data from [[ formatCacheTime(cacheTimestamp) ]]. Click Refresh to update.
             </div>
             <div
               v-if="dataFetchError"
