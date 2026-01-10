@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>{% block title %}Shopify Tools{% endblock %}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+    {% block extra_css %}{% endblock %}
+  </head>
+  <body>
+    <div class="layout-container">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h2>Shopify Tools</h2>
+        </div>
+        <nav class="sidebar-nav">
+          <a href="/purchase-orders/" class="nav-link {% if active_page == 'purchase_orders' %}active{% endif %}">
+            <span class="nav-icon">📦</span>
+            <span class="nav-text">Purchase Orders</span>
+          </a>
+          <a href="/inventory-tools/" class="nav-link {% if active_page == 'inventory_tools' %}active{% endif %}">
+            <span class="nav-icon">🔧</span>
+            <span class="nav-text">Inventory Tools</span>
+          </a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="user-info">
+            <div class="user-avatar">{{ user_name[0].upper() if user_name else 'U' }}</div>
+            <div class="user-name">{{ user_name }}</div>
+          </div>
+        </div>
+      </aside>
+      <div class="main-wrapper">
+        <header class="sticky-header">
+          <h1>{% block page_title %}Shopify Tools{% endblock %}</h1>
+        </header>
+        <main id="app">
+          {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
+    {% block extra_js %}{% endblock %}
+  </body>
+</html>

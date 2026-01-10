@@ -1,39 +1,14 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>Inventory Tools</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/inventory_tools.css') }}">
-  </head>
-  <body>
-    <div class="layout-container">
-      <aside class="sidebar">
-        <div class="sidebar-header">
-          <h2>Shopify Tools</h2>
-        </div>
-        <nav class="sidebar-nav">
-          <a href="/purchase-orders/" class="nav-link">
-            <span class="nav-icon">📦</span>
-            <span class="nav-text">Purchase Orders</span>
-          </a>
-          <a href="/inventory-tools/" class="nav-link active">
-            <span class="nav-icon">🔧</span>
-            <span class="nav-text">Inventory Tools</span>
-          </a>
-        </nav>
-        <div class="sidebar-footer">
-          <div class="user-info">
-            <div class="user-avatar">[[ user_name[0].upper() if user_name else 'U' ]]</div>
-            <div class="user-name">[[ user_name ]]</div>
-          </div>
-        </div>
-      </aside>
-      <div class="main-wrapper">
-        <header>
-          <h1>Inventory Tools</h1>
-        </header>
-        <main id="app">
+{% extends "base.html" %}
+
+{% block title %}Inventory Tools{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/inventory_tools.css') }}">
+{% endblock %}
+
+{% block page_title %}Inventory Tools{% endblock %}
+
+{% block content %}
       <div class="tool-section">
         <h2>Brand Inventory Value Calculator</h2>
         <p class="tool-description">Calculate the total inventory value for all products of a specific brand.</p>
@@ -65,8 +40,152 @@
           </div>
         </div>
       </div>
-    </main>
 
+      <!-- Shipmondo Bin Management Section -->
+      <div class="tool-section">
+        <h2>Shipmondo Bin Management</h2>
+        
+        <!-- Refreshing indicator -->
+        <div v-if="shipmondoStatus.is_refreshing" class="info-message">
+          <strong>⏳ Cache refresh in progress...</strong> The page will update automatically when complete.
+        </div>
+        
+        <div class="cache-status">
+          <div class="status-item">
+            <span class="status-label">Last Updated:</span>
+            <span class="status-value">[[ formatDateTime(shipmondoStatus.last_updated) ]]</span>
+            <button @click="refreshCache" :disabled="shipmondoStatus.is_refreshing || shipmondoLoading" class="btn-refresh">
+              <span v-if="!shipmondoStatus.is_refreshing">🔄 Refresh</span>
+              <span v-else>⏳ Refreshing...</span>
+            </button>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Total Items:</span>
+            <span class="status-value">[[ shipmondoStatus.total_items ]]</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Items with Bins:</span>
+            <span class="status-value">[[ shipmondoStatus.items_with_bins ]]</span>
+          </div>
+        </div>
+
+        <!-- Cleanup Sold-Out Bins -->
+        <div class="shipmondo-tool">
+          <h3>Clean Up Sold-Out Bins</h3>
+          <p class="tool-description">Remove bin locations from Shipmondo for items that are sold out in Shopify (inventory = 0, policy = DENY).</p>
+          
+          <button 
+            @click="cleanupSoldOut" 
+            :disabled="shipmondoLoading"
+            class="btn-action btn-cleanup">
+            <span v-if="!shipmondoLoading">🧹 Clean Up Sold-Out Bins</span>
+            <span v-else>Processing...</span>
+          </button>
+          
+          <div v-if="cleanupResult" class="result-section">
+            <div v-if="cleanupResult.error" class="error-message">[[ cleanupResult.error ]]</div>
+            <div v-else class="success-message">
+              <p><strong>Sold-Out Variants Found:</strong> [[ cleanupResult.sold_out_count ]]</p>
+              <p><strong>Bins Cleared:</strong> [[ cleanupResult.cleared_count ]]</p>
+              <div v-if="cleanupResult.errors && cleanupResult.errors.length > 0">
+                <p><strong>Errors:</strong></p>
+                <ul>
+                  <li v-for="err in cleanupResult.errors">[[ err ]]</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Batch Update Bins with Regex -->
+        <div class="shipmondo-tool">
+          <h3>Batch Update Bins with Regex</h3>
+          <p class="tool-description">Update multiple bin locations using regex pattern matching.</p>
+          
+          <div class="input-group">
+            <label for="regex-pattern">Regex Pattern:</label>
+            <input 
+              type="text" 
+              id="regex-pattern" 
+              v-model="batchUpdate.regexPattern" 
+              placeholder="e.g., ^([A-Z])-(\d+)$"
+              class="input-code">
+            <small class="input-help">Pattern to match bin locations</small>
+          </div>
+          
+          <div class="input-group">
+            <label for="replacement">Replacement:</label>
+            <input 
+              type="text" 
+              id="replacement" 
+              v-model="batchUpdate.replacement" 
+              placeholder="e.g., \1\2 or NEW-\2"
+              class="input-code">
+            <small class="input-help">Use \1, \2 for capture groups</small>
+          </div>
+          
+          <div class="button-group">
+            <button 
+              @click="previewBatchUpdate" 
+              :disabled="shipmondoLoading || !batchUpdate.regexPattern"
+              class="btn-action btn-preview">
+              <span v-if="!shipmondoLoading">👁️ Preview</span>
+              <span v-else>Loading...</span>
+            </button>
+            
+            <button 
+              v-if="batchUpdate.preview && batchUpdate.preview.total_count > 0"
+              @click="applyBatchUpdate" 
+              :disabled="shipmondoLoading"
+              class="btn-action btn-apply">
+              <span v-if="!shipmondoLoading">✅ Apply Update ([[ batchUpdate.preview.total_count ]] items)</span>
+              <span v-else>Applying...</span>
+            </button>
+          </div>
+          
+          <div v-if="batchUpdate.preview" class="result-section">
+            <h4>Preview ([[ batchUpdate.preview.showing_count ]] of [[ batchUpdate.preview.total_count ]] matches)</h4>
+            <div class="preview-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>SKU</th>
+                    <th>Name</th>
+                    <th>Current Bin</th>
+                    <th>New Bin</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in batchUpdate.preview.matching_items" :key="item.sku">
+                    <td>[[ item.sku ]]</td>
+                    <td>[[ item.name ]]</td>
+                    <td class="bin-current">[[ item.current_bin ]]</td>
+                    <td class="bin-new">[[ item.new_bin ]]</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          
+          <div v-if="batchUpdate.result" class="result-section">
+            <div v-if="batchUpdate.result.error" class="error-message">[[ batchUpdate.result.error ]]</div>
+            <div v-else class="success-message">
+              <p><strong>Success!</strong></p>
+              <p>Updated [[ batchUpdate.result.success_count ]] out of [[ batchUpdate.result.total_count ]] items</p>
+              <div v-if="batchUpdate.result.errors && batchUpdate.result.errors.length > 0">
+                <p><strong>Errors:</strong></p>
+                <ul>
+                  <li v-for="err in batchUpdate.result.errors">[[ err ]]</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+{% endblock %}
+
+{% block extra_js %}
     <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
     <script>
       const { createApp } = Vue;
@@ -78,8 +197,37 @@
             brandName: '',
             result: null,
             error: null,
-            loading: false
+            loading: false,
+            shipmondoLoading: false,
+            shipmondoStatus: {
+              total_items: 0,
+              items_with_bins: 0,
+              last_updated: null,
+              is_refreshing: false
+            },
+            cleanupResult: null,
+            batchUpdate: {
+              regexPattern: '',
+              replacement: '',
+              preview: null,
+              result: null
+            },
+            statusPollInterval: null
           };
+        },
+        mounted() {
+          this.loadShipmondoStatus();
+          // Poll status every 2 seconds if refreshing
+          this.statusPollInterval = setInterval(() => {
+            if (this.shipmondoStatus.is_refreshing) {
+              this.loadShipmondoStatus();
+            }
+          }, 2000);
+        },
+        beforeUnmount() {
+          if (this.statusPollInterval) {
+            clearInterval(this.statusPollInterval);
+          }
         },
         methods: {
           async calculateValue() {
@@ -118,17 +266,152 @@
               this.loading = false;
             }
           },
+          async loadShipmondoStatus() {
+            try {
+              const response = await fetch('/inventory-tools/shipmondo-cache-status/');
+              const data = await response.json();
+              this.shipmondoStatus = data;
+            } catch (err) {
+              console.error('Error loading Shipmondo status:', err);
+            }
+          },
+          async refreshCache() {
+            if (this.shipmondoStatus.is_refreshing) {
+              alert('Cache refresh is already in progress. Please wait.');
+              return;
+            }
+            
+            this.shipmondoLoading = true;
+            try {
+              const response = await fetch('/inventory-tools/refresh-shipmondo-cache/', {
+                method: 'POST'
+              });
+              const data = await response.json();
+              
+              if (response.status === 409) {
+                // Already refreshing
+                alert('Cache refresh is already in progress.');
+              } else if (response.ok) {
+                // Refresh started, update status
+                this.shipmondoStatus.is_refreshing = true;
+                alert('Cache refresh started in background. The page will update automatically when complete.');
+              } else {
+                alert('Failed to refresh cache: ' + (data.error || 'Unknown error'));
+              }
+            } catch (err) {
+              alert('Error refreshing cache');
+              console.error('Error:', err);
+            } finally {
+              this.shipmondoLoading = false;
+            }
+          },
+          async cleanupSoldOut() {
+            if (!confirm('Clean up bin locations for all sold-out variants?')) {
+              return;
+            }
+            
+            this.shipmondoLoading = true;
+            this.cleanupResult = null;
+            
+            try {
+              const response = await fetch('/inventory-tools/cleanup-sold-out-bins/', {
+                method: 'POST'
+              });
+              const data = await response.json();
+              
+              if (response.ok) {
+                this.cleanupResult = data;
+                await this.loadShipmondoStatus();
+              } else {
+                this.cleanupResult = { error: data.error || 'Failed to cleanup bins' };
+              }
+            } catch (err) {
+              this.cleanupResult = { error: 'An error occurred during cleanup' };
+              console.error('Error:', err);
+            } finally {
+              this.shipmondoLoading = false;
+            }
+          },
+          async previewBatchUpdate() {
+            this.shipmondoLoading = true;
+            this.batchUpdate.preview = null;
+            this.batchUpdate.result = null;
+            
+            try {
+              const response = await fetch('/inventory-tools/preview-batch-update/', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  regex_pattern: this.batchUpdate.regexPattern,
+                  replacement: this.batchUpdate.replacement
+                })
+              });
+              const data = await response.json();
+              
+              if (response.ok) {
+                this.batchUpdate.preview = data;
+              } else {
+                alert('Preview error: ' + (data.error || 'Unknown error'));
+              }
+            } catch (err) {
+              alert('Error previewing batch update');
+              console.error('Error:', err);
+            } finally {
+              this.shipmondoLoading = false;
+            }
+          },
+          async applyBatchUpdate() {
+            if (!confirm(`Apply batch update to ${this.batchUpdate.preview.total_count} items?`)) {
+              return;
+            }
+            
+            this.shipmondoLoading = true;
+            this.batchUpdate.result = null;
+            
+            try {
+              const response = await fetch('/inventory-tools/apply-batch-update/', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  regex_pattern: this.batchUpdate.regexPattern,
+                  replacement: this.batchUpdate.replacement
+                })
+              });
+              const data = await response.json();
+              
+              if (response.ok) {
+                this.batchUpdate.result = data;
+                this.batchUpdate.preview = null;
+                await this.loadShipmondoStatus();
+              } else {
+                this.batchUpdate.result = { error: data.error || 'Failed to apply update' };
+              }
+            } catch (err) {
+              this.batchUpdate.result = { error: 'An error occurred during update' };
+              console.error('Error:', err);
+            } finally {
+              this.shipmondoLoading = false;
+            }
+          },
           formatCurrency(value) {
             return new Intl.NumberFormat('da-DK', {
               minimumFractionDigits: 2,
               maximumFractionDigits: 2
             }).format(value);
+          },
+          formatDateTime(isoString) {
+            if (!isoString) return 'Never';
+            const date = new Date(isoString);
+            return new Intl.DateTimeFormat('en-GB', {
+              dateStyle: 'medium',
+              timeStyle: 'short'
+            }).format(date);
           }
         }
       }).mount('#app');
     </script>
-        </div>
-      </div>
-    </div>
-  </body>
-</html>
+{% endblock %}
