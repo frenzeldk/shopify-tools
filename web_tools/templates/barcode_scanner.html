@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+
+{% block title %}Barcode Scanner - Shopify Tools{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/barcode_scanner.css') }}">
+{% endblock %}
+
+{% block page_title %}Barcode Scanner{% endblock %}
+
+{% block content %}
+<div id="scanner-app">
+  <div class="scanner-section">
+    <div class="cache-status">
+      <div class="status-item">
+        <span class="status-label">Cache Status</span>
+        <span class="status-value" :class="{ 'status-refreshing': cacheStatus === 'Refreshing...' }">
+          [[ cacheStatus === 'Refreshing...' ? 'Refreshing...' : 'Last updated: ' + lastUpdated ]]
+        </span>
+      </div>
+    </div>
+
+    <div class="scanner-controls">
+      <button @click="toggleCamera" class="btn" :class="cameraActive ? 'btn-danger' : 'btn-primary'">
+        <span v-if="!cameraActive">📷 Start Camera</span>
+        <span v-else>⏹️ Stop Camera</span>
+      </button>
+      <div class="manual-input">
+        <input 
+          type="text" 
+          v-model="manualBarcode" 
+          @keyup.enter="lookupManual"
+          placeholder="Or enter barcode manually..."
+          class="barcode-input"
+        >
+        <button @click="lookupManual" class="btn btn-secondary" :disabled="!manualBarcode">
+          🔍 Lookup
+        </button>
+      </div>
+    </div>
+
+    <div class="camera-container" :class="{ hidden: !cameraActive }">
+      <video ref="videoElement" playsinline autoplay muted></video>
+      <canvas ref="canvasElement" class="overlay-canvas"></canvas>
+      <div class="camera-hint">
+        <p>Position barcode horizontally within the frame</p>
+      </div>
+    </div>
+
+    <div v-if="lastScannedBarcode && cameraActive" class="last-scan">
+      Last detected: <strong>[[ lastScannedBarcode ]]</strong>
+    </div>
+
+    <div v-if="error" class="error-message">
+      <p><strong>Error:</strong> [[ error ]]</p>
+      <button @click="error = null" class="btn-close">✕</button>
+    </div>
+
+    <div v-if="result" class="result-card" :class="result.found ? 'result-found' : 'result-not-found'">
+      <div class="result-header">
+        <h3 v-if="result.found">✅ Item Found</h3>
+        <h3 v-else>❌ Not Found</h3>
+        <button @click="clearResult" class="btn-close">✕</button>
+      </div>
+      <div v-if="result.found" class="result-content">
+        <div class="result-row">
+          <span class="result-label">SKU:</span>
+          <span class="result-value sku-value">[[ result.sku ]]</span>
+        </div>
+        <div class="result-row">
+          <span class="result-label">Name:</span>
+          <span class="result-value">[[ result.name ]]</span>
+        </div>
+        <div class="result-row bin-row">
+          <span class="result-label">Bin Location:</span>
+          <span class="result-value bin-value">[[ result.bin ]]</span>
+        </div>
+      </div>
+      <div v-else class="result-content">
+        <p>[[ result.message ]]</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://unpkg.com/@zxing/library@0.19.1"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<script>
+// Wait for both libraries to load
+window.addEventListener('load', () => {
+  console.log('ZXing available:', typeof ZXing !== 'undefined');
+  console.log('Vue available:', typeof Vue !== 'undefined');
+});
+</script>
+<script>
+const { createApp } = Vue;
+
+createApp({
+  delimiters: ['[[', ']]'],
+  data() {
+    return {
+      cameraActive: false,
+      scanning: false,
+      manualBarcode: '',
+      lastScannedBarcode: null,
+      result: null,
+      error: null,
+      cacheStatus: 'Loading...',
+      itemCount: 0,
+      lastUpdated: 'Never',
+      isCacheValid: false,
+      codeReader: null,
+      stream: null
+    };
+  },
+  mounted() {
+    this.fetchCacheStatus();
+    // Initialize with EAN-13 and UPC-A only
+    if (typeof ZXing !== 'undefined') {
+      const hints = new Map();
+      const formats = [
+        ZXing.BarcodeFormat.EAN_13,
+        ZXing.BarcodeFormat.UPC_A
+      ];
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      
+      this.codeReader = new ZXing.BrowserMultiFormatReader(hints);
+      console.log('Code reader initialized successfully (EAN-13, UPC-A only)');
+    } else {
+      console.error('ZXing library not loaded');
+    }
+  },
+  beforeUnmount() {
+    this.stopCamera();
+  },
+  methods: {
+    async fetchCacheStatus() {
+      try {
+        const response = await fetch('/inventory-tools/shipmondo-cache-status/');
+        const data = await response.json();
+        this.itemCount = data.item_count;
+        this.lastUpdated = data.last_updated_display;
+        this.cacheStatus = data.is_refreshing ? 'Refreshing...' : 'Ready';
+        this.isCacheValid = data.item_count > 0;
+      } catch (err) {
+        console.error('Failed to fetch cache status:', err);
+        this.cacheStatus = 'Error';
+      }
+    },
+    async toggleCamera() {
+      if (this.cameraActive) {
+        this.stopCamera();
+      } else {
+        await this.startCamera();
+      }
+    },
+    async startCamera() {
+      try {
+        this.error = null;
+        this.scanning = true;
+        
+        // Check if code reader exists
+        if (!this.codeReader) {
+          if (typeof ZXing === 'undefined') {
+            throw new Error('Barcode library not loaded. Please refresh the page.');
+          }
+          this.codeReader = new ZXing.BrowserMultiFormatReader();
+        }
+        
+        const videoElement = this.$refs.videoElement;
+        
+        // Check if getUserMedia is supported
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('Camera access is not supported on this browser.');
+        }
+        
+        // Use ZXing's built-in video decode method
+        await this.codeReader.decodeFromVideoDevice(null, videoElement, (result, err) => {
+          if (result) {
+            console.log('Barcode detected:', result.text);
+            this.lastScannedBarcode = result.text;
+            this.lookupBarcode(result.text);
+          }
+          if (err && !(err instanceof ZXing.NotFoundException)) {
+            console.error('Decode error:', err);
+          }
+        });
+        
+        this.cameraActive = true;
+        
+      } catch (err) {
+        console.error('Camera error:', err);
+        let errorMessage = 'Failed to access camera.';
+        
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          errorMessage = 'Camera permission denied. Please check browser settings.';
+        } else if (err.name === 'NotFoundError') {
+          errorMessage = 'No camera found on this device.';
+        } else if (err.name === 'NotReadableError') {
+          errorMessage = 'Camera is already in use.';
+        } else if (err.message) {
+          errorMessage = err.message;
+        }
+        
+        this.error = errorMessage;
+        this.cameraActive = false;
+        this.scanning = false;
+      }
+    },
+    stopCamera() {
+      if (this.codeReader) {
+        this.codeReader.reset();
+      }
+      this.cameraActive = false;
+      this.scanning = false;
+    },
+    async lookupBarcode(barcode) {
+      try {
+        this.error = null;
+        const response = await fetch('/barcode-scanner/lookup/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ barcode })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+          this.result = data;
+          // Play a beep sound (if desired)
+          if (data.found) {
+            this.playBeep();
+          }
+        } else {
+          this.error = data.error || 'Lookup failed';
+        }
+      } catch (err) {
+        console.error('Lookup error:', err);
+        this.error = 'Failed to lookup barcode';
+      }
+    },
+    async lookupManual() {
+      if (!this.manualBarcode) return;
+      await this.lookupBarcode(this.manualBarcode);
+      this.manualBarcode = '';
+    },
+    clearResult() {
+      this.result = null;
+      this.lastScannedBarcode = null;
+    },
+    playBeep() {
+      // Create a simple beep sound
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      oscillator.frequency.value = 800;
+      oscillator.type = 'sine';
+      
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.1);
+    }
+  }
+}).mount('#scanner-app');
+</script>
+{% endblock %}

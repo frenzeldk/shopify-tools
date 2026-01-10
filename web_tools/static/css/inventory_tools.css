@@ -44,34 +44,35 @@ header h1 {
 
 main {
   max-width: 1200px;
-  margin: 2rem auto;
-  padding: 0 2rem;
+  margin: 0 auto;
+  padding: 1.5rem;
 }
 
 /* Tool Section */
 .tool-section {
   background-color: white;
   border-radius: 8px;
-  padding: 2rem;
-  margin-bottom: 2rem;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 .tool-section h2 {
-  font-size: 1.5rem;
+  font-size: 1.4rem;
   margin-bottom: 0.5rem;
   color: #2c3e50;
 }
 
 .tool-description {
   color: #666;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
   font-size: 0.95rem;
+  line-height: 1.5;
 }
 
 /* Input Group */
 .input-group {
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
 }
 
 .input-group label {
@@ -83,7 +84,7 @@ main {
 
 .input-group input[type="text"] {
   width: 100%;
-  max-width: 400px;
+  max-width: 500px;
   padding: 0.75rem;
   font-size: 1rem;
   border: 2px solid #ddd;
@@ -100,13 +101,14 @@ main {
 button {
   background-color: #3498db;
   color: white;
-  padding: 0.75rem 2rem;
+  padding: 0.75rem 1.75rem;
   font-size: 1rem;
   font-weight: 500;
   border: none;
   border-radius: 4px;
   cursor: pointer;
   transition: background-color 0.3s ease, opacity 0.3s ease;
+  touch-action: manipulation;
 }
 
 button:hover:not(:disabled) {
@@ -363,12 +365,16 @@ button:active:not(:disabled) {
   }
 
   main {
-    padding: 0 1rem;
-    margin: 1rem auto;
+    padding: 0.75rem;
   }
 
   .tool-section {
-    padding: 1.5rem;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+  }
+  
+  .tool-section h2 {
+    font-size: 1.25rem;
   }
 
   .input-group input[type="text"] {
@@ -377,5 +383,71 @@ button:active:not(:disabled) {
 
   button {
     width: 100%;
+    padding: 0.875rem 1.5rem;
+  }
+  
+  .button-group {
+    flex-direction: column;
+    width: 100%;
+  }
+  
+  .button-group button {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+  
+  .cache-status {
+    grid-template-columns: 1fr;
+  }
+  
+  .preview-table {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  
+  .preview-table table {
+    min-width: 600px;
+  }
+}
+
+@media (max-width: 480px) {
+  main {
+    padding: 0.5rem;
+  }
+  
+  .tool-section {
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+  
+  .tool-section h2 {
+    font-size: 1.15rem;
+  }
+  
+  .tool-description {
+    font-size: 0.9rem;
+  }
+  
+  .input-group input[type="text"] {
+    font-size: 0.95rem;
+    padding: 0.625rem;
+  }
+  
+  button {
+    font-size: 0.95rem;
+    padding: 0.75rem 1.25rem;
+  }
+  
+  .result-section h3,
+  .shipmondo-tool h3 {
+    font-size: 1.1rem;
+  }
+  
+  .status-label {
+    font-size: 0.8rem;
+  }
+  
+  .status-value {
+    font-size: 1rem;
   }
 }
