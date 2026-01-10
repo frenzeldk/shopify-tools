@@ -1,139 +1,6 @@
-/* General Styles */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/* Inventory Tools Page Specific Styles */
 
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  background-color: #f5f5f5;
-  color: #333;
-  line-height: 1.6;
-}
-
-/* Layout Container */
-.layout-container {
-  display: flex;
-  min-height: 100vh;
-}
-
-/* Sidebar */
-.sidebar {
-  width: 250px;
-  background-color: #2c3e50;
-  color: white;
-  display: flex;
-  flex-direction: column;
-  position: fixed;
-  height: 100vh;
-  left: 0;
-  top: 0;
-  z-index: 1000;
-}
-
-.sidebar-header {
-  padding: 1.5rem 1.25rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.sidebar-header h2 {
-  font-size: 1.25rem;
-  font-weight: 600;
-  margin: 0;
-  color: white;
-}
-
-.sidebar-nav {
-  flex: 1;
-  padding: 1rem 0;
-  overflow-y: auto;
-}
-
-.sidebar-nav .nav-link {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.75rem 1.25rem;
-  color: rgba(255, 255, 255, 0.8);
-  text-decoration: none;
-  transition: background-color 0.2s ease, color 0.2s ease;
-  border-left: 3px solid transparent;
-}
-
-.sidebar-nav .nav-link:hover {
-  background-color: rgba(255, 255, 255, 0.05);
-  color: white;
-}
-
-.sidebar-nav .nav-link.active {
-  background-color: rgba(255, 255, 255, 0.1);
-  color: white;
-  border-left-color: #3498db;
-  font-weight: 500;
-}
-
-.nav-icon {
-  font-size: 1.25rem;
-  flex-shrink: 0;
-}
-
-.nav-text {
-  font-size: 0.95rem;
-}
-
-.sidebar-footer {
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 1rem 1.25rem;
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.user-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background-color: #3498db;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 600;
-  font-size: 0.95rem;
-  flex-shrink: 0;
-}
-
-.user-name {
-  font-size: 0.9rem;
-  color: rgba(255, 255, 255, 0.9);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Main Wrapper */
-.main-wrapper {
-  margin-left: 250px;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
-
-header {
-  background-color: #2c3e50;
-  color: white;
-  padding: 1.5rem 2rem;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-
+/* Header (page-specific) */
 .header-content {
   max-width: 1200px;
   margin: 0 auto;
@@ -294,18 +161,183 @@ button:active:not(:disabled) {
   color: #721c24;
 }
 
+.info-message {
+  background-color: #d1ecf1;
+  border: 1px solid #bee5eb;
+  border-radius: 4px;
+  padding: 1rem;
+  color: #0c5460;
+  margin-bottom: 1.5rem;
+}
+
+/* Shipmondo Bin Management Styles */
+.cache-status {
+  background-color: #f8f9fa;
+  border-radius: 6px;
+  padding: 1.25rem;
+  margin-bottom: 2rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.status-label {
+  font-size: 0.85rem;
+  color: #666;
+  font-weight: 500;
+}
+
+.status-value {
+  font-size: 1.1rem;
+  color: #2c3e50;
+  font-weight: 600;
+}
+
+.btn-refresh {
+  margin-top: 0.5rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  background-color: #6c757d;
+  align-self: flex-start;
+}
+
+.btn-refresh:hover:not(:disabled) {
+  background-color: #5a6268;
+}
+
+.shipmondo-tool {
+  margin-top: 2rem;
+  padding-top: 2rem;
+  border-top: 2px solid #eee;
+}
+
+.shipmondo-tool h3 {
+  font-size: 1.25rem;
+  margin-bottom: 0.5rem;
+  color: #2c3e50;
+}
+
+.btn-action {
+  margin-top: 1rem;
+}
+
+.btn-cleanup {
+  background-color: #dc3545;
+}
+
+.btn-cleanup:hover:not(:disabled) {
+  background-color: #c82333;
+}
+
+.btn-preview {
+  background-color: #17a2b8;
+}
+
+.btn-preview:hover:not(:disabled) {
+  background-color: #138496;
+}
+
+.btn-apply {
+  background-color: #28a745;
+  margin-left: 0.5rem;
+}
+
+.btn-apply:hover:not(:disabled) {
+  background-color: #218838;
+}
+
+.input-code {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.95rem;
+}
+
+.input-help {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+  color: #666;
+  font-style: italic;
+}
+
+.button-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.button-group button {
+  margin-top: 0;
+}
+
+.preview-table {
+  margin-top: 1rem;
+  overflow-x: auto;
+}
+
+.preview-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.preview-table thead {
+  background-color: #f8f9fa;
+}
+
+.preview-table th,
+.preview-table td {
+  padding: 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #dee2e6;
+}
+
+.preview-table th {
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.preview-table tbody tr:hover {
+  background-color: #f8f9fa;
+}
+
+.bin-current {
+  font-family: 'Courier New', Courier, monospace;
+  color: #dc3545;
+  font-weight: 500;
+}
+
+.bin-new {
+  font-family: 'Courier New', Courier, monospace;
+  color: #28a745;
+  font-weight: 500;
+}
+
+.result-section h4 {
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+  color: #2c3e50;
+}
+
+.success-message ul,
+.error-message ul {
+  margin-top: 0.5rem;
+  margin-left: 1.5rem;
+}
+
+.success-message li,
+.error-message li {
+  margin-bottom: 0.25rem;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
-  .sidebar {
-    width: 100%;
-    height: auto;
-    position: relative;
-  }
-
-  .main-wrapper {
-    margin-left: 0;
-  }
-
   header {
     padding: 1rem;
   }
