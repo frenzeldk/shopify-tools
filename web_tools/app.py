@@ -408,25 +408,27 @@ def create_app() -> Flask:
 
     @application.post("/inventory-tools/cleanup-sold-out-bins/")
     async def cleanup_sold_out_bins() -> Any:
-        """Clean up bin locations for sold-out Shopify variants."""
+        """Clean up bin locations for sold-out and archived Shopify variants."""
         try:
-            # Fetch sold-out variants from Shopify
-            sold_out_skus = await asyncio.to_thread(_fetch_sold_out_variants)
+            # Fetch sold-out and archived variants from Shopify
+            result = await asyncio.to_thread(_fetch_cleanup_variants)
+            sold_out_skus = result['sold_out']
+            archived_skus = result['archived']
             
-            if not sold_out_skus:
+            if not sold_out_skus and not archived_skus:
                 return jsonify({
                     "success": True,
-                    "message": "No sold-out variants found in Shopify",
+                    "message": "No sold-out or archived variants found in Shopify",
                     "cleared_count": 0
                 })
             
-            # Find items that are sold out and have bins
-            sold_out_set = set(sold_out_skus)
+            # Combine both lists
+            cleanup_set = set(sold_out_skus + archived_skus)
             cleared_count = 0
             errors = []
             
             for sku, item_data in list(shipmondo_cache["items"].items()):
-                if sku in sold_out_set and item_data.get("bin"):
+                if sku in cleanup_set and item_data.get("bin"):
                     item_id = item_data.get("id")
                     success, message = clear_bin_location(item_id, sku)
                     if success:
@@ -439,6 +441,7 @@ def create_app() -> Flask:
             return jsonify({
                 "success": True,
                 "sold_out_count": len(sold_out_skus),
+                "archived_count": len(archived_skus),
                 "cleared_count": cleared_count,
                 "errors": errors[:10]  # Limit error messages
             })
@@ -567,12 +570,15 @@ def create_app() -> Flask:
     return application
 
 
-def _fetch_sold_out_variants():
-    """Fetch sold-out variants from Shopify (helper for async execution)."""
+def _fetch_cleanup_variants():
+    """Fetch sold-out and archived variants from Shopify (helper for async execution)."""
     from gql import gql
     
     gql_client = shopify_module.__gql_client__
     sold_out_skus = []
+    archived_skus = []
+    
+    # First, fetch active products with sold-out variants
     has_next_page = True
     after_cursor = None
 
@@ -591,6 +597,10 @@ def _fetch_sold_out_variants():
                                     inventoryQuantity
                                 }
                             }
+                            pageInfo {
+                                hasNextPage
+                                endCursor
+                            }
                         }
                     }
                 }
@@ -608,22 +618,174 @@ def _fetch_sold_out_variants():
         
         for product in products:
             product_node = product["node"]
-            for variant in product_node["variants"]["edges"]:
+            product_id = product_node["id"]
+            
+            # Paginate through variants
+            variants_has_next = True
+            variants_after = None
+            first_page_variants = product_node["variants"]["edges"]
+            first_page_info = product_node["variants"]["pageInfo"]
+            
+            # Process first page of variants
+            for variant in first_page_variants:
                 variant_node = variant["node"]
                 if not variant_node.get("sku"):
-                        continue
+                    continue
                 sku = variant_node.get("sku", "").strip()
                 inventory_policy = variant_node.get("inventoryPolicy")
                 inventory_quantity = variant_node.get("inventoryQuantity", 0)
                 
                 if sku and inventory_policy == "DENY" and inventory_quantity == 0:
                     sold_out_skus.append(sku)
+            
+            # Fetch additional pages if needed
+            variants_has_next = first_page_info.get("hasNextPage", False)
+            variants_after = first_page_info.get("endCursor")
+            
+            while variants_has_next:
+                variants_query = gql("""
+                query getProductVariants($productId: ID!, $after: String) {
+                    product(id: $productId) {
+                        variants(first: 100, after: $after) {
+                            edges {
+                                node {
+                                    sku
+                                    inventoryPolicy
+                                    inventoryQuantity
+                                }
+                            }
+                            pageInfo {
+                                hasNextPage
+                                endCursor
+                            }
+                        }
+                    }
+                }
+                """)
+                
+                variants_variables = {"productId": product_id, "after": variants_after}
+                variants_result = gql_client.execute(variants_query, variable_values=variants_variables)
+                variant_edges = variants_result.get("product", {}).get("variants", {}).get("edges", [])
+                
+                for variant in variant_edges:
+                    variant_node = variant["node"]
+                    if not variant_node.get("sku"):
+                        continue
+                    sku = variant_node.get("sku", "").strip()
+                    inventory_policy = variant_node.get("inventoryPolicy")
+                    inventory_quantity = variant_node.get("inventoryQuantity", 0)
+                    
+                    if sku and inventory_policy == "DENY" and inventory_quantity == 0:
+                        sold_out_skus.append(sku)
+                
+                variants_page_info = variants_result.get("product", {}).get("variants", {}).get("pageInfo", {})
+                variants_has_next = variants_page_info.get("hasNextPage", False)
+                variants_after = variants_page_info.get("endCursor")
         
         page_info = result.get("products", {}).get("pageInfo", {})
         has_next_page = page_info.get("hasNextPage", False)
         after_cursor = page_info.get("endCursor", None)
     
-    return sold_out_skus
+    # Now fetch archived products
+    has_next_page = True
+    after_cursor = None
+    
+    while has_next_page:
+        query = gql("""
+        query getArchivedProducts($after: String) {
+            products(first: 50, query: "status:archived", after: $after) {
+                edges {
+                    node {
+                        id
+                        variants(first: 100) {
+                            edges {
+                                node {
+                                    sku
+                                }
+                            }
+                            pageInfo {
+                                hasNextPage
+                                endCursor
+                            }
+                        }
+                    }
+                }
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+            }
+        }
+        """)
+        
+        variables = {"after": after_cursor}
+        result = gql_client.execute(query, variable_values=variables)
+        products = result.get("products", {}).get("edges", [])
+        
+        for product in products:
+            product_node = product["node"]
+            product_id = product_node["id"]
+            
+            # Paginate through variants
+            variants_has_next = True
+            variants_after = None
+            first_page_variants = product_node["variants"]["edges"]
+            first_page_info = product_node["variants"]["pageInfo"]
+            
+            # Process first page of variants
+            for variant in first_page_variants:
+                variant_node = variant["node"]
+                if not variant_node.get("sku"):
+                    continue
+                sku = variant_node.get("sku", "").strip()
+                if sku:
+                    archived_skus.append(sku)
+            
+            # Fetch additional pages if needed
+            variants_has_next = first_page_info.get("hasNextPage", False)
+            variants_after = first_page_info.get("endCursor")
+            
+            while variants_has_next:
+                variants_query = gql("""
+                query getProductVariants($productId: ID!, $after: String) {
+                    product(id: $productId) {
+                        variants(first: 100, after: $after) {
+                            edges {
+                                node {
+                                    sku
+                                }
+                            }
+                            pageInfo {
+                                hasNextPage
+                                endCursor
+                            }
+                        }
+                    }
+                }
+                """)
+                
+                variants_variables = {"productId": product_id, "after": variants_after}
+                variants_result = gql_client.execute(variants_query, variable_values=variants_variables)
+                variant_edges = variants_result.get("product", {}).get("variants", {}).get("edges", [])
+                
+                for variant in variant_edges:
+                    variant_node = variant["node"]
+                    sku = variant_node.get("sku", "").strip()
+                    if sku:
+                        archived_skus.append(sku)
+                
+                variants_page_info = variants_result.get("product", {}).get("variants", {}).get("pageInfo", {})
+                variants_has_next = variants_page_info.get("hasNextPage", False)
+                variants_after = variants_page_info.get("endCursor")
+        
+        page_info = result.get("products", {}).get("pageInfo", {})
+        has_next_page = page_info.get("hasNextPage", False)
+        after_cursor = page_info.get("endCursor", None)
+    
+    return {
+        'sold_out': sold_out_skus,
+        'archived': archived_skus
+    }
 
 if __name__ == "__main__":
     app = create_app()
