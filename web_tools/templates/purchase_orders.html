@@ -1213,6 +1213,7 @@
           buildGridOptions() {
             const vm = this;
             return {
+              theme: "legacy",
               columnDefs: vm.columnDefs,
               rowData: vm.rowData,
               enableCellTextSelection: true,
@@ -1226,7 +1227,6 @@
                 resizable: true,
                 filter: "advancedTextFilter",
                 floatingFilter: true,
-                suppressMenu: true,
                 suppressHeaderMenuButton: true,
                 floatingFilterComponent: "advancedFloatingFilter",
                 filterParams: {
