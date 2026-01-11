@@ -524,6 +524,46 @@ def create_app() -> Flask:
             current_app.logger.exception("Failed to apply batch update", exc_info=exc)
             return jsonify({"error": "Failed to apply batch update."}), 500
 
+    @application.route("/barcode-scanner/")
+    @oidc.require_login
+    def barcode_scanner() -> Any:
+        """Barcode scanner page for looking up items in Shipmondo cache."""
+        user_name = session.get("oidc_auth_profile", {}).get("preferred_username", "User")
+        return render_template(
+            "barcode_scanner.html",
+            user_name=user_name,
+            active_page="barcode_scanner"
+        )
+
+    @application.post("/barcode-scanner/lookup/")
+    def lookup_barcode() -> Any:
+        """Look up a barcode in the Shipmondo cache."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            barcode = str(payload.get("barcode", "")).strip()
+            
+            if not barcode:
+                return jsonify({"error": "Barcode is required"}), 400
+            
+            # Search for the item in cache by SKU
+            item = shipmondo_cache["items"].get(barcode)
+            
+            if item:
+                return jsonify({
+                    "found": True,
+                    "sku": barcode,
+                    "name": item.get("product_name", "Unknown"),
+                    "bin": item.get("bin", "No bin assigned")
+                })
+            else:
+                return jsonify({
+                    "found": False,
+                    "message": f"No item found with barcode: {barcode}"
+                })
+        except Exception as exc:
+            current_app.logger.exception("Failed to lookup barcode", exc_info=exc)
+            return jsonify({"error": "Failed to lookup barcode."}), 500
+
     return application
 
 

@@ -3,13 +3,17 @@
   <head>
     <meta charset="utf-8">
     <title>{% block title %}Shopify Tools{% endblock %}</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
     {% block extra_css %}{% endblock %}
   </head>
   <body>
     <div class="layout-container">
-      <aside class="sidebar">
+      <button class="mobile-menu-toggle" id="mobileMenuToggle" aria-label="Toggle menu">
+        <span class="hamburger"></span>
+      </button>
+      
+      <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
           <h2>Shopify Tools</h2>
         </div>
@@ -22,6 +26,10 @@
             <span class="nav-icon">🔧</span>
             <span class="nav-text">Inventory Tools</span>
           </a>
+          <a href="/barcode-scanner/" class="nav-link {% if active_page == 'barcode_scanner' %}active{% endif %}">
+            <span class="nav-icon">📷</span>
+            <span class="nav-text">Barcode Scanner</span>
+          </a>
         </nav>
         <div class="sidebar-footer">
           <div class="user-info">
@@ -30,6 +38,9 @@
           </div>
         </div>
       </aside>
+      
+      <div class="sidebar-overlay" id="sidebarOverlay"></div>
+      
       <div class="main-wrapper">
         <header class="sticky-header">
           <h1>{% block page_title %}Shopify Tools{% endblock %}</h1>
@@ -39,6 +50,50 @@
         </main>
       </div>
     </div>
+    
+    <script>
+      // Mobile menu toggle
+      (function() {
+        const toggle = document.getElementById('mobileMenuToggle');
+        const sidebar = document.getElementById('sidebar');
+        const overlay = document.getElementById('sidebarOverlay');
+        
+        if (toggle && sidebar && overlay) {
+          function openMenu() {
+            sidebar.classList.add('open');
+            overlay.classList.add('active');
+            document.body.style.overflow = 'hidden';
+          }
+          
+          function closeMenu() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('active');
+            document.body.style.overflow = '';
+          }
+          
+          toggle.addEventListener('click', function() {
+            if (sidebar.classList.contains('open')) {
+              closeMenu();
+            } else {
+              openMenu();
+            }
+          });
+          
+          overlay.addEventListener('click', closeMenu);
+          
+          // Close menu when clicking nav links on mobile
+          const navLinks = sidebar.querySelectorAll('.nav-link');
+          navLinks.forEach(link => {
+            link.addEventListener('click', function() {
+              if (window.innerWidth <= 768) {
+                closeMenu();
+              }
+            });
+          });
+        }
+      })();
+    </script>
+    
     {% block extra_js %}{% endblock %}
   </body>
 </html>
