@@ -56,7 +56,7 @@
       <button @click="error = null" class="btn-close">✕</button>
     </div>
 
-    <div v-if="result" class="result-card" :class="result.found ? 'result-found' : 'result-not-found'">
+    <div v-if="result && !isMobile" class="result-card" :class="result.found ? 'result-found' : 'result-not-found'">
       <div class="result-header">
         <h3 v-if="result.found">✅ Item Found</h3>
         <h3 v-else>❌ Not Found</h3>
@@ -78,6 +78,86 @@
       </div>
       <div v-else class="result-content">
         <p>[[ result.message ]]</p>
+      </div>
+    </div>
+
+    <!-- Mobile Modal -->
+    <div v-if="showModal" class="modal-overlay" @click="closeModal">
+      <div class="modal-content" @click.stop>
+        <!-- Success Message (replaces all other content) -->
+        <div v-if="binAssignmentSuccess" class="modal-body success-message">
+          <div class="success-icon">✅</div>
+          <h3>Bin Assigned Successfully!</h3>
+          <div class="bin-location">[[ binAssignmentSuccess ]]</div>
+          <p class="success-item-info">
+            <strong>[[ currentItem.sku ]]</strong><br>
+            [[ currentItem.name ]]
+          </p>
+        </div>
+        
+        <!-- Regular Modal Content -->
+        <template v-else>
+          <div class="modal-header">
+            <h3 v-if="result && result.found">✅ Item Found</h3>
+            <h3 v-else-if="result">❌ Not Found</h3>
+            <h3 v-else-if="assigningBin">📦 Scan Bin Location</h3>
+            <button @click="closeModal" class="btn-close">✕</button>
+          </div>
+          
+          <div v-if="assigningBin" class="modal-body">
+            <div class="bin-assignment">
+              <div class="item-info">
+                <p><strong>SKU:</strong> [[ currentItem.sku ]]</p>
+                <p><strong>Name:</strong> [[ currentItem.name ]]</p>
+              </div>
+              <p class="instruction">Scan the barcode of the bin location</p>
+              
+              <!-- Camera view for bin scanning -->
+              <div class="modal-camera-container" v-if="cameraActive">
+                <video ref="videoElement" playsinline autoplay muted></video>
+                <div class="camera-hint">
+                  <p>Scan bin barcode</p>
+                </div>
+              </div>
+              
+              <div class="manual-bin-input">
+                <input 
+                  type="text" 
+                  v-model="manualBinCode" 
+                  @keyup.enter="assignBinManual"
+                  placeholder="Or enter bin code..."
+                  class="bin-input"
+                  ref="binInput"
+                >
+                <button @click="assignBinManual" class="btn btn-primary" :disabled="!manualBinCode || assigningBinInProgress">
+                  [[ assigningBinInProgress ? 'Assigning...' : 'Assign' ]]
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          <div v-else-if="result && result.found" class="modal-body">
+            <div class="result-row">
+              <span class="result-label">SKU:</span>
+              <span class="result-value sku-value">[[ result.sku ]]</span>
+            </div>
+            <div class="result-row">
+              <span class="result-label">Name:</span>
+              <span class="result-value">[[ result.name ]]</span>
+            </div>
+            <div v-if="result.bin && result.bin !== 'No bin assigned'" class="bin-display">
+              <div class="bin-location">[[ result.bin ]]</div>
+            </div>
+            <div v-else class="no-bin">
+              <p>No bin location assigned</p>
+              <button @click="startBinAssignment" class="btn btn-primary">📦 Assign Bin</button>
+            </div>
+          </div>
+          
+          <div v-else-if="result" class="modal-body">
+            <p>[[ result.message ]]</p>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -112,29 +192,57 @@ createApp({
       lastUpdated: 'Never',
       isCacheValid: false,
       codeReader: null,
-      stream: null
+      stream: null,
+      isMobile: false,
+      showModal: false,
+      assigningBin: false,
+      currentItem: null,
+      manualBinCode: '',
+      assigningBinInProgress: false,
+      binAssignmentSuccess: null,
+      cameraWasActiveBeforeModal: false
     };
   },
   mounted() {
+    this.detectMobile();
     this.fetchCacheStatus();
-    // Initialize with EAN-13 and UPC-A only
+    // Initialize with EAN-13, UPC-A, and Code-128
     if (typeof ZXing !== 'undefined') {
       const hints = new Map();
       const formats = [
         ZXing.BarcodeFormat.EAN_13,
-        ZXing.BarcodeFormat.UPC_A
+        ZXing.BarcodeFormat.UPC_A,
+        ZXing.BarcodeFormat.CODE_128
       ];
       hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
       
       this.codeReader = new ZXing.BrowserMultiFormatReader(hints);
-      console.log('Code reader initialized successfully (EAN-13, UPC-A only)');
+      console.log('Code reader initialized successfully (EAN-13, UPC-A, Code-128)');
     } else {
       console.error('ZXing library not loaded');
     }
   },
   beforeUnmount() {
     this.stopCamera();
+  },
+  watch: {
+    showModal(newVal) {
+      if (newVal) {
+        // Modal opened - pause camera if active
+        if (this.cameraActive) {
+          this.cameraWasActiveBeforeModal = true;
+          this.pauseCamera();
+        }
+      } else {
+        // Modal closed - resume camera if it was active
+        const shouldResume = this.cameraWasActiveBeforeModal;
+        this.cameraWasActiveBeforeModal = false;
+        if (shouldResume) {
+          this.resumeCamera();
+        }
+      }
+    }
   },
   methods: {
     async fetchCacheStatus() {
@@ -217,9 +325,30 @@ createApp({
       this.cameraActive = false;
       this.scanning = false;
     },
+    pauseCamera() {
+      // Pause scanning without stopping the camera completely
+      if (this.codeReader) {
+        this.codeReader.reset();
+      }
+      this.scanning = false;
+      // Keep cameraActive true so we know to resume
+    },
+    async resumeCamera() {
+      // Resume scanning - restart camera if it was active before
+      if (this.cameraWasActiveBeforeModal || this.cameraActive) {
+        await this.startCamera();
+      }
+    },
     async lookupBarcode(barcode) {
       try {
         this.error = null;
+        
+        // If assigning bin, treat this as the bin barcode
+        if (this.assigningBin && this.currentItem) {
+          await this.assignBin(barcode);
+          return;
+        }
+        
         const response = await fetch('/barcode-scanner/lookup/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -233,6 +362,10 @@ createApp({
           // Play a beep sound (if desired)
           if (data.found) {
             this.playBeep();
+            // Show modal on mobile
+            if (this.isMobile) {
+              this.showModal = true;
+            }
           }
         } else {
           this.error = data.error || 'Lookup failed';
@@ -241,6 +374,76 @@ createApp({
         console.error('Lookup error:', err);
         this.error = 'Failed to lookup barcode';
       }
+    },
+    detectMobile() {
+      this.isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth <= 768;
+    },
+    closeModal() {
+      this.showModal = false;
+      this.assigningBin = false;
+      this.currentItem = null;
+      this.manualBinCode = '';
+      this.binAssignmentSuccess = null;
+    },
+    startBinAssignment() {
+      if (!this.result || !this.result.found) return;
+      this.currentItem = {
+        sku: this.result.sku,
+        name: this.result.name,
+        itemId: this.result.itemId
+      };
+      this.assigningBin = true;
+      this.binAssignmentSuccess = null;
+      // Resume camera for bin scanning
+      this.$nextTick(async () => {
+        if (this.cameraWasActiveBeforeModal) {
+          await this.resumeCamera();
+        }
+      });
+    },
+    async assignBin(binCode) {
+      if (!this.currentItem || !binCode || this.assigningBinInProgress) return;
+      
+      this.assigningBinInProgress = true;
+      try {
+        const response = await fetch('/barcode-scanner/assign-bin/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            sku: this.currentItem.sku,
+            bin: binCode 
+          })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok && data.success) {
+          this.binAssignmentSuccess = binCode;
+          this.playBeep();
+          this.manualBinCode = '';
+          // Update result if still showing
+          if (this.result && this.result.sku === this.currentItem.sku) {
+            this.result.bin = binCode;
+          }
+          // Close modal after 2 seconds
+          setTimeout(() => {
+            this.assigningBinInProgress = false;
+            this.closeModal();
+            this.clearResult();
+          }, 2000);
+        } else {
+          this.error = data.error || 'Failed to assign bin';
+          this.assigningBinInProgress = false;
+        }
+      } catch (err) {
+        console.error('Bin assignment error:', err);
+        this.error = 'Failed to assign bin';
+        this.assigningBinInProgress = false;
+      }
+    },
+    async assignBinManual() {
+      if (!this.manualBinCode) return;
+      await this.assignBin(this.manualBinCode);
     },
     async lookupManual() {
       if (!this.manualBarcode) return;
