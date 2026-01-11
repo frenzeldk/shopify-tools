@@ -63,7 +63,8 @@ def fetch_all_shipmondo_items() -> Dict[str, dict]:
                         "id": item.get("id"),
                         "bin": item.get("bin", ""),
                         "name": item.get("name", ""),
-                        "sku": sku
+                        "sku": sku,
+                        "barcode": item.get("barcode", "")
                     }
             
             # Move to next page

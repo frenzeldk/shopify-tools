@@ -545,15 +545,20 @@ def create_app() -> Flask:
             if not barcode:
                 return jsonify({"error": "Barcode is required"}), 400
             
-            # Search for the item in cache by SKU
-            item = shipmondo_cache["items"].get(barcode)
+            # Search for the item in cache by barcode field
+            found_item = None
+            for sku, item_data in shipmondo_cache["items"].items():
+                if item_data.get("barcode") == barcode:
+                    found_item = item_data
+                    break
             
-            if item:
+            if found_item:
                 return jsonify({
                     "found": True,
-                    "sku": barcode,
-                    "name": item.get("product_name", "Unknown"),
-                    "bin": item.get("bin", "No bin assigned")
+                    "sku": found_item.get("sku", "Unknown"),
+                    "name": found_item.get("name", "Unknown"),
+                    "bin": found_item.get("bin", "No bin assigned"),
+                    "itemId": found_item.get("id")
                 })
             else:
                 return jsonify({
@@ -563,6 +568,47 @@ def create_app() -> Flask:
         except Exception as exc:
             current_app.logger.exception("Failed to lookup barcode", exc_info=exc)
             return jsonify({"error": "Failed to lookup barcode."}), 500
+
+    @application.post("/barcode-scanner/assign-bin/")
+    async def assign_bin() -> Any:
+        """Assign a bin location to an item."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            sku = str(payload.get("sku", "")).strip()
+            bin_code = str(payload.get("bin", "")).strip()
+            
+            if not sku or not bin_code:
+                return jsonify({"error": "SKU and bin code are required"}), 400
+            
+            # Find item in cache
+            item_data = shipmondo_cache["items"].get(sku)
+            if not item_data:
+                return jsonify({"error": f"Item with SKU {sku} not found in cache"}), 404
+            
+            item_id = item_data.get("id")
+            if not item_id:
+                return jsonify({"error": "Item ID not found"}), 500
+            
+            # Update bin in Shipmondo
+            from shipmondo import update_bin_location
+            success, message = await asyncio.to_thread(update_bin_location, item_id, sku, bin_code)
+            
+            if success:
+                # Update cache
+                with shipmondo_lock:
+                    shipmondo_cache["items"][sku]["bin"] = bin_code
+                
+                return jsonify({
+                    "success": True,
+                    "message": message,
+                    "bin": bin_code
+                })
+            else:
+                return jsonify({"error": message}), 500
+                
+        except Exception as exc:
+            current_app.logger.exception("Failed to assign bin", exc_info=exc)
+            return jsonify({"error": "Failed to assign bin."}), 500
 
     return application
 
