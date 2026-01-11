@@ -735,6 +735,8 @@ def _fetch_cleanup_variants():
             # Process first page of variants
             for variant in first_page_variants:
                 variant_node = variant["node"]
+                if not variant_node.get("sku"):
+                    continue
                 sku = variant_node.get("sku", "").strip()
                 if sku:
                     archived_skus.append(sku)
