@@ -12,7 +12,7 @@ import sqlite3
 import os
 from pathlib import Path
 from typing import Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from waitress import serve
 from flask import Flask, current_app, g, jsonify, render_template, request, redirect, url_for, session
 from flask_oidc import OpenIDConnect
@@ -66,7 +66,7 @@ def fetch_and_cache_shipmondo_items():
         
         with shipmondo_lock:
             shipmondo_cache["items"] = items
-            shipmondo_cache["last_updated"] = datetime.now().isoformat()
+            shipmondo_cache["last_updated"] = datetime.now(timezone.utc).isoformat()
         
         logger.info(f"Successfully cached {len(items)} Shipmondo items")
     except Exception as e:
@@ -188,7 +188,7 @@ def create_app() -> Flask:
         # Check cache if not forcing refresh
         if not force_refresh and 'po_data' in session and 'po_data_timestamp' in session:
             cache_time = datetime.fromisoformat(session['po_data_timestamp'])
-            cache_age = datetime.now() - cache_time
+            cache_age = datetime.now(timezone.utc) - cache_time
             
             # If cache is less than 30 minutes old, return cached data
             if cache_age < timedelta(minutes=CACHE_DURATION_MINUTES):
@@ -206,7 +206,7 @@ def create_app() -> Flask:
             
             # Store in session cache
             session['po_data'] = data
-            session['po_data_timestamp'] = datetime.now().isoformat()
+            session['po_data_timestamp'] = datetime.now(timezone.utc).isoformat()
             
             return jsonify({
                 "data": data,

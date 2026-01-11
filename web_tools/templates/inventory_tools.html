@@ -406,9 +406,10 @@
           formatDateTime(isoString) {
             if (!isoString) return 'Never';
             const date = new Date(isoString);
-            return new Intl.DateTimeFormat('en-GB', {
+            return new Intl.DateTimeFormat('default', {
               dateStyle: 'medium',
-              timeStyle: 'short'
+              timeStyle: 'short',
+              timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
             }).format(date);
           }
         }

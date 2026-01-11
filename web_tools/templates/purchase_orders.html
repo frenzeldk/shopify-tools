@@ -1203,9 +1203,11 @@
               if (diffMinutes === 1) return '1 minute ago';
               if (diffMinutes < 60) return `${diffMinutes} minutes ago`;
               
-              const hours = date.getHours().toString().padStart(2, '0');
-              const minutes = date.getMinutes().toString().padStart(2, '0');
-              return `${hours}:${minutes}`;
+              return new Intl.DateTimeFormat('default', {
+                hour: '2-digit',
+                minute: '2-digit',
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+              }).format(date);
             } catch (e) {
               return 'unknown time';
             }
