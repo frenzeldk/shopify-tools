@@ -519,7 +519,13 @@
             }
             const knownColumns = Array.isArray(this.allColumns) ? this.allColumns : [];
             const hasKnownColumns = knownColumns.length > 0;
-            const allowedColumns = hasKnownColumns ? new Set(knownColumns) : null;
+            
+            // Get custom columns from the raw config first
+            const customColumns = Array.isArray(raw.customColumns) ? [...raw.customColumns] : [];
+            
+            // Create allowed columns set that includes both data columns and custom columns
+            const allowedColumns = hasKnownColumns ? new Set([...knownColumns, ...customColumns]) : null;
+            
             let columns = Array.isArray(raw.columns) ? [...raw.columns] : [];
             if (hasKnownColumns && allowedColumns) {
               columns = columns.filter((column) => allowedColumns.has(column));
@@ -555,7 +561,7 @@
                 }
               });
             }
-            const customColumns = Array.isArray(raw.customColumns) ? [...raw.customColumns] : [];
+            // customColumns was already extracted earlier in this function
             return {
               id: numericId,
               name,
