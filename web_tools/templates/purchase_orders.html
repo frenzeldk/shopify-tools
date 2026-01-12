@@ -224,30 +224,33 @@
         },
         computed: {
           columnDefs() {
-            const allCols = [...this.allColumns, ...this.customColumns];
-            if (!allCols.length) {
+            if (!this.allColumns.length) {
               return [];
             }
             const visibleSet = new Set(this.selectedColumns);
             const orderedVisible = [...this.selectedColumns];
-            const hiddenColumns = allCols.filter((column) => !visibleSet.has(column));
+            const hiddenColumns = this.allColumns.filter((column) => !visibleSet.has(column));
             const fullOrder = [...orderedVisible, ...hiddenColumns];
-            return fullOrder.map((key) => ({
-              field: key,
-              headerName: this.columnLabels[key] || this.formatHeader(key),
-              filter: "advancedTextFilter",
-              floatingFilterComponent: "advancedFloatingFilter",
-              suppressHeaderMenuButton: true,
-              suppressColumnsToolPanel: true,
-              headerComponent: "editableHeader",
-              hide: !visibleSet.has(key),
-              editable: this.customColumns.includes(key),
-            }));
+            return fullOrder.map((key) => {
+              const isCustom = this.customColumns.includes(key);
+              return {
+                field: key,
+                headerName: this.columnLabels[key] || this.formatHeader(key),
+                filter: "advancedTextFilter",
+                floatingFilterComponent: "advancedFloatingFilter",
+                suppressHeaderMenuButton: true,
+                suppressColumnsToolPanel: true,
+                headerComponent: "editableHeader",
+                hide: !visibleSet.has(key),
+                editable: isCustom,
+                cellStyle: isCustom ? { backgroundColor: '#f8f9fa' } : undefined,
+              };
+            });
           },
           sortedAvailableColumns() {
             const selectedSet = new Set(this.selectedColumns);
-            const allCols = [...this.allColumns, ...this.customColumns];
-            return allCols
+            // Only show data columns in available list, not custom columns
+            return this.allColumns
               .filter((column) => !selectedSet.has(column))
               .sort((a, b) => a.localeCompare(b));
           },
@@ -451,6 +454,16 @@
             this.isModalOpen = false;
           },
           resetColumns() {
+            // Remove custom columns from allColumns
+            this.customColumns.forEach(col => {
+              const idx = this.allColumns.indexOf(col);
+              if (idx !== -1) {
+                this.allColumns.splice(idx, 1);
+              }
+            });
+            // Clear custom columns
+            this.customColumns = [];
+            // Reset to data columns only
             this.selectedColumns = [...this.allColumns];
             if (this.gridApi && typeof this.gridApi.setFilterModel === "function") {
               this.gridApi.setFilterModel({});
@@ -778,7 +791,25 @@
               return;
             }
             this.selectedConfigId = String(normalized.id);
+            
+            // Clear existing custom columns from allColumns
+            this.customColumns.forEach(col => {
+              const idx = this.allColumns.indexOf(col);
+              if (idx !== -1) {
+                this.allColumns.splice(idx, 1);
+              }
+            });
+            
+            // Set new custom columns from the configuration
             this.customColumns = Array.isArray(normalized.customColumns) ? [...normalized.customColumns] : [];
+            
+            // Add custom columns to allColumns
+            this.customColumns.forEach(col => {
+              if (!this.allColumns.includes(col)) {
+                this.allColumns.push(col);
+              }
+            });
+            
             this.selectedColumns = [...normalized.columns];
             this.columnLabels = { ...normalized.columnLabels };
             this.pendingFilterModel = normalized.filters;
@@ -804,6 +835,15 @@
           clearSelectedConfiguration() {
             this.selectedConfigId = "";
             this.deleteTargetConfig = null;
+            // Remove custom columns from allColumns
+            this.customColumns.forEach(col => {
+              const idx = this.allColumns.indexOf(col);
+              if (idx !== -1) {
+                this.allColumns.splice(idx, 1);
+              }
+            });
+            // Clear custom columns
+            this.customColumns = [];
             this.resetColumns();
           },
           upsertConfiguration(config) {
@@ -1467,12 +1507,16 @@
             if (!trimmedName) {
               return;
             }
+            // Check against both data columns and current custom columns
             const allCols = [...this.allColumns, ...this.customColumns];
             if (allCols.includes(trimmedName)) {
               alert('A column with this name already exists.');
               return;
             }
+            // Add to both custom columns list and selected columns
             this.customColumns.push(trimmedName);
+            // Also add to allColumns so it appears in the column defs
+            this.allColumns.push(trimmedName);
             this.selectedColumns.push(trimmedName);
             this.newCustomColumnName = "";
             this.selectedConfigId = "";
@@ -1485,7 +1529,14 @@
             if (index === -1) {
               return;
             }
+            // Remove from custom columns list
             this.customColumns.splice(index, 1);
+            // Remove from allColumns
+            const allColIndex = this.allColumns.indexOf(columnName);
+            if (allColIndex !== -1) {
+              this.allColumns.splice(allColIndex, 1);
+            }
+            // Remove from selected columns
             const selectedIndex = this.selectedColumns.indexOf(columnName);
             if (selectedIndex !== -1) {
               this.selectedColumns.splice(selectedIndex, 1);
