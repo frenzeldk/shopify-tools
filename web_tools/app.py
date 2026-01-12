@@ -162,6 +162,12 @@ def create_app() -> Flask:
 
     application.teardown_appcontext(close_db)
 
+    def get_user_context() -> dict[str, str]:
+        """Extract user information from session for template rendering."""
+        user_info = session['oidc_auth_profile']
+        user_name = user_info.get('name', user_info.get('preferred_username', 'User'))
+        return {'user_name': user_name}
+
     @application.route("/")
     @oidc.require_login
     def index() -> str:
@@ -171,12 +177,11 @@ def create_app() -> Flask:
     @oidc.require_login
     def purchase_orders() -> str:
         """Render the purchase orders grid."""
-        user_info = session['oidc_auth_profile']
-        user_name = user_info.get('name', user_info.get('preferred_username', 'User'))
+        context = get_user_context()
         return render_template(
             "purchase_orders.html", 
-            purchase_orders=None, 
-            user_name=user_name,
+            purchase_orders=None,
+            **context,
             active_page='purchase_orders'
         )
 
@@ -328,11 +333,10 @@ def create_app() -> Flask:
     @oidc.require_login
     def inventory_tools() -> str:
         """Render the inventory tools page."""
-        user_info = session['oidc_auth_profile']
-        user_name = user_info.get('name', user_info.get('preferred_username', 'User'))
+        context = get_user_context()
         return render_template(
-            "inventory_tools.html", 
-            user_name=user_name,
+            "inventory_tools.html",
+            **context,
             active_page='inventory_tools'
         )
 
@@ -531,10 +535,10 @@ def create_app() -> Flask:
     @oidc.require_login
     def barcode_scanner() -> Any:
         """Barcode scanner page for looking up items in Shipmondo cache."""
-        user_name = session.get("oidc_auth_profile", {}).get("preferred_username", "User")
+        context = get_user_context()
         return render_template(
             "barcode_scanner.html",
-            user_name=user_name,
+            **context,
             active_page="barcode_scanner"
         )
 
