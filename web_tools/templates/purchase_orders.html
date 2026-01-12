@@ -1244,6 +1244,14 @@
                 vm.setGridRowData(vm.rowData);
                 vm.applyColumnDefinitions();
                 vm.updateActiveFilters();
+                // Apply default sort by product_vendor ascending if no sort is active
+                if (!vm.activeSortModel || vm.activeSortModel.length === 0) {
+                  const defaultSort = [{ colId: 'product_vendor', sort: 'asc' }];
+                  if (typeof vm.gridApi.applyColumnState === 'function') {
+                    vm.gridApi.applyColumnState({ state: defaultSort, defaultState: { sort: null } });
+                  }
+                  vm.updateActiveSortModel();
+                }
               },
               onFilterChanged() {
                 vm.updateActiveFilters();
