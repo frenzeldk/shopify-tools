@@ -122,6 +122,14 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE purchase_order_configurations ADD COLUMN sort_model TEXT NOT NULL DEFAULT '[]'"
             )
+        if "custom_columns" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE purchase_order_configurations ADD COLUMN custom_columns TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "column_widths" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE purchase_order_configurations ADD COLUMN column_widths TEXT NOT NULL DEFAULT '{}'"
+            )
         conn.commit()
 
 
@@ -228,7 +236,7 @@ def create_app() -> Flask:
         db = get_db()
         rows = db.execute(
             """
-            SELECT id, name, columns, filters, column_labels, sort_model
+            SELECT id, name, columns, filters, column_labels, sort_model, custom_columns, column_widths
             FROM purchase_order_configurations
             ORDER BY LOWER(name)
             """
@@ -241,6 +249,8 @@ def create_app() -> Flask:
                 "filters": json.loads(row["filters"]),
                 "columnLabels": json.loads(row["column_labels"]),
                 "sortModel": json.loads(row["sort_model"]),
+                "customColumns": json.loads(row.get("custom_columns") or "[]"),
+                "columnWidths": json.loads(row.get("column_widths") or "{}"),
             }
             for row in rows
         ]
@@ -255,6 +265,8 @@ def create_app() -> Flask:
         filters = payload.get("filters")
         column_labels = payload.get("columnLabels", {})
         sort_model = payload.get("sortModel", [])
+        custom_columns = payload.get("customColumns", [])
+        column_widths = payload.get("columnWidths", {})
 
         if not name:
             return jsonify({"error": "Configuration name is required."}), 400
@@ -266,6 +278,10 @@ def create_app() -> Flask:
             return jsonify({"error": "Column labels must be provided as an object."}), 400
         if not isinstance(sort_model, list):
             return jsonify({"error": "Sort model must be provided as a list."}), 400
+        if not isinstance(custom_columns, list):
+            return jsonify({"error": "Custom columns must be provided as a list."}), 400
+        if not isinstance(column_widths, dict):
+            return jsonify({"error": "Column widths must be provided as an object."}), 400
 
         db = get_db()
         payload_tuple = (
@@ -274,17 +290,21 @@ def create_app() -> Flask:
             json.dumps(filters),
             json.dumps(column_labels),
             json.dumps(sort_model),
+            json.dumps(custom_columns),
+            json.dumps(column_widths),
         )
 
         db.execute(
             """
-            INSERT INTO purchase_order_configurations (name, columns, filters, column_labels, sort_model)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO purchase_order_configurations (name, columns, filters, column_labels, sort_model, custom_columns, column_widths)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 columns=excluded.columns,
                 filters=excluded.filters,
                 column_labels=excluded.column_labels,
                 sort_model=excluded.sort_model,
+                custom_columns=excluded.custom_columns,
+                column_widths=excluded.column_widths,
                 created_at=CURRENT_TIMESTAMP
             """,
             payload_tuple,
@@ -293,7 +313,7 @@ def create_app() -> Flask:
 
         row = db.execute(
             """
-            SELECT id, name, columns, filters, column_labels, sort_model
+            SELECT id, name, columns, filters, column_labels, sort_model, custom_columns, column_widths
             FROM purchase_order_configurations
             WHERE name = ?
             """,
@@ -310,6 +330,8 @@ def create_app() -> Flask:
             "filters": json.loads(row["filters"]),
             "columnLabels": json.loads(row["column_labels"]),
             "sortModel": json.loads(row["sort_model"]),
+            "customColumns": json.loads(row["custom_columns"]),
+            "columnWidths": json.loads(row["column_widths"]),
         }
         return jsonify(response_payload), 201
 

@@ -213,6 +213,7 @@
             activeFilterModel: {},
             activeSortModel: [],
             pendingSortModel: null,
+            pendingColumnWidths: null,
             isLoadingData: false,
             dataFetchError: "",
             dataCached: false,
@@ -784,10 +785,9 @@
             this.pendingSortModel = normalized.sortModel
               ? normalized.sortModel.map((entry) => ({ ...entry }))
               : [];
+            this.pendingColumnWidths = normalized.columnWidths || null;
             this.$nextTick(() => {
-              this.applyPendingFilters();
-              this.applyPendingSortModel();
-              this.applyColumnWidths(normalized.columnWidths);
+              this.applyColumnDefinitions();
             });
           },
           onConfigurationSelect() {
@@ -1331,6 +1331,12 @@
             }
             this.applyPendingFilters();
             this.applyPendingSortModel();
+            if (this.pendingColumnWidths) {
+              this.$nextTick(() => {
+                this.applyColumnWidths(this.pendingColumnWidths);
+                this.pendingColumnWidths = null;
+              });
+            }
             if (!this.pendingFilterModel) {
               this.updateActiveFilters();
             }
