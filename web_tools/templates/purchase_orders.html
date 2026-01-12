@@ -527,6 +527,15 @@
                 columnLabels = Object.fromEntries(entries);
               }
             }
+            let columnWidths = {};
+            if (raw.columnWidths && typeof raw.columnWidths === "object") {
+              const entries = Object.entries(raw.columnWidths);
+              entries.forEach(([field, width]) => {
+                if ((!hasKnownColumns || allowedColumns.has(field)) && Number.isFinite(Number(width))) {
+                  columnWidths[field] = Number(width);
+                }
+              });
+            }
             return {
               id: numericId,
               name,
@@ -534,6 +543,7 @@
               columnLabels,
               filters,
               sortModel,
+              columnWidths,
             };
           },
           sanitizeFilterModel(rawFilters, allowedColumns = null) {
@@ -645,6 +655,19 @@
             this.activeSortModel = normalized;
             return normalized;
           },
+          collectColumnWidths() {
+            if (!this.gridApi || typeof this.gridApi.getColumnState !== "function") {
+              return {};
+            }
+            const columnState = this.gridApi.getColumnState() || [];
+            const widths = {};
+            columnState.forEach((state) => {
+              if (state && state.colId && Number.isFinite(state.width)) {
+                widths[state.colId] = state.width;
+              }
+            });
+            return widths;
+          },
           applyPendingFilters() {
             if (!this.pendingFilterModel) {
               return;
@@ -687,6 +710,19 @@
               this.gridApi.refreshHeader();
             }
           },
+          applyColumnWidths(widths) {
+            if (!widths || typeof widths !== "object" || Object.keys(widths).length === 0) {
+              return;
+            }
+            if (!this.gridApi || typeof this.gridApi.applyColumnState !== "function") {
+              return;
+            }
+            const state = Object.entries(widths).map(([colId, width]) => ({
+              colId,
+              width: Number(width),
+            }));
+            this.gridApi.applyColumnState({ state });
+          },
           async saveConfiguration() {
             const trimmedName = this.newConfigName.trim();
             if (!trimmedName || !this.gridApi) {
@@ -702,6 +738,7 @@
               ),
               columnLabels: this.collectColumnLabels(),
               sortModel,
+              columnWidths: this.collectColumnWidths(),
             };
             this.isSavingConfig = true;
             try {
@@ -741,6 +778,7 @@
             this.$nextTick(() => {
               this.applyPendingFilters();
               this.applyPendingSortModel();
+              this.applyColumnWidths(normalized.columnWidths);
             });
           },
           onConfigurationSelect() {
