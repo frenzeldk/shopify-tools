@@ -314,36 +314,58 @@ def create_app() -> Flask:
             return jsonify({"error": "Column widths must be provided as an object."}), 400
 
         db = get_db()
-        payload_tuple = (
-            name,
-            json.dumps(columns),
-            json.dumps(filters),
-            json.dumps(column_labels),
-            json.dumps(sort_model),
-            json.dumps(custom_columns),
-            json.dumps(column_widths),
-        )
-
+        
+        # Check which columns exist in the database
+        existing_columns = {
+            row[1]
+            for row in db.execute(
+                "PRAGMA table_info(purchase_order_configurations)"
+            ).fetchall()
+        }
+        
+        # Build query based on available columns
+        base_fields = ["name", "columns", "filters", "column_labels", "sort_model"]
+        base_values = [name, json.dumps(columns), json.dumps(filters), json.dumps(column_labels), json.dumps(sort_model)]
+        
+        extra_fields = []
+        extra_values = []
+        update_fields = ["columns=excluded.columns", "filters=excluded.filters", 
+                        "column_labels=excluded.column_labels", "sort_model=excluded.sort_model"]
+        
+        if "custom_columns" in existing_columns:
+            extra_fields.append("custom_columns")
+            extra_values.append(json.dumps(custom_columns))
+            update_fields.append("custom_columns=excluded.custom_columns")
+        
+        if "column_widths" in existing_columns:
+            extra_fields.append("column_widths")
+            extra_values.append(json.dumps(column_widths))
+            update_fields.append("column_widths=excluded.column_widths")
+        
+        all_fields = base_fields + extra_fields
+        all_values = base_values + extra_values
+        
+        placeholders = ", ".join(["?" for _ in all_fields])
+        field_names = ", ".join(all_fields)
+        update_clause = ", ".join(update_fields)
+        
         db.execute(
-            """
-            INSERT INTO purchase_order_configurations (name, columns, filters, column_labels, sort_model, custom_columns, column_widths)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            f"""
+            INSERT INTO purchase_order_configurations ({field_names})
+            VALUES ({placeholders})
             ON CONFLICT(name) DO UPDATE SET
-                columns=excluded.columns,
-                filters=excluded.filters,
-                column_labels=excluded.column_labels,
-                sort_model=excluded.sort_model,
-                custom_columns=excluded.custom_columns,
-                column_widths=excluded.column_widths,
+                {update_clause},
                 created_at=CURRENT_TIMESTAMP
             """,
-            payload_tuple,
+            tuple(all_values),
         )
         db.commit()
 
+        # Build SELECT query
+        select_fields = ", ".join(base_fields + extra_fields)
         row = db.execute(
-            """
-            SELECT id, name, columns, filters, column_labels, sort_model, custom_columns, column_widths
+            f"""
+            SELECT id, {select_fields}
             FROM purchase_order_configurations
             WHERE name = ?
             """,
@@ -360,9 +382,16 @@ def create_app() -> Flask:
             "filters": json.loads(row["filters"]),
             "columnLabels": json.loads(row["column_labels"]),
             "sortModel": json.loads(row["sort_model"]),
-            "customColumns": json.loads(row["custom_columns"]),
-            "columnWidths": json.loads(row["column_widths"]),
+            "customColumns": [],
+            "columnWidths": {},
         }
+        
+        # Add optional fields if they exist
+        if "custom_columns" in existing_columns:
+            response_payload["customColumns"] = json.loads(row["custom_columns"] or "[]")
+        if "column_widths" in existing_columns:
+            response_payload["columnWidths"] = json.loads(row["column_widths"] or "{}")
+        
         return jsonify(response_payload), 201
 
     @application.delete("/purchase-orders/configurations/<int:config_id>/")
