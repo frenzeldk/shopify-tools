@@ -234,26 +234,56 @@ def create_app() -> Flask:
     def list_configurations() -> Any:
         """List saved grid configurations."""
         db = get_db()
+        # First check which columns exist
+        existing_columns = {
+            row[1]
+            for row in db.execute(
+                "PRAGMA table_info(purchase_order_configurations)"
+            ).fetchall()
+        }
+        
+        # Build query based on available columns
+        base_columns = "id, name, columns, filters, column_labels, sort_model"
+        extra_columns = []
+        if "custom_columns" in existing_columns:
+            extra_columns.append("custom_columns")
+        if "column_widths" in existing_columns:
+            extra_columns.append("column_widths")
+        
+        query_columns = base_columns
+        if extra_columns:
+            query_columns += ", " + ", ".join(extra_columns)
+        
         rows = db.execute(
-            """
-            SELECT id, name, columns, filters, column_labels, sort_model, custom_columns, column_widths
+            f"""
+            SELECT {query_columns}
             FROM purchase_order_configurations
             ORDER BY LOWER(name)
             """
         ).fetchall()
-        configs = [
-            {
-                "id": row["id"],
-                "name": row["name"],
-                "columns": json.loads(row["columns"]),
-                "filters": json.loads(row["filters"]),
-                "columnLabels": json.loads(row["column_labels"]),
-                "sortModel": json.loads(row["sort_model"]),
-                "customColumns": json.loads(row.get("custom_columns") or "[]"),
-                "columnWidths": json.loads(row.get("column_widths") or "{}"),
-            }
-            for row in rows
-        ]
+        
+        configs = []
+        for row in rows:
+            try:
+                config = {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "columns": json.loads(row["columns"]),
+                    "filters": json.loads(row["filters"]),
+                    "columnLabels": json.loads(row["column_labels"]),
+                    "sortModel": json.loads(row["sort_model"]),
+                    "customColumns": [],
+                    "columnWidths": {},
+                }
+                # Add optional fields if they exist
+                if "custom_columns" in existing_columns:
+                    config["customColumns"] = json.loads(row["custom_columns"] or "[]")
+                if "column_widths" in existing_columns:
+                    config["columnWidths"] = json.loads(row["column_widths"] or "{}")
+                configs.append(config)
+            except Exception as e:
+                current_app.logger.warning(f"Failed to parse configuration: {e}")
+                continue
         return jsonify(configs)
 
     @application.post("/purchase-orders/configurations/")
