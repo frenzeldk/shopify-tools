@@ -192,11 +192,11 @@
         :class="{ 'selected': selectedProduct && selectedProduct.id === product.id }"
       >
         <div class="product-info">
-          <div class="product-sku">{{ product.sku }}</div>
-          <div class="product-name">{{ product.name }}</div>
+          <div class="product-sku">[[ product.sku ]]</div>
+          <div class="product-name">[[ product.name ]]</div>
           <div class="product-details">
-            <span v-if="product.bin" class="product-bin">Bin: {{ product.bin }}</span>
-            <span v-if="product.barcode" class="product-barcode">Barcode: {{ product.barcode }}</span>
+            <span v-if="product.bin" class="product-bin">Bin: [[ product.bin ]]</span>
+            <span v-if="product.barcode" class="product-barcode">Barcode: [[ product.barcode ]]</span>
           </div>
         </div>
       </div>
@@ -204,15 +204,15 @@
 
     <!-- No Results -->
     <div v-else-if="!skuSearchLoading && skuSearchQuery" class="no-results">
-      No products found matching "{{ skuSearchQuery }}"
+      No products found matching "[[ skuSearchQuery ]]"
     </div>
 
     <!-- Selected Product - Scan Prompt -->
     <div v-if="selectedProduct && !waitingForBarcodeScan" class="selected-product-section">
       <h3>Selected Product</h3>
       <div class="selected-product-card">
-        <div class="product-sku">{{ selectedProduct.sku }}</div>
-        <div class="product-name">{{ selectedProduct.name }}</div>
+        <div class="product-sku">[[ selectedProduct.sku ]]</div>
+        <div class="product-name">[[ selectedProduct.name ]]</div>
       </div>
       <p class="scan-instruction">Now scan the barcode to assign it to this product</p>
       <button @click="waitingForBarcodeScan = true" class="btn btn-primary">Ready to Scan</button>
