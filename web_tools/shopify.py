@@ -181,3 +181,78 @@ def calculate_brand_inventory_value(brand_name: str) -> float:
         cursor = page_info["endCursor"]
     
     return total_value
+
+def update_variant_barcode(sku: str, barcode: str) -> dict:
+    """
+    Update the barcode for a product variant by SKU.
+    
+    Args:
+        sku: The SKU to search for
+        barcode: The new barcode value
+    
+    Returns:
+        Dict with success status and message
+    """
+    # First, find the variant by SKU
+    query = f'sku:{sku}'
+    variables = {"cursor": None, "query": query}
+    
+    try:
+        result = __gql_client__.execute(__VARIANTS_QUERY__, variable_values=variables)
+        variants = result["productVariants"]["edges"]
+        
+        if not variants or len(variants) == 0:
+            return {
+                "success": False,
+                "message": f"No variant found with SKU: {sku}"
+            }
+        
+        # Get the first matching variant's ID
+        variant_node = variants[0]["node"]
+        variant_id = variant_node["id"]
+        
+        # Update the variant's barcode using GraphQL mutation
+        mutation = gql("""
+        mutation productVariantUpdate($input: ProductVariantInput!) {
+          productVariantUpdate(input: $input) {
+            productVariant {
+              id
+              barcode
+              sku
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        """)
+        
+        mutation_variables = {
+            "input": {
+                "id": variant_id,
+                "barcode": barcode
+            }
+        }
+        
+        mutation_result = __gql_client__.execute(mutation, variable_values=mutation_variables)
+        user_errors = mutation_result["productVariantUpdate"]["userErrors"]
+        
+        if user_errors:
+            error_messages = [f"{err['field']}: {err['message']}" for err in user_errors]
+            return {
+                "success": False,
+                "message": f"Failed to update barcode: {', '.join(error_messages)}"
+            }
+        
+        return {
+            "success": True,
+            "message": f"Successfully updated barcode for SKU {sku}",
+            "barcode": barcode
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error updating barcode: {str(e)}"
+        }

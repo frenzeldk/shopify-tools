@@ -649,13 +649,107 @@ def create_app() -> Flask:
                     "itemId": found_item.get("id")
                 })
             else:
+                # When not found, include available items count for SKU search
                 return jsonify({
                     "found": False,
-                    "message": f"No item found with barcode: {barcode}"
+                    "message": f"No item found with barcode: {barcode}",
+                    "barcode": barcode,
+                    "availableItemsCount": len(shipmondo_cache["items"])
                 })
         except Exception as exc:
             current_app.logger.exception("Failed to lookup barcode", exc_info=exc)
             return jsonify({"error": "Failed to lookup barcode."}), 500
+
+    @application.post("/barcode-scanner/search-sku/")
+    def search_sku() -> Any:
+        """Search for items by SKU or name in Shipmondo cache."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            query = str(payload.get("query", "")).strip().lower()
+            
+            if not query:
+                return jsonify({"error": "Search query is required"}), 400
+            
+            # Search through cached items
+            results = []
+            for sku, item_data in shipmondo_cache["items"].items():
+                item_sku = item_data.get("sku", "").lower()
+                item_name = item_data.get("name", "").lower()
+                
+                if query in item_sku or query in item_name:
+                    results.append({
+                        "id": item_data.get("id"),
+                        "sku": item_data.get("sku", ""),
+                        "name": item_data.get("name", ""),
+                        "bin": item_data.get("bin", ""),
+                        "barcode": item_data.get("barcode", "")
+                    })
+                    
+                    # Limit results to prevent overwhelming the UI
+                    if len(results) >= 50:
+                        break
+            
+            return jsonify({
+                "results": results,
+                "total": len(results)
+            })
+        except Exception as exc:
+            current_app.logger.exception("Failed to search SKU", exc_info=exc)
+            return jsonify({"error": "Failed to search SKU."}), 500
+
+    @application.post("/barcode-scanner/assign-barcode/")
+    async def assign_barcode() -> Any:
+        """Assign a barcode to a product in both Shipmondo and Shopify."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            sku = str(payload.get("sku", "")).strip()
+            barcode = str(payload.get("barcode", "")).strip()
+            item_id = payload.get("itemId")
+            
+            if not sku or not barcode or not item_id:
+                return jsonify({"error": "SKU, barcode, and itemId are required"}), 400
+            
+            # Import required modules
+            from shipmondo import update_barcode as shipmondo_update_barcode
+            from shopify import update_variant_barcode
+            
+            # Update Shipmondo
+            shipmondo_success, shipmondo_message = await asyncio.to_thread(
+                shipmondo_update_barcode, item_id, sku, barcode
+            )
+            
+            if not shipmondo_success:
+                return jsonify({
+                    "success": False,
+                    "message": f"Failed to update Shipmondo: {shipmondo_message}"
+                }), 500
+            
+            # Update Shopify
+            shopify_result = await asyncio.to_thread(
+                update_variant_barcode, sku, barcode
+            )
+            
+            if not shopify_result["success"]:
+                return jsonify({
+                    "success": False,
+                    "message": f"Updated Shipmondo but failed to update Shopify: {shopify_result['message']}"
+                }), 500
+            
+            # Update the cache
+            with shipmondo_lock:
+                if sku in shipmondo_cache["items"]:
+                    shipmondo_cache["items"][sku]["barcode"] = barcode
+            
+            return jsonify({
+                "success": True,
+                "message": f"Successfully assigned barcode {barcode} to SKU {sku} in both systems",
+                "sku": sku,
+                "barcode": barcode
+            })
+            
+        except Exception as exc:
+            current_app.logger.exception("Failed to assign barcode", exc_info=exc)
+            return jsonify({"error": "Failed to assign barcode."}), 500
 
     @application.post("/barcode-scanner/assign-bin/")
     async def assign_bin() -> Any:

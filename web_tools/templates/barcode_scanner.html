@@ -162,6 +162,73 @@
     </div>
   </div>
 </div>
+
+<!-- SKU Search Modal -->
+<div v-if="showSkuSearch" class="modal-overlay" @click.self="closeSkuSearch">
+  <div class="modal-content sku-search-modal">
+    <h2>Product Not Found</h2>
+    <p class="sku-search-instructions">Search for a product by SKU or name to assign the barcode</p>
+    
+    <!-- Search Input -->
+    <div class="sku-search-input-container">
+      <input 
+        type="text" 
+        v-model="skuSearchQuery" 
+        @input="searchSku"
+        placeholder="Search by SKU or product name..."
+        class="sku-search-input"
+        autofocus
+      />
+      <span v-if="skuSearchLoading" class="search-spinner">⏳</span>
+    </div>
+
+    <!-- Search Results -->
+    <div v-if="skuSearchResults.length > 0" class="sku-search-results">
+      <div 
+        v-for="product in skuSearchResults" 
+        :key="product.id"
+        @click="selectProduct(product)"
+        class="sku-search-result-item"
+        :class="{ 'selected': selectedProduct && selectedProduct.id === product.id }"
+      >
+        <div class="product-info">
+          <div class="product-sku">{{ product.sku }}</div>
+          <div class="product-name">{{ product.name }}</div>
+          <div class="product-details">
+            <span v-if="product.bin" class="product-bin">Bin: {{ product.bin }}</span>
+            <span v-if="product.barcode" class="product-barcode">Barcode: {{ product.barcode }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- No Results -->
+    <div v-else-if="!skuSearchLoading && skuSearchQuery" class="no-results">
+      No products found matching "{{ skuSearchQuery }}"
+    </div>
+
+    <!-- Selected Product - Scan Prompt -->
+    <div v-if="selectedProduct && !waitingForBarcodeScan" class="selected-product-section">
+      <h3>Selected Product</h3>
+      <div class="selected-product-card">
+        <div class="product-sku">{{ selectedProduct.sku }}</div>
+        <div class="product-name">{{ selectedProduct.name }}</div>
+      </div>
+      <p class="scan-instruction">Now scan the barcode to assign it to this product</p>
+      <button @click="waitingForBarcodeScan = true" class="btn btn-primary">Ready to Scan</button>
+    </div>
+
+    <!-- Waiting for Barcode Scan -->
+    <div v-if="waitingForBarcodeScan" class="waiting-for-scan">
+      <div class="scan-animation">📷</div>
+      <p>Waiting for barcode scan...</p>
+      <p class="scan-hint">Scan the barcode now</p>
+    </div>
+
+    <!-- Close Button -->
+    <button @click="closeSkuSearch" class="btn btn-secondary close-modal-btn">Cancel</button>
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -200,7 +267,16 @@ createApp({
       manualBinCode: '',
       assigningBinInProgress: false,
       binAssignmentSuccess: null,
-      cameraWasActiveBeforeModal: false
+      cameraWasActiveBeforeModal: false,
+      // SKU search state
+      showSkuSearch: false,
+      skuSearchQuery: '',
+      skuSearchResults: [],
+      skuSearchInProgress: false,
+      selectedProduct: null,
+      pendingBarcode: null,
+      assigningBarcode: false,
+      waitingForBarcodeScan: false
     };
   },
   mounted() {
@@ -349,6 +425,13 @@ createApp({
           return;
         }
         
+        // If we're waiting to assign a barcode, this is the barcode to assign
+        if (this.selectedProduct && this.pendingBarcode === null) {
+          this.pendingBarcode = barcode;
+          await this.confirmBarcodeAssignment();
+          return;
+        }
+        
         const response = await fetch('/barcode-scanner/lookup/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -359,13 +442,19 @@ createApp({
         
         if (response.ok) {
           this.result = data;
-          // Play a beep sound (if desired)
+          
           if (data.found) {
             this.playBeep();
             // Show modal on mobile
             if (this.isMobile) {
               this.showModal = true;
             }
+          } else {
+            // Barcode not found - show SKU search
+            this.pendingBarcode = barcode;
+            this.showSkuSearch = true;
+            this.skuSearchQuery = '';
+            this.skuSearchResults = [];
           }
         } else {
           this.error = data.error || 'Lookup failed';
@@ -374,6 +463,93 @@ createApp({
         console.error('Lookup error:', err);
         this.error = 'Failed to lookup barcode';
       }
+    },
+    async searchSku() {
+      if (!this.skuSearchQuery || this.skuSearchQuery.trim().length < 2) {
+        return;
+      }
+      
+      try {
+        this.skuSearchInProgress = true;
+        this.error = null;
+        
+        const response = await fetch('/barcode-scanner/search-sku/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: this.skuSearchQuery })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+          this.skuSearchResults = data.results || [];
+        } else {
+          this.error = data.error || 'Search failed';
+        }
+      } catch (err) {
+        console.error('Search error:', err);
+        this.error = 'Failed to search SKU';
+      } finally {
+        this.skuSearchInProgress = false;
+      }
+    },
+    selectProduct(product) {
+      this.selectedProduct = product;
+      // Optionally scroll to the top or show a message
+    },
+    async confirmBarcodeAssignment() {
+      if (!this.selectedProduct || !this.pendingBarcode) {
+        return;
+      }
+      
+      try {
+        this.assigningBarcode = true;
+        this.error = null;
+        
+        const response = await fetch('/barcode-scanner/assign-barcode/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sku: this.selectedProduct.sku,
+            barcode: this.pendingBarcode,
+            itemId: this.selectedProduct.id
+          })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok && data.success) {
+          // Success! Show a message and reset
+          this.result = {
+            found: true,
+            sku: this.selectedProduct.sku,
+            name: this.selectedProduct.name,
+            bin: this.selectedProduct.bin || 'No bin assigned',
+            message: `✅ Barcode ${this.pendingBarcode} successfully assigned to ${this.selectedProduct.sku}`
+          };
+          this.playBeep();
+          this.closeSkuSearch();
+          
+          if (this.isMobile) {
+            this.showModal = true;
+          }
+        } else {
+          this.error = data.message || data.error || 'Failed to assign barcode';
+        }
+      } catch (err) {
+        console.error('Barcode assignment error:', err);
+        this.error = 'Failed to assign barcode';
+      } finally {
+        this.assigningBarcode = false;
+      }
+    },
+    closeSkuSearch() {
+      this.showSkuSearch = false;
+      this.skuSearchQuery = '';
+      this.skuSearchResults = [];
+      this.selectedProduct = null;
+      this.pendingBarcode = null;
+      this.waitingForBarcodeScan = false;
     },
     detectMobile() {
       this.isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth <= 768;

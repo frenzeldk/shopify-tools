@@ -128,6 +128,29 @@ def update_bin_location(item_id: int, sku: str, new_bin: str) -> Tuple[bool, str
         return False, f"Error updating bin for SKU {sku}: {str(e)}"
 
 
+def update_barcode(item_id: int, sku: str, new_barcode: str) -> Tuple[bool, str]:
+    """
+    Update the barcode for a Shipmondo item.
+    
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    url = f"https://app.shipmondo.com/api/public/v3/items/{item_id}"
+    headers = get_shipmondo_headers()
+    
+    try:
+        response = requests.put(
+            url,
+            headers=headers,
+            json={"barcode": new_barcode},
+            timeout=10
+        )
+        response.raise_for_status()
+        return True, f"Updated barcode for SKU {sku} to '{new_barcode}'"
+    except requests.exceptions.RequestException as e:
+        return False, f"Error updating barcode for SKU {sku}: {str(e)}"
+
+
 def batch_update_bins_with_regex(shipmondo_items: Dict[str, dict], 
                                   regex_pattern: str, 
                                   replacement: str) -> Dict[str, any]:
