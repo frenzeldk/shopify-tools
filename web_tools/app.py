@@ -171,7 +171,7 @@ def create_app() -> Flask:
     @oidc.require_login
     def purchase_orders() -> str:
         """Render the purchase orders grid."""
-        user_info = oidc.user_getinfo(['name', 'email', 'preferred_username'])
+        user_info = session['oidc_auth_profile']
         user_name = user_info.get('name', user_info.get('preferred_username', 'User'))
         return render_template(
             "purchase_orders.html", 
@@ -328,7 +328,7 @@ def create_app() -> Flask:
     @oidc.require_login
     def inventory_tools() -> str:
         """Render the inventory tools page."""
-        user_info = oidc.user_getinfo(['name', 'email', 'preferred_username'])
+        user_info = session['oidc_auth_profile']
         user_name = user_info.get('name', user_info.get('preferred_username', 'User'))
         return render_template(
             "inventory_tools.html", 
