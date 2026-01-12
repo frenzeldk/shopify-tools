@@ -1262,6 +1262,9 @@
                 }
                 vm.updateActiveSortModel();
               },
+              onColumnMoved() {
+                vm.syncColumnOrderFromGrid();
+              },
             };
           },
           applyColumnDefinitions() {
@@ -1378,6 +1381,33 @@
               this.selectedColumns = selected;
               this.selectedConfigId = "";
             });
+          },
+          syncColumnOrderFromGrid() {
+            if (!this.gridApi) {
+              return;
+            }
+            
+            // Get the current column state from the grid
+            let columnState;
+            if (typeof this.gridApi.getColumnState === 'function') {
+              columnState = this.gridApi.getColumnState();
+            } else {
+              return;
+            }
+            
+            // Extract the visible columns in their current order
+            const visibleColumns = columnState
+              .filter(col => !col.hide)
+              .map(col => col.colId);
+            
+            // Only update if the order has actually changed
+            const currentOrder = this.selectedColumns.join(',');
+            const newOrder = visibleColumns.join(',');
+            
+            if (currentOrder !== newOrder && visibleColumns.length > 0) {
+              this.selectedColumns = visibleColumns;
+              this.selectedConfigId = "";
+            }
           }
         },
         template: `
