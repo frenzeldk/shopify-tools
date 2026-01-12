@@ -328,6 +328,84 @@ h1 {
   pointer-events: none;
 }
 
+/* Custom Column Form */
+.custom-column-form {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+}
+
+.custom-column-form h3 {
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+  color: #334155;
+}
+
+.custom-column-form .input-group {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.custom-column-input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.95rem;
+}
+
+.custom-column-input:focus {
+  outline: none;
+  border-color: #3498db;
+  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+}
+
+.add-column-button {
+  padding: 0.5rem 1rem;
+  background-color: #3498db;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.add-column-button:hover {
+  background-color: #2980b9;
+}
+
+.add-column-button:active {
+  background-color: #21618c;
+}
+
+.remove-custom-column {
+  background: #e74c3c;
+  color: white;
+  border: none;
+  border-radius: 3px;
+  width: 24px;
+  height: 24px;
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s ease;
+  flex-shrink: 0;
+}
+
+.remove-custom-column:hover {
+  background-color: #c0392b;
+}
+
+.remove-custom-column:active {
+  background-color: #a93226;
+}
+
 /* Advanced Floating Filter */
 .advanced-floating-filter {
   display: flex;

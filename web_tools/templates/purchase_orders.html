@@ -217,16 +217,19 @@
             dataFetchError: "",
             dataCached: false,
             cacheTimestamp: null,
+            customColumns: [],
+            newCustomColumnName: "",
           };
         },
         computed: {
           columnDefs() {
-            if (!this.allColumns.length) {
+            const allCols = [...this.allColumns, ...this.customColumns];
+            if (!allCols.length) {
               return [];
             }
             const visibleSet = new Set(this.selectedColumns);
             const orderedVisible = [...this.selectedColumns];
-            const hiddenColumns = this.allColumns.filter((column) => !visibleSet.has(column));
+            const hiddenColumns = allCols.filter((column) => !visibleSet.has(column));
             const fullOrder = [...orderedVisible, ...hiddenColumns];
             return fullOrder.map((key) => ({
               field: key,
@@ -237,11 +240,13 @@
               suppressColumnsToolPanel: true,
               headerComponent: "editableHeader",
               hide: !visibleSet.has(key),
+              editable: this.customColumns.includes(key),
             }));
           },
           sortedAvailableColumns() {
             const selectedSet = new Set(this.selectedColumns);
-            return this.allColumns
+            const allCols = [...this.allColumns, ...this.customColumns];
+            return allCols
               .filter((column) => !selectedSet.has(column))
               .sort((a, b) => a.localeCompare(b));
           },
@@ -536,6 +541,7 @@
                 }
               });
             }
+            const customColumns = Array.isArray(raw.customColumns) ? [...raw.customColumns] : [];
             return {
               id: numericId,
               name,
@@ -544,6 +550,7 @@
               filters,
               sortModel,
               columnWidths,
+              customColumns,
             };
           },
           sanitizeFilterModel(rawFilters, allowedColumns = null) {
@@ -739,6 +746,7 @@
               columnLabels: this.collectColumnLabels(),
               sortModel,
               columnWidths: this.collectColumnWidths(),
+              customColumns: [...this.customColumns],
             };
             this.isSavingConfig = true;
             try {
@@ -769,6 +777,7 @@
               return;
             }
             this.selectedConfigId = String(normalized.id);
+            this.customColumns = Array.isArray(normalized.customColumns) ? [...normalized.customColumns] : [];
             this.selectedColumns = [...normalized.columns];
             this.columnLabels = { ...normalized.columnLabels };
             this.pendingFilterModel = normalized.filters;
@@ -1446,6 +1455,43 @@
               this.selectedColumns = visibleColumns;
               this.selectedConfigId = "";
             }
+          },
+          addCustomColumn() {
+            const trimmedName = this.newCustomColumnName.trim();
+            if (!trimmedName) {
+              return;
+            }
+            const allCols = [...this.allColumns, ...this.customColumns];
+            if (allCols.includes(trimmedName)) {
+              alert('A column with this name already exists.');
+              return;
+            }
+            this.customColumns.push(trimmedName);
+            this.selectedColumns.push(trimmedName);
+            this.newCustomColumnName = "";
+            this.selectedConfigId = "";
+            this.$nextTick(() => {
+              this.applyColumnDefinitions();
+            });
+          },
+          removeCustomColumn(columnName) {
+            const index = this.customColumns.indexOf(columnName);
+            if (index === -1) {
+              return;
+            }
+            this.customColumns.splice(index, 1);
+            const selectedIndex = this.selectedColumns.indexOf(columnName);
+            if (selectedIndex !== -1) {
+              this.selectedColumns.splice(selectedIndex, 1);
+            }
+            delete this.columnLabels[columnName];
+            this.selectedConfigId = "";
+            this.$nextTick(() => {
+              this.applyColumnDefinitions();
+            });
+          },
+          isCustomColumn(columnName) {
+            return this.customColumns.includes(columnName);
           }
         },
         template: `
@@ -1557,6 +1603,19 @@
                   <button type="button" aria-label="Close" @click="closeModal">&times;</button>
                 </header>
                 <div class="modal-body">
+                  <div class="custom-column-form">
+                    <h3>Add Custom Column</h3>
+                    <div class="input-group">
+                      <input
+                        v-model="newCustomColumnName"
+                        @keyup.enter="addCustomColumn"
+                        type="text"
+                        placeholder="Enter column name"
+                        class="custom-column-input"
+                      />
+                      <button type="button" @click="addCustomColumn" class="add-column-button">Add</button>
+                    </div>
+                  </div>
                   <div class="column-manager">
                     <h2>Available Columns</h2>
                     <div class="column-list">
@@ -1568,6 +1627,14 @@
                           :data-column="column"
                         >
                           <span v-text="formatHeader(column)"></span>
+                          <button
+                            v-if="isCustomColumn(column)"
+                            type="button"
+                            @click.stop="removeCustomColumn(column)"
+                            class="remove-custom-column"
+                            aria-label="Remove custom column"
+                            title="Remove custom column"
+                          >×</button>
                         </li>
                       </ul>
                     </div>
@@ -1583,6 +1650,14 @@
                           :data-column="column"
                         >
                           <span v-text="formatHeader(column)"></span>
+                          <button
+                            v-if="isCustomColumn(column)"
+                            type="button"
+                            @click.stop="removeCustomColumn(column)"
+                            class="remove-custom-column"
+                            aria-label="Remove custom column"
+                            title="Remove custom column"
+                          >×</button>
                         </li>
                       </ul>
                     </div>
