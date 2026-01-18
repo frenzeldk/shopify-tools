@@ -44,5 +44,7 @@ def resume_order(sid: str):
                                      "Authorization": f"Basic {AUTH_STRING}"},
                             json={"order_status": "open"},
                             timeout=5)
-    response.raise_for_status()
+    if not response.ok:
+        print(f"Failed to resume order: {sid}")
+        return None
     return response.json()

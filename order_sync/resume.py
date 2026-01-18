@@ -107,6 +107,9 @@ def _resume_orders(orders: list[dict]) -> None:
         if _can_fulfill_order(order["lineItems"]["edges"])\
             and ("paused" in order["tags"] or "Mangler Varer" in order["tags"]):
             try:
+                shipmondo_result = resume_order(order["name"][1:])  # Remove leading # from order name
+                if shipmondo_result is None:
+                    continue
                 result = gql_client.execute(
                     mutation, variable_values={"id": order["id"],
                                                "tags": ["paused", "Mangler Varer"]}
@@ -116,7 +119,6 @@ def _resume_orders(orders: list[dict]) -> None:
                     print(f"Failed to remove tags from order {order['name']}: {user_errors}")
                 else:
                     print(f"Removed tags from order {order['name']}")
-                resume_order(order["name"][1:])  # Remove leading # from order name
             except TransportQueryError as e:
                 print(f"Error removing tags from order {order['name']}: {e}")
                 raise RuntimeError(f"Failed to remove tags from order {order['name']}: {e}") from e
