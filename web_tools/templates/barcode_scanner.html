@@ -78,6 +78,9 @@
       </div>
       <div v-else class="result-content">
         <p>[[ result.message ]]</p>
+        <button @click="openSearchModal" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">
+          🔗 Assign to SKU
+        </button>
       </div>
     </div>
 
@@ -98,13 +101,70 @@
         <!-- Regular Modal Content -->
         <template v-else>
           <div class="modal-header">
-            <h3 v-if="result && result.found">✅ Item Found</h3>
-            <h3 v-else-if="result">❌ Not Found</h3>
+            <h3 v-if="assigningBarcode">🔗 Assign Barcode to SKU</h3>
             <h3 v-else-if="assigningBin">📦 Scan Bin Location</h3>
+            <h3 v-else-if="result && result.found">✅ Item Found</h3>
+            <h3 v-else-if="result">❌ Not Found</h3>
             <button @click="closeModal" class="btn-close">✕</button>
           </div>
           
-          <div v-if="assigningBin" class="modal-body">
+          <div v-if="assigningBarcode" class="modal-body barcode-assignment-body">
+            <div class="barcode-assignment">
+              <div class="item-info">
+                <p><strong>Barcode:</strong> [[ unrecognizedBarcode ]]</p>
+              </div>
+              <p class="instruction">Search for SKU or product name:</p>
+              
+              <div class="search-input-wrapper">
+                <input 
+                  type="text" 
+                  v-model="searchQuery" 
+                  @input="filterItems"
+                  placeholder="Type to search SKU or product..."
+                  class="sku-input search-input"
+                  ref="skuSearchInput"
+                  autocomplete="off"
+                >
+              </div>
+              
+              <div v-if="searchQuery && filteredItems.length > 0" class="search-results">
+                <div class="results-count">[[ filteredItems.length ]] item(s) found</div>
+                <div class="search-results-list">
+                  <div 
+                    v-for="item in filteredItems" 
+                    :key="item.sku"
+                    @click="selectItem(item)"
+                    class="search-result-item"
+                  >
+                    <div class="result-item-sku">[[ item.sku ]]</div>
+                    <div class="result-item-name">[[ item.name ]]</div>
+                    <div v-if="item.bin" class="result-item-bin">📦 [[ item.bin ]]</div>
+                  </div>
+                </div>
+              </div>
+              
+              <div v-else-if="searchQuery && filteredItems.length === 0" class="no-results">
+                <p>No items found matching "[[ searchQuery ]]"</p>
+              </div>
+              
+              <div v-if="selectedItemForAssignment" class="selected-item-preview">
+                <div class="selected-label">Selected:</div>
+                <div class="selected-details">
+                  <strong>[[ selectedItemForAssignment.sku ]]</strong>
+                  <div>[[ selectedItemForAssignment.name ]]</div>
+                </div>
+                <button 
+                  @click="confirmBarcodeAssignment" 
+                  class="btn btn-primary btn-confirm"
+                  :disabled="assigningBarcodeInProgress"
+                >
+                  [[ assigningBarcodeInProgress ? 'Assigning...' : '✓ Confirm Assignment' ]]
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          <div v-else-if="assigningBin" class="modal-body">
             <div class="bin-assignment">
               <div class="item-info">
                 <p><strong>SKU:</strong> [[ currentItem.sku ]]</p>
@@ -156,6 +216,7 @@
           
           <div v-else-if="result" class="modal-body">
             <p>[[ result.message ]]</p>
+            <button @click="startBarcodeAssignment" class="btn btn-primary">🔗 Assign to SKU</button>
           </div>
         </template>
       </div>
@@ -200,7 +261,15 @@ createApp({
       manualBinCode: '',
       assigningBinInProgress: false,
       binAssignmentSuccess: null,
-      cameraWasActiveBeforeModal: false
+      cameraWasActiveBeforeModal: false,
+      assigningBarcode: false,
+      unrecognizedBarcode: null,
+      manualSku: '',
+      assigningBarcodeInProgress: false,
+      searchQuery: '',
+      filteredItems: [],
+      selectedItemForAssignment: null,
+      allItems: []
     };
   },
   mounted() {
@@ -253,9 +322,21 @@ createApp({
         this.lastUpdated = data.last_updated_display;
         this.cacheStatus = data.is_refreshing ? 'Refreshing...' : 'Ready';
         this.isCacheValid = data.item_count > 0;
+        
+        // Fetch all items for search functionality
+        await this.fetchAllItems();
       } catch (err) {
         console.error('Failed to fetch cache status:', err);
         this.cacheStatus = 'Error';
+      }
+    },
+    async fetchAllItems() {
+      try {
+        // We need to create an endpoint to get all items or fetch from a data structure
+        // For now, we'll populate this when searching
+        // Note: We should add an endpoint to get all cached items
+      } catch (err) {
+        console.error('Failed to fetch all items:', err);
       }
     },
     async toggleCamera() {
@@ -366,6 +447,12 @@ createApp({
             if (this.isMobile) {
               this.showModal = true;
             }
+          } else {
+            // Not found - store barcode and show modal on mobile
+            this.unrecognizedBarcode = barcode;
+            if (this.isMobile) {
+              this.showModal = true;
+            }
           }
         } else {
           this.error = data.error || 'Lookup failed';
@@ -384,6 +471,12 @@ createApp({
       this.currentItem = null;
       this.manualBinCode = '';
       this.binAssignmentSuccess = null;
+      this.assigningBarcode = false;
+      this.unrecognizedBarcode = null;
+      this.manualSku = '';
+      this.searchQuery = '';
+      this.filteredItems = [];
+      this.selectedItemForAssignment = null;
     },
     startBinAssignment() {
       if (!this.result || !this.result.found) return;
@@ -444,6 +537,102 @@ createApp({
     async assignBinManual() {
       if (!this.manualBinCode) return;
       await this.assignBin(this.manualBinCode);
+    },
+    startBarcodeAssignment() {
+      if (!this.result || this.result.found) return;
+      this.assigningBarcode = true;
+      this.assigningBin = false;
+      this.searchQuery = '';
+      this.filteredItems = [];
+      this.selectedItemForAssignment = null;
+      // Focus on search input
+      this.$nextTick(() => {
+        if (this.$refs.skuSearchInput) {
+          this.$refs.skuSearchInput.focus();
+        }
+      });
+    },
+    openSearchModal() {
+      // Store the unrecognized barcode if not already set
+      if (!this.unrecognizedBarcode && this.result && !this.result.found) {
+        // Extract barcode from the result message or lastScannedBarcode
+        this.unrecognizedBarcode = this.lastScannedBarcode;
+      }
+      
+      // Open the modal and start barcode assignment
+      this.showModal = true;
+      this.startBarcodeAssignment();
+    },
+    async filterItems() {
+      if (!this.searchQuery || this.searchQuery.length < 1) {
+        this.filteredItems = [];
+        return;
+      }
+      
+      try {
+        // Call backend to search through cache
+        const response = await fetch('/barcode-scanner/search-items/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: this.searchQuery })
+        });
+        
+        const data = await response.json();
+        if (response.ok) {
+          this.filteredItems = data.items || [];
+        } else {
+          this.filteredItems = [];
+        }
+      } catch (err) {
+        console.error('Search error:', err);
+        this.filteredItems = [];
+      }
+    },
+    selectItem(item) {
+      this.selectedItemForAssignment = item;
+      this.searchQuery = item.sku + ' - ' + item.name;
+    },
+    async confirmBarcodeAssignment() {
+      if (!this.selectedItemForAssignment) return;
+      await this.assignBarcodeToSku(this.selectedItemForAssignment.sku);
+    },
+    async assignBarcodeToSku(sku) {
+      if (!this.unrecognizedBarcode || !sku || this.assigningBarcodeInProgress) return;
+      
+      this.assigningBarcodeInProgress = true;
+      try {
+        const response = await fetch('/barcode-scanner/assign-barcode/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            sku: sku,
+            barcode: this.unrecognizedBarcode
+          })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok && data.success) {
+          this.playBeep();
+          this.manualSku = '';
+          // Show success and close modal
+          this.error = null;
+          alert(`Barcode ${this.unrecognizedBarcode} successfully assigned to SKU ${sku}`);
+          this.closeModal();
+          this.clearResult();
+        } else {
+          this.error = data.error || 'Failed to assign barcode';
+        }
+      } catch (err) {
+        console.error('Barcode assignment error:', err);
+        this.error = 'Failed to assign barcode';
+      } finally {
+        this.assigningBarcodeInProgress = false;
+      }
+    },
+    async assignBarcodeManual() {
+      if (!this.manualSku) return;
+      await this.assignBarcodeToSku(this.manualSku);
     },
     async lookupManual() {
       if (!this.manualBarcode) return;
