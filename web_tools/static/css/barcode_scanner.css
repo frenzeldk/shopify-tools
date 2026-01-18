@@ -101,6 +101,139 @@
   cursor: not-allowed;
 }
 
+/* Search Interface Styles */
+.barcode-assignment-body {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.search-input-wrapper {
+  margin-bottom: 1rem;
+}
+
+.search-input {
+  width: 100%;
+  padding: 0.75rem;
+  font-size: 1rem;
+  border: 2px solid #ddd;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.search-results {
+  margin-top: 1rem;
+}
+
+.results-count {
+  font-size: 0.9rem;
+  color: #666;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+}
+
+.search-results-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: white;
+}
+
+.search-result-item {
+  padding: 0.75rem;
+  border-bottom: 1px solid #eee;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.search-result-item:last-child {
+  border-bottom: none;
+}
+
+.search-result-item:hover {
+  background-color: #f8f9fa;
+}
+
+.search-result-item:active {
+  background-color: #e9ecef;
+}
+
+.result-item-sku {
+  font-weight: 600;
+  color: #2c3e50;
+  font-size: 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.result-item-name {
+  color: #666;
+  font-size: 0.9rem;
+  margin-bottom: 0.25rem;
+}
+
+.result-item-bin {
+  color: #27ae60;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.no-results {
+  padding: 2rem;
+  text-align: center;
+  color: #666;
+  font-style: italic;
+}
+
+.selected-item-preview {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background-color: #e8f5e9;
+  border: 2px solid #4caf50;
+  border-radius: 4px;
+}
+
+.selected-label {
+  font-size: 0.85rem;
+  color: #2e7d32;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  text-transform: uppercase;
+}
+
+.selected-details {
+  margin-bottom: 1rem;
+}
+
+.selected-details strong {
+  display: block;
+  font-size: 1.1rem;
+  color: #1b5e20;
+  margin-bottom: 0.25rem;
+}
+
+.selected-details div {
+  color: #2e7d32;
+  font-size: 0.95rem;
+}
+
+.btn-confirm {
+  width: 100%;
+  background-color: #4caf50;
+  padding: 1rem;
+  font-size: 1.1rem;
+}
+
+.btn-confirm:hover:not(:disabled) {
+  background-color: #45a049;
+}
+  cursor: not-allowed;
+}
+
 .btn-primary {
   background-color: #3498db;
 }

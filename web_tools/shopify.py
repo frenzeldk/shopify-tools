@@ -181,3 +181,95 @@ def calculate_brand_inventory_value(brand_name: str) -> float:
         cursor = page_info["endCursor"]
     
     return total_value
+
+
+def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
+    """
+    Update the barcode for a Shopify variant by SKU.
+    
+    Args:
+        sku: The SKU of the variant to update
+        barcode: The new barcode value
+        
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    try:
+        # First, find the variant by SKU
+        query = gql("""
+        query ($query: String!) {
+          productVariants(first: 1, query: $query) {
+            edges {
+              node {
+                id
+                sku
+                barcode
+              }
+            }
+          }
+        }
+        """)
+        
+        variables = {"query": f'sku:"{sku}"'}
+        result = __gql_client__.execute(query, variable_values=variables)
+        
+        variants = result.get("productVariants", {}).get("edges", [])
+        if not variants:
+            return False, f"No variant found with SKU: {sku}"
+        
+        variant_id = variants[0]["node"]["id"]
+        
+        # Update the barcode using productUpdate mutation with nested variant
+        # Note: Shopify's productVariantUpdate uses different input structure in newer API versions
+        mutation = gql("""
+        mutation updateProductVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+          productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+            productVariants {
+              id
+              sku
+              barcode
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        """)
+        
+        # Extract product ID from variant ID (format: gid://shopify/ProductVariant/123)
+        product_query = gql("""
+        query getProductForVariant($variantId: ID!) {
+          productVariant(id: $variantId) {
+            product {
+              id
+            }
+          }
+        }
+        """)
+        
+        product_result = __gql_client__.execute(product_query, variable_values={"variantId": variant_id})
+        product_id = product_result.get("productVariant", {}).get("product", {}).get("id")
+        
+        if not product_id:
+            return False, f"Could not find product for variant {sku}"
+        
+        mutation_variables = {
+            "productId": product_id,
+            "variants": [{
+                "id": variant_id,
+                "barcode": barcode
+            }]
+        }
+        
+        mutation_result = __gql_client__.execute(mutation, variable_values=mutation_variables)
+        
+        user_errors = mutation_result.get("productVariantsBulkUpdate", {}).get("userErrors", [])
+        if user_errors:
+            error_messages = ", ".join([err["message"] for err in user_errors])
+            return False, f"Shopify error updating barcode for SKU {sku}: {error_messages}"
+        
+        return True, f"Updated barcode in Shopify for SKU {sku} to '{barcode}'"
+        
+    except Exception as e:
+        return False, f"Error updating barcode in Shopify for SKU {sku}: {str(e)}"

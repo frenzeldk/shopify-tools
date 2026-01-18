@@ -10,6 +10,8 @@ import asyncio
 import json
 import sqlite3
 import os
+import sys
+import logging
 from pathlib import Path
 from typing import Any
 from datetime import datetime, timedelta, timezone
@@ -20,15 +22,26 @@ from flask_session import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from shopify import fetch_missing_inventory as fetch_purchase_order_data, calculate_brand_inventory_value
+from shopify import fetch_missing_inventory as fetch_purchase_order_data, calculate_brand_inventory_value, update_variant_barcode
 from shipmondo import (
     fetch_all_shipmondo_items,
     clear_bin_location,
     batch_update_bins_with_regex,
-    apply_batch_update
+    apply_batch_update,
+    update_barcode
 )
 import shopify as shopify_module
 import threading
+
+# Configure logging to stdout for systemd/journalctl
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "purchase_orders.db"
@@ -45,8 +58,6 @@ shipmondo_lock = threading.Lock()
 
 def fetch_and_cache_shipmondo_items():
     """Fetch all Shipmondo items and update the global cache."""
-    import logging
-    logger = logging.getLogger(__name__)
     
     # Check if already refreshing
     if shipmondo_cache["is_refreshing"]:
@@ -142,6 +153,16 @@ def create_app() -> Flask:
     application.config["SESSION_TYPE"] = "filesystem"
     application.config['SESSION_PERMANENT'] = True
     application.config['SESSION_PERMANENT_LIFETIME'] = timedelta(days=7)
+    
+    # Configure Flask's logger to use stdout
+    if not application.debug:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setLevel(logging.INFO)
+        stream_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        ))
+        application.logger.addHandler(stream_handler)
+        application.logger.setLevel(logging.INFO)
     
     Session(application)
     oidc = OpenIDConnect(application)
@@ -657,6 +678,41 @@ def create_app() -> Flask:
             current_app.logger.exception("Failed to lookup barcode", exc_info=exc)
             return jsonify({"error": "Failed to lookup barcode."}), 500
 
+    @application.post("/barcode-scanner/search-items/")
+    def search_items() -> Any:
+        """Search for items in Shipmondo cache by SKU or name."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            query = str(payload.get("query", "")).strip().lower()
+            
+            if not query:
+                return jsonify({"items": []})
+            
+            # Search through cache
+            matching_items = []
+            with shipmondo_lock:
+                for sku, item_data in shipmondo_cache["items"].items():
+                    sku_lower = sku.lower()
+                    name_lower = item_data.get("name", "").lower()
+                    
+                    # Match on SKU or name
+                    if query in sku_lower or query in name_lower:
+                        matching_items.append({
+                            "sku": item_data.get("sku", ""),
+                            "name": item_data.get("name", ""),
+                            "bin": item_data.get("bin", ""),
+                            "id": item_data.get("id")
+                        })
+                        
+                        # Limit results to 50 for performance
+                        if len(matching_items) >= 50:
+                            break
+            
+            return jsonify({"items": matching_items})
+        except Exception as exc:
+            current_app.logger.exception("Failed to search items", exc_info=exc)
+            return jsonify({"error": "Failed to search items."}), 500
+
     @application.post("/barcode-scanner/assign-bin/")
     async def assign_bin() -> Any:
         """Assign a bin location to an item."""
@@ -697,6 +753,74 @@ def create_app() -> Flask:
         except Exception as exc:
             current_app.logger.exception("Failed to assign bin", exc_info=exc)
             return jsonify({"error": "Failed to assign bin."}), 500
+
+    @application.post("/barcode-scanner/assign-barcode/")
+    async def assign_barcode_to_sku() -> Any:
+        """Assign a barcode to a SKU."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            sku = str(payload.get("sku", "")).strip()
+            barcode = str(payload.get("barcode", "")).strip()
+            
+            current_app.logger.info(f"Assigning barcode {barcode} to SKU {sku}")
+            
+            if not sku or not barcode:
+                return jsonify({"error": "SKU and barcode are required"}), 400
+            
+            # Find item in cache
+            item_data = shipmondo_cache["items"].get(sku)
+            if not item_data:
+                return jsonify({"error": f"Item with SKU {sku} not found in cache"}), 404
+            
+            item_id = item_data.get("id")
+            if not item_id:
+                return jsonify({"error": "Item ID not found"}), 500
+            
+            # Update barcode in both Shipmondo and Shopify
+            current_app.logger.info(f"Updating Shipmondo for SKU {sku}...")
+            shipmondo_success, shipmondo_message = await asyncio.to_thread(update_barcode, item_id, sku, barcode)
+            current_app.logger.info(f"Shipmondo result: {shipmondo_success} - {shipmondo_message}")
+            
+            current_app.logger.info(f"Updating Shopify for SKU {sku}...")
+            shopify_success, shopify_message = await asyncio.to_thread(update_variant_barcode, sku, barcode)
+            current_app.logger.info(f"Shopify result: {shopify_success} - {shopify_message}")
+            
+            if shipmondo_success and shopify_success:
+                # Update cache
+                with shipmondo_lock:
+                    shipmondo_cache["items"][sku]["barcode"] = barcode
+                
+                return jsonify({
+                    "success": True,
+                    "message": f"Updated barcode in both Shipmondo and Shopify for SKU {sku}",
+                    "barcode": barcode
+                })
+            elif shipmondo_success and not shopify_success:
+                # Partial success - Shipmondo updated but Shopify failed
+                with shipmondo_lock:
+                    shipmondo_cache["items"][sku]["barcode"] = barcode
+                
+                return jsonify({
+                    "success": True,
+                    "warning": f"Updated in Shipmondo but failed in Shopify: {shopify_message}",
+                    "message": f"Barcode updated in Shipmondo. Shopify update failed: {shopify_message}",
+                    "barcode": barcode
+                }), 207  # Multi-Status
+            elif not shipmondo_success and shopify_success:
+                # Partial success - Shopify updated but Shipmondo failed
+                return jsonify({
+                    "success": False,
+                    "error": f"Updated in Shopify but failed in Shipmondo: {shipmondo_message}"
+                }), 207  # Multi-Status
+            else:
+                # Both failed
+                return jsonify({
+                    "error": f"Failed to update barcode. Shipmondo: {shipmondo_message}. Shopify: {shopify_message}"
+                }), 500
+                
+        except Exception as exc:
+            current_app.logger.exception("Failed to assign barcode", exc_info=exc)
+            return jsonify({"error": "Failed to assign barcode."}), 500
 
     return application
 
