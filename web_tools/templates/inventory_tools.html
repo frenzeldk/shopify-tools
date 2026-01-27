@@ -11,22 +11,22 @@
 {% block content %}
       <div class="tool-section">
         <h2>Brand Inventory Value Calculator</h2>
-        <p class="tool-description">Calculate the total inventory value for all products of a specific brand.</p>
+        <p class="tool-description">Calculate the total inventory value for all products of a specific brand, or leave blank to calculate total inventory value.</p>
         
         <div class="input-group">
-          <label for="brand-input">Brand Name:</label>
+          <label for="brand-input">Brand Name (optional):</label>
           <input 
             type="text" 
             id="brand-input" 
             v-model="brandName" 
-            placeholder="Enter brand name"
+            placeholder="Enter brand name or leave blank for total"
             @keyup.enter="calculateValue">
         </div>
         
         <button 
           id="calculate-btn" 
           @click="calculateValue" 
-          :disabled="loading || !brandName.trim()">
+          :disabled="loading">
           <span v-if="!loading">Calculate Value</span>
           <span v-else>Calculating...</span>
         </button>
@@ -35,7 +35,8 @@
           <h3>Result</h3>
           <div v-if="error" class="error-message">[[ error ]]</div>
           <div v-else class="success-message">
-            <p><strong>Brand:</strong> [[ result.brand ]]</p>
+            <p v-if="result.brand"><strong>Brand:</strong> [[ result.brand ]]</p>
+            <p v-else><strong>Total Inventory (All Brands)</strong></p>
             <p><strong>Total Inventory Value:</strong> DKK [[ formatCurrency(result.total_value) ]]</p>
           </div>
         </div>
@@ -231,10 +232,6 @@
         },
         methods: {
           async calculateValue() {
-            if (!this.brandName.trim()) {
-              return;
-            }
-
             this.loading = true;
             this.result = null;
             this.error = null;

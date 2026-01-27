@@ -130,12 +130,14 @@ query ($cursor: String, $query: String!) {
 """)
 
 
-def calculate_brand_inventory_value(brand_name: str) -> float:
+def calculate_brand_inventory_value(brand_name: str = None) -> float:
     """
-    Calculate the total inventory value for all products of a specific brand.
+    Calculate the total inventory value for all products of a specific brand,
+    or for all products if no brand is specified.
     
     Args:
-        brand_name: The vendor/brand name to filter products by
+        brand_name: The vendor/brand name to filter products by. If None or empty,
+                   calculates total value for all inventory.
         
     Returns:
         The total value of inventory for the brand (cost * quantity)
@@ -143,8 +145,12 @@ def calculate_brand_inventory_value(brand_name: str) -> float:
     total_value = 0.0
     cursor = None
     
-    # Build query to filter by vendor (brand)
-    query = f'vendor:"{brand_name}"'
+    # Build query to filter by vendor (brand) if provided
+    if brand_name and brand_name.strip():
+        query = f'vendor:"{brand_name}"'
+    else:
+        # Empty query to get all products
+        query = ""
     
     while True:
         variables = {"cursor": cursor, "query": query}

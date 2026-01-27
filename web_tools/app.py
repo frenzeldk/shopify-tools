@@ -444,17 +444,19 @@ def create_app() -> Flask:
 
     @application.post("/inventory-tools/calculate-brand-value/")
     async def calculate_brand_value() -> Any:
-        """Calculate the total inventory value for a specific brand."""
+        """Calculate the total inventory value for a specific brand or all inventory."""
         try:
             payload = request.get_json(silent=True) or {}
             brand_name = str(payload.get("brand", "")).strip()
             
-            if not brand_name:
-                return jsonify({"error": "Brand name is required."}), 400
+            # If no brand provided, calculate total inventory value
+            total_value = await asyncio.to_thread(calculate_brand_inventory_value, brand_name or None)
             
-            total_value = await asyncio.to_thread(calculate_brand_inventory_value, brand_name)
+            result = {"total_value": total_value}
+            if brand_name:
+                result["brand"] = brand_name
             
-            return jsonify({"brand": brand_name, "total_value": total_value})
+            return jsonify(result)
         except Exception as exc:
             current_app.logger.exception("Failed to calculate brand inventory value", exc_info=exc)
             return jsonify({"error": "Failed to calculate inventory value."}), 500
