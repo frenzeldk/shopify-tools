@@ -321,6 +321,18 @@ button:active:not(:disabled) {
   font-weight: 500;
 }
 
+.sku-current {
+  font-family: 'Courier New', Courier, monospace;
+  color: #dc3545;
+  font-weight: 500;
+}
+
+.sku-new {
+  font-family: 'Courier New', Courier, monospace;
+  color: #28a745;
+  font-weight: 500;
+}
+
 .result-section h4 {
   font-size: 1.1rem;
   margin-bottom: 1rem;

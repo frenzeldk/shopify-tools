@@ -11,22 +11,22 @@
 {% block content %}
       <div class="tool-section">
         <h2>Brand Inventory Value Calculator</h2>
-        <p class="tool-description">Calculate the total inventory value for all products of a specific brand, or leave blank to calculate total inventory value.</p>
+        <p class="tool-description">Calculate the total inventory value for all products of a specific brand.</p>
         
         <div class="input-group">
-          <label for="brand-input">Brand Name (optional):</label>
+          <label for="brand-input">Brand Name:</label>
           <input 
             type="text" 
             id="brand-input" 
             v-model="brandName" 
-            placeholder="Enter brand name or leave blank for total"
+            placeholder="Enter brand name"
             @keyup.enter="calculateValue">
         </div>
         
         <button 
           id="calculate-btn" 
           @click="calculateValue" 
-          :disabled="loading">
+          :disabled="loading || !brandName.trim()">
           <span v-if="!loading">Calculate Value</span>
           <span v-else>Calculating...</span>
         </button>
@@ -35,8 +35,7 @@
           <h3>Result</h3>
           <div v-if="error" class="error-message">[[ error ]]</div>
           <div v-else class="success-message">
-            <p v-if="result.brand"><strong>Brand:</strong> [[ result.brand ]]</p>
-            <p v-else><strong>Total Inventory (All Brands)</strong></p>
+            <p><strong>Brand:</strong> [[ result.brand ]]</p>
             <p><strong>Total Inventory Value:</strong> DKK [[ formatCurrency(result.total_value) ]]</p>
           </div>
         </div>
@@ -182,6 +181,92 @@
             </div>
           </div>
         </div>
+
+        <!-- Batch Rename SKUs with Regex -->
+        <div class="shipmondo-tool">
+          <h3>Batch Rename SKUs with Regex</h3>
+          <p class="tool-description">Rename multiple SKUs using regex pattern matching. Updates both Shipmondo and Shopify.</p>
+          
+          <div class="input-group">
+            <label for="sku-regex-pattern">Regex Pattern:</label>
+            <input 
+              type="text" 
+              id="sku-regex-pattern" 
+              v-model="skuRename.regexPattern" 
+              placeholder="e.g., ^OLD-(.*)$"
+              class="input-code">
+            <small class="input-help">Pattern to match SKUs</small>
+          </div>
+          
+          <div class="input-group">
+            <label for="sku-replacement">Replacement:</label>
+            <input 
+              type="text" 
+              id="sku-replacement" 
+              v-model="skuRename.replacement" 
+              placeholder="e.g., NEW-\1"
+              class="input-code">
+            <small class="input-help">Use \1, \2 for capture groups</small>
+          </div>
+          
+          <div class="button-group">
+            <button 
+              @click="previewSkuRename" 
+              :disabled="shipmondoLoading || !skuRename.regexPattern"
+              class="btn-action btn-preview">
+              <span v-if="!shipmondoLoading">👁️ Preview</span>
+              <span v-else>Loading...</span>
+            </button>
+            
+            <button 
+              v-if="skuRename.preview && skuRename.preview.total_count > 0"
+              @click="applySkuRename" 
+              :disabled="shipmondoLoading"
+              class="btn-action btn-apply">
+              <span v-if="!shipmondoLoading">✅ Apply Rename ([[ skuRename.preview.total_count ]] items)</span>
+              <span v-else>Applying...</span>
+            </button>
+          </div>
+          
+          <div v-if="skuRename.preview" class="result-section">
+            <h4>Preview ([[ skuRename.preview.showing_count ]] of [[ skuRename.preview.total_count ]] matches)</h4>
+            <div class="preview-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Current SKU</th>
+                    <th>New SKU</th>
+                    <th>Name</th>
+                    <th>Bin</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in skuRename.preview.matching_items" :key="item.current_sku">
+                    <td class="sku-current">[[ item.current_sku ]]</td>
+                    <td class="sku-new">[[ item.new_sku ]]</td>
+                    <td>[[ item.name ]]</td>
+                    <td>[[ item.bin || '(none)' ]]</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          
+          <div v-if="skuRename.result" class="result-section">
+            <div v-if="skuRename.result.error" class="error-message">[[ skuRename.result.error ]]</div>
+            <div v-else class="success-message">
+              <p><strong>Success!</strong></p>
+              <p>Shipmondo: [[ skuRename.result.shipmondo_success ]] / [[ skuRename.result.total_count ]] items updated</p>
+              <p>Shopify: [[ skuRename.result.shopify_success ]] / [[ skuRename.result.total_count ]] items updated</p>
+              <div v-if="skuRename.result.errors && skuRename.result.errors.length > 0">
+                <p><strong>Errors:</strong></p>
+                <ul>
+                  <li v-for="err in skuRename.result.errors">[[ err ]]</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
 {% endblock %}
@@ -213,6 +298,12 @@
               preview: null,
               result: null
             },
+            skuRename: {
+              regexPattern: '',
+              replacement: '',
+              preview: null,
+              result: null
+            },
             statusPollInterval: null
           };
         },
@@ -232,6 +323,10 @@
         },
         methods: {
           async calculateValue() {
+            if (!this.brandName.trim()) {
+              return;
+            }
+
             this.loading = true;
             this.result = null;
             this.error = null;
@@ -389,6 +484,71 @@
               }
             } catch (err) {
               this.batchUpdate.result = { error: 'An error occurred during update' };
+              console.error('Error:', err);
+            } finally {
+              this.shipmondoLoading = false;
+            }
+          },
+          async previewSkuRename() {
+            this.shipmondoLoading = true;
+            this.skuRename.preview = null;
+            this.skuRename.result = null;
+            
+            try {
+              const response = await fetch('/inventory-tools/preview-sku-rename/', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  regex_pattern: this.skuRename.regexPattern,
+                  replacement: this.skuRename.replacement
+                })
+              });
+              const data = await response.json();
+              
+              if (response.ok) {
+                this.skuRename.preview = data;
+              } else {
+                alert('Preview error: ' + (data.error || 'Unknown error'));
+              }
+            } catch (err) {
+              alert('Error previewing SKU rename');
+              console.error('Error:', err);
+            } finally {
+              this.shipmondoLoading = false;
+            }
+          },
+          async applySkuRename() {
+            if (!confirm(`Apply SKU rename to ${this.skuRename.preview.total_count} items in both Shipmondo and Shopify?`)) {
+              return;
+            }
+            
+            this.shipmondoLoading = true;
+            this.skuRename.result = null;
+            
+            try {
+              const response = await fetch('/inventory-tools/apply-sku-rename/', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  regex_pattern: this.skuRename.regexPattern,
+                  replacement: this.skuRename.replacement
+                })
+              });
+              const data = await response.json();
+              
+              if (response.ok) {
+                this.skuRename.result = data;
+                this.skuRename.preview = null;
+                await this.loadShipmondoStatus();
+              } else {
+                this.skuRename.result = { error: data.error || 'Failed to apply SKU rename' };
+              }
+            } catch (err) {
+              this.skuRename.result = { error: 'An error occurred during SKU rename' };
               console.error('Error:', err);
             } finally {
               this.shipmondoLoading = false;

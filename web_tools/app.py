@@ -22,13 +22,15 @@ from flask_session import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from shopify import fetch_missing_inventory as fetch_purchase_order_data, calculate_brand_inventory_value, update_variant_barcode
+from shopify import fetch_missing_inventory as fetch_purchase_order_data, calculate_brand_inventory_value, update_variant_barcode, update_variant_sku
 from shipmondo import (
     fetch_all_shipmondo_items,
     clear_bin_location,
     batch_update_bins_with_regex,
     apply_batch_update,
-    update_barcode
+    update_barcode,
+    batch_rename_skus_with_regex,
+    apply_batch_sku_rename
 )
 import shopify as shopify_module
 import threading
@@ -444,19 +446,17 @@ def create_app() -> Flask:
 
     @application.post("/inventory-tools/calculate-brand-value/")
     async def calculate_brand_value() -> Any:
-        """Calculate the total inventory value for a specific brand or all inventory."""
+        """Calculate the total inventory value for a specific brand."""
         try:
             payload = request.get_json(silent=True) or {}
             brand_name = str(payload.get("brand", "")).strip()
             
-            # If no brand provided, calculate total inventory value
-            total_value = await asyncio.to_thread(calculate_brand_inventory_value, brand_name or None)
+            if not brand_name:
+                return jsonify({"error": "Brand name is required."}), 400
             
-            result = {"total_value": total_value}
-            if brand_name:
-                result["brand"] = brand_name
+            total_value = await asyncio.to_thread(calculate_brand_inventory_value, brand_name)
             
-            return jsonify(result)
+            return jsonify({"brand": brand_name, "total_value": total_value})
         except Exception as exc:
             current_app.logger.exception("Failed to calculate brand inventory value", exc_info=exc)
             return jsonify({"error": "Failed to calculate inventory value."}), 500
@@ -823,6 +823,111 @@ def create_app() -> Flask:
         except Exception as exc:
             current_app.logger.exception("Failed to assign barcode", exc_info=exc)
             return jsonify({"error": "Failed to assign barcode."}), 500
+
+    @application.post("/inventory-tools/preview-sku-rename/")
+    def preview_sku_rename() -> Any:
+        """Preview regex-based SKU rename without applying changes."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            regex_pattern = payload.get("regex_pattern", "").strip()
+            replacement = payload.get("replacement", "").strip()
+            
+            if not regex_pattern:
+                return jsonify({"error": "Regex pattern is required."}), 400
+            
+            result = batch_rename_skus_with_regex(
+                shipmondo_cache["items"],
+                regex_pattern,
+                replacement
+            )
+            
+            if "error" in result:
+                return jsonify(result), 400
+            
+            # Return preview (limit to first 50 items)
+            return jsonify({
+                "matching_items": result["matching_items"][:50],
+                "total_count": result["count"],
+                "showing_count": min(50, result["count"])
+            })
+        except Exception as exc:
+            current_app.logger.exception("Failed to preview SKU rename", exc_info=exc)
+            return jsonify({"error": "Failed to preview SKU rename."}), 500
+
+    @application.post("/inventory-tools/apply-sku-rename/")
+    async def apply_sku_rename() -> Any:
+        """Apply regex-based SKU rename to both Shipmondo and Shopify."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            regex_pattern = payload.get("regex_pattern", "").strip()
+            replacement = payload.get("replacement", "").strip()
+            
+            if not regex_pattern:
+                return jsonify({"error": "Regex pattern is required."}), 400
+            
+            # Get matching items
+            match_result = batch_rename_skus_with_regex(
+                shipmondo_cache["items"],
+                regex_pattern,
+                replacement
+            )
+            
+            if "error" in match_result:
+                return jsonify(match_result), 400
+            
+            if match_result["count"] == 0:
+                return jsonify({
+                    "success": True,
+                    "message": "No items matched the pattern",
+                    "shipmondo_success": 0,
+                    "shopify_success": 0,
+                    "total_count": 0
+                })
+            
+            # Apply updates to Shipmondo first
+            shipmondo_result = await asyncio.to_thread(apply_batch_sku_rename, match_result["matching_items"])
+            
+            # Update Shopify for successfully updated items
+            shopify_success_count = 0
+            shopify_errors = []
+            
+            for item in match_result["matching_items"]:
+                current_sku = item["current_sku"]
+                new_sku = item["new_sku"]
+                
+                # Update Shopify
+                success, message = await asyncio.to_thread(update_variant_sku, current_sku, new_sku)
+                if success:
+                    shopify_success_count += 1
+                else:
+                    shopify_errors.append(message)
+            
+            # Update cache for successfully renamed items
+            # We need to update the cache keys as well
+            with shipmondo_lock:
+                for item in match_result["matching_items"]:
+                    old_sku = item["current_sku"]
+                    new_sku = item["new_sku"]
+                    
+                    # If the item exists in the cache with the old SKU, move it to the new SKU
+                    if old_sku in shipmondo_cache["items"]:
+                        item_data = shipmondo_cache["items"][old_sku]
+                        item_data["sku"] = new_sku
+                        shipmondo_cache["items"][new_sku] = item_data
+                        del shipmondo_cache["items"][old_sku]
+            
+            all_errors = shipmondo_result["errors"] + shopify_errors
+            
+            return jsonify({
+                "success": True,
+                "shipmondo_success": shipmondo_result["success_count"],
+                "shopify_success": shopify_success_count,
+                "total_count": shipmondo_result["total_count"],
+                "errors": all_errors[:20]  # Limit error messages
+            })
+        except Exception as exc:
+            current_app.logger.exception("Failed to apply SKU rename", exc_info=exc)
+            return jsonify({"error": "Failed to apply SKU rename."}), 500
 
     return application
 

@@ -219,3 +219,104 @@ def apply_batch_update(matching_items: List[dict]) -> Dict[str, any]:
         "total_count": len(matching_items),
         "errors": errors
     }
+
+
+def update_sku(item_id: int, old_sku: str, new_sku: str) -> Tuple[bool, str]:
+    """
+    Update the SKU for a Shipmondo item.
+    
+    Args:
+        item_id: The Shipmondo item ID
+        old_sku: The current SKU (for logging purposes)
+        new_sku: The new SKU value
+        
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    url = f"https://app.shipmondo.com/api/public/v3/items/{item_id}"
+    headers = get_shipmondo_headers()
+    
+    try:
+        response = requests.put(
+            url,
+            headers=headers,
+            json={"sku": new_sku},
+            timeout=10
+        )
+        response.raise_for_status()
+        return True, f"Updated SKU from '{old_sku}' to '{new_sku}' in Shipmondo"
+    except requests.exceptions.RequestException as e:
+        return False, f"Error updating SKU '{old_sku}' in Shipmondo: {str(e)}"
+
+
+def batch_rename_skus_with_regex(shipmondo_items: Dict[str, dict], 
+                                  regex_pattern: str, 
+                                  replacement: str) -> Dict[str, any]:
+    """
+    Batch rename SKUs using regex pattern matching.
+    
+    Args:
+        shipmondo_items: Dict of all Shipmondo items
+        regex_pattern: Regex pattern to match SKUs
+        replacement: Replacement string (can use \\1, \\2 for capture groups)
+    
+    Returns:
+        Dict with results including matched items, success count, and errors
+    """
+    try:
+        compiled_regex = re.compile(regex_pattern)
+    except re.error as e:
+        return {"error": f"Invalid regex pattern: {str(e)}"}
+    
+    # Find matching items
+    matching_items = []
+    for sku, item_data in shipmondo_items.items():
+        if compiled_regex.search(sku):
+            new_sku = compiled_regex.sub(replacement, sku)
+            # Prevent empty SKUs
+            if not new_sku or not new_sku.strip():
+                continue
+            matching_items.append({
+                "sku": sku,
+                "item_id": item_data.get("id"),
+                "current_sku": sku,
+                "new_sku": new_sku,
+                "name": item_data.get("name", ""),
+                "bin": item_data.get("bin", "")
+            })
+    
+    return {
+        "matching_items": matching_items,
+        "count": len(matching_items)
+    }
+
+
+def apply_batch_sku_rename(matching_items: List[dict]) -> Dict[str, any]:
+    """
+    Apply the batch SKU rename to Shipmondo.
+    
+    Args:
+        matching_items: List of items to rename (from batch_rename_skus_with_regex)
+    
+    Returns:
+        Dict with success count and any errors
+    """
+    success_count = 0
+    errors = []
+    
+    for item in matching_items:
+        success, message = update_sku(
+            item["item_id"], 
+            item["current_sku"], 
+            item["new_sku"]
+        )
+        if success:
+            success_count += 1
+        else:
+            errors.append(message)
+    
+    return {
+        "success_count": success_count,
+        "total_count": len(matching_items),
+        "errors": errors
+    }

@@ -94,30 +94,11 @@ query ($cursor: String, $query: String!) {
   productVariants(first: 100, after: $cursor, query: $query) {
     edges {
       node {
-        id
-        sku
-        title
         inventoryQuantity
         inventoryItem {
-          id
-          tracked
           unitCost {
             amount
           }
-          inventoryLevels(first: 10) {
-            edges {
-              node {
-                quantities(names: ["available"]) {
-                  name
-                  quantity
-                }
-              }
-            }
-          }
-        }
-        product {
-          title
-          vendor
         }
       }
     }
@@ -130,27 +111,22 @@ query ($cursor: String, $query: String!) {
 """)
 
 
-def calculate_brand_inventory_value(brand_name: str = None) -> float:
+def calculate_brand_inventory_value(brand_name: str) -> float:
     """
-    Calculate the total inventory value for all products of a specific brand,
-    or for all products if no brand is specified.
+    Calculate the total inventory value for all products of a specific brand.
     
     Args:
-        brand_name: The vendor/brand name to filter products by. If None or empty,
-                   calculates total value for all inventory.
+        brand_name: The vendor/brand name to filter products by (required)
         
     Returns:
         The total value of inventory for the brand (cost * quantity)
     """
+    if not brand_name or not brand_name.strip():
+        raise ValueError("Brand name is required")
+    
     total_value = 0.0
     cursor = None
-    
-    # Build query to filter by vendor (brand) if provided
-    if brand_name and brand_name.strip():
-        query = f'vendor:"{brand_name}"'
-    else:
-        # Empty query to get all products
-        query = ""
+    query = f'vendor:"{brand_name.strip()}"'
     
     while True:
         variables = {"cursor": cursor, "query": query}
@@ -168,17 +144,11 @@ def calculate_brand_inventory_value(brand_name: str = None) -> float:
             else:
                 unit_cost = 0.0
             
-            # Sum available quantities across all inventory levels
-            available_qty = 0
-            inventory_levels = inventory_item.get("inventoryLevels", {}).get("edges", [])
-            for level in inventory_levels:
-                quantities = level["node"].get("quantities", [])
-                for q in quantities:
-                    if q["name"] == "available":
-                        available_qty += q["quantity"] or 0
+            # Use inventoryQuantity directly (aggregates all locations)
+            inventory_qty = node.get("inventoryQuantity", 0) or 0
             
             # Calculate value for this variant
-            variant_value = unit_cost * available_qty
+            variant_value = unit_cost * inventory_qty
             total_value += variant_value
         
         page_info = result["productVariants"]["pageInfo"]
@@ -279,3 +249,92 @@ def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
         
     except Exception as e:
         return False, f"Error updating barcode in Shopify for SKU {sku}: {str(e)}"
+
+
+def update_variant_sku(old_sku: str, new_sku: str) -> tuple[bool, str]:
+    """
+    Update the SKU for a Shopify variant.
+    
+    Args:
+        old_sku: The current SKU of the variant to update
+        new_sku: The new SKU value
+        
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    try:
+        # First, find the variant by old SKU
+        query = gql("""
+        query ($query: String!) {
+          productVariants(first: 1, query: $query) {
+            edges {
+              node {
+                id
+                sku
+              }
+            }
+          }
+        }
+        """)
+        
+        variables = {"query": f'sku:"{old_sku}"'}
+        result = __gql_client__.execute(query, variable_values=variables)
+        
+        variants = result.get("productVariants", {}).get("edges", [])
+        if not variants:
+            return False, f"No variant found with SKU: {old_sku}"
+        
+        variant_id = variants[0]["node"]["id"]
+        
+        # Get product ID for the variant
+        product_query = gql("""
+        query getProductForVariant($variantId: ID!) {
+          productVariant(id: $variantId) {
+            product {
+              id
+            }
+          }
+        }
+        """)
+        
+        product_result = __gql_client__.execute(product_query, variable_values={"variantId": variant_id})
+        product_id = product_result.get("productVariant", {}).get("product", {}).get("id")
+        
+        if not product_id:
+            return False, f"Could not find product for variant {old_sku}"
+        
+        # Update the SKU using productVariantsBulkUpdate mutation
+        mutation = gql("""
+        mutation updateProductVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+          productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+            productVariants {
+              id
+              sku
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        """)
+        
+        mutation_variables = {
+            "productId": product_id,
+            "variants": [{
+                "id": variant_id,
+                "sku": new_sku
+            }]
+        }
+        
+        mutation_result = __gql_client__.execute(mutation, variable_values=mutation_variables)
+        
+        user_errors = mutation_result.get("productVariantsBulkUpdate", {}).get("userErrors", [])
+        if user_errors:
+            error_messages = ", ".join([err["message"] for err in user_errors])
+            return False, f"Shopify error updating SKU from '{old_sku}' to '{new_sku}': {error_messages}"
+        
+        return True, f"Updated SKU in Shopify from '{old_sku}' to '{new_sku}'"
+        
+    except Exception as e:
+        return False, f"Error updating SKU in Shopify from '{old_sku}' to '{new_sku}': {str(e)}"
