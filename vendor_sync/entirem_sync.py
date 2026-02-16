@@ -15,7 +15,7 @@ def fetch_helikon_stock():
     Fetch Helikon-Tex stock data from SOAP API using remote WSDL.
     Returns a dict mapping ProductCode (SKU) to OnStock (float).
     """
-    wsdl_url = "http://89.171.38.14:8886/BasicApiB2BPartners.asmx?WSDL"
+    wsdl_url = "http://31.179.196.74:8886/BasicApiB2BPartners.asmx?WSDL"
     token = os.environ.get("ENTIREM_TOKEN")
     if not token:
         raise RuntimeError("ENTIREM_TOKEN environment variable not set")
