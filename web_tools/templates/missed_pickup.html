@@ -110,7 +110,7 @@ color: #1990C6;
                         <tbody><tr>
                           <td class="order-number__cell" style="font-family: -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;Roboto&quot;, &quot;Oxygen&quot;, &quot;Ubuntu&quot;, &quot;Cantarell&quot;, &quot;Fira Sans&quot;, &quot;Droid Sans&quot;, &quot;Helvetica Neue&quot;, sans-serif; text-transform: uppercase; font-size: 14px; color: #999;" align="right">
                             <span class="order-number__text" style="font-size: 16px;">
-                              Ordre #{{ order_number }}
+                              Ordre {{ order_number }}
                             </span>
                           </td>
                         </tr>
@@ -134,15 +134,9 @@ color: #1990C6;
           <tbody><tr>
             <td style="font-family: -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;Roboto&quot;, &quot;Oxygen&quot;, &quot;Ubuntu&quot;, &quot;Cantarell&quot;, &quot;Fira Sans&quot;, &quot;Droid Sans&quot;, &quot;Helvetica Neue&quot;, sans-serif;">
             <p style="color: #777; line-height: 150%; font-size: 16px; margin: 0;">
-            Kære {{ first_name }}!
-            </p>
-            <p style="color: #777; line-height: 150%; font-size: 16px; margin: 0;">
-            Vi har i dag modtaget din pakke for ordren #{{ order_number }} retur, fordi den ikke er blevet afhentet.
-            </p>
-            <p style="color: #777; line-height: 150%; font-size: 16px; margin: 0;">
-            Ønsker du at vi gensender den mod ny fragt på 39 kr?
-            </p>
-            <p style="color: #777; line-height: 150%; font-size: 16px; margin: 0;">
+            K&aelig;re {{ first_name }}! <br /><br />
+            Vi har i dag modtaget din pakke for ordren {{ order_number }} retur, fordi den ikke er blevet afhentet. <br /><br />
+            &Oslash;nsker du at vi gensender den mod ny fragt p&aring; 39 kr? <br /><br />
             Med venlig hilsen<br />
             XtraGrej
             </p>
@@ -161,7 +155,7 @@ color: #1990C6;
           <tbody><tr>
             <td style="font-family: -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;Roboto&quot;, &quot;Oxygen&quot;, &quot;Ubuntu&quot;, &quot;Cantarell&quot;, &quot;Fira Sans&quot;, &quot;Droid Sans&quot;, &quot;Helvetica Neue&quot;, sans-serif;">
               
-              <p class="disclaimer__subtext" style="color: #999; line-height: 150%; font-size: 14px; margin: 0;">Hvis du har spørgsmål, kan du besvare denne mail eller kontakte os på <a style="font-size: 14px; text-decoration: none; color: #1990C6;">info@xtragrej.dk</a></p>
+              <p class="disclaimer__subtext" style="color: #999; line-height: 150%; font-size: 14px; margin: 0;">Hvis du har sp&oslash;rgsm&aring;l, kan du besvare denne mail eller kontakte os p&aring; <a style="font-size: 14px; text-decoration: none; color: #1990C6;">info@xtragrej.dk</a></p>
             </td>
           </tr>
         </tbody></table>
