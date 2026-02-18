@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+
+{% block title %}Mail Tools - Shopify Tools{% endblock %}
+
+{% block extra_css %}
+<style>
+  .tool-section {
+    background: var(--card-bg, #fff);
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .tool-section h2 {
+    margin-top: 0;
+  }
+  .tool-description {
+    color: var(--text-secondary, #666);
+    margin-bottom: 16px;
+  }
+  .input-group {
+    margin-bottom: 16px;
+  }
+  .input-group label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .input-group input {
+    width: 100%;
+    max-width: 320px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  button.btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    transition: background 0.2s;
+  }
+  button.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-primary {
+    background: #2563eb;
+    color: #fff;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: #1d4ed8;
+  }
+  .btn-send {
+    background: #16a34a;
+    color: #fff;
+    margin-top: 12px;
+  }
+  .btn-send:hover:not(:disabled) {
+    background: #15803d;
+  }
+  .result-section {
+    margin-top: 20px;
+    padding: 16px;
+    border-radius: 6px;
+  }
+  .customer-info {
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    padding: 16px;
+    border-radius: 6px;
+    margin-top: 12px;
+  }
+  .customer-info p {
+    margin: 4px 0;
+  }
+  .error-message {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-top: 12px;
+  }
+  .success-message {
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    color: #15803d;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-top: 12px;
+  }
+  .info-message {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #1d4ed8;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-top: 12px;
+  }
+</style>
+{% endblock %}
+
+{% block page_title %}Mail Tools{% endblock %}
+
+{% block content %}
+<div id="mail-tools-app">
+  <div class="tool-section">
+    <h2>Send Missed Pickup Email</h2>
+    <p class="tool-description">Look up an order by number and send a missed-pickup notification to the customer.</p>
+
+    <div class="input-group">
+      <label for="order-number">Order Number:</label>
+      <input
+        type="text"
+        id="order-number"
+        v-model="orderNumber"
+        placeholder="#27542"
+        @keyup.enter="lookupOrder"
+      >
+    </div>
+
+    <button class="btn btn-primary" @click="lookupOrder" :disabled="lookupLoading || !orderNumber.trim()">
+      <span v-if="!lookupLoading">Look Up Order</span>
+      <span v-else>Looking up…</span>
+    </button>
+
+    <div v-if="lookupError" class="error-message">[[ lookupError ]]</div>
+
+    <div v-if="customer" class="customer-info">
+      <p><strong>Name:</strong> [[ customer.first_name ]]</p>
+      <p><strong>Email:</strong> [[ customer.email ]]</p>
+
+      <button class="btn btn-send" @click="sendEmail" :disabled="sendLoading">
+        <span v-if="!sendLoading">✉️ Send Missed Pickup Email</span>
+        <span v-else>Sending…</span>
+      </button>
+    </div>
+
+    <div v-if="sendError" class="error-message">[[ sendError ]]</div>
+    <div v-if="sendSuccess" class="success-message">[[ sendSuccess ]]</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script>
+const { createApp } = Vue;
+
+createApp({
+  delimiters: ['[[', ']]'],
+  data() {
+    return {
+      orderNumber: '',
+      customer: null,
+      lookupLoading: false,
+      lookupError: '',
+      sendLoading: false,
+      sendError: '',
+      sendSuccess: '',
+    };
+  },
+  methods: {
+    async lookupOrder() {
+      const num = this.orderNumber.trim();
+      if (!num) return;
+
+      this.lookupLoading = true;
+      this.lookupError = '';
+      this.customer = null;
+      this.sendError = '';
+      this.sendSuccess = '';
+
+      try {
+        const resp = await fetch('/mail-tools/lookup-order/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order_number: num }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.lookupError = data.error || 'Failed to look up order.';
+        } else {
+          this.customer = data;
+        }
+      } catch (e) {
+        this.lookupError = 'Network error looking up order.';
+      } finally {
+        this.lookupLoading = false;
+      }
+    },
+
+    async sendEmail() {
+      this.sendLoading = true;
+      this.sendError = '';
+      this.sendSuccess = '';
+
+      try {
+        const resp = await fetch('/mail-tools/send-missed-pickup/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order_number: this.orderNumber.trim() }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.sendError = data.error || 'Failed to send email.';
+        } else {
+          this.sendSuccess = data.message;
+        }
+      } catch (e) {
+        this.sendError = 'Network error sending email.';
+      } finally {
+        this.sendLoading = false;
+      }
+    },
+  },
+}).mount('#mail-tools-app');
+</script>
+{% endblock %}

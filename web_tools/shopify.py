@@ -279,3 +279,53 @@ def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
         
     except Exception as e:
         return False, f"Error updating barcode in Shopify for SKU {sku}: {str(e)}"
+
+
+def fetch_order_customer(order_name: str) -> dict | None:
+    """
+    Look up a Shopify order by its display name (e.g. "#27542") and return
+    the customer's first name and email address.
+
+    Args:
+        order_name: The order name with or without the '#' prefix.
+
+    Returns:
+        A dict with keys ``first_name`` and ``email``, or ``None`` when
+        the order cannot be found or has no customer attached.
+    """
+    # Normalise: strip whitespace and ensure a leading '#'
+    order_name = order_name.strip().lstrip("#")
+    order_name = f"#{order_name}"
+
+    query = gql("""
+    query ($orderQuery: String!) {
+      orders(first: 1, query: $orderQuery) {
+        edges {
+          node {
+            name
+            customer {
+              firstName
+              email
+            }
+          }
+        }
+      }
+    }
+    """)
+
+    # Shopify search accepts the order name with or without the '#'.
+    variables = {"orderQuery": f"name:{order_name}"}
+    result = __gql_client__.execute(query, variable_values=variables)
+
+    edges = result.get("orders", {}).get("edges", [])
+    if not edges:
+        return None
+
+    customer = edges[0]["node"].get("customer")
+    if not customer:
+        return None
+
+    return {
+        "first_name": customer.get("firstName", ""),
+        "email": customer.get("email", ""),
+    }

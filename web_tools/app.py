@@ -22,7 +22,7 @@ from flask_session import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from shopify import fetch_missing_inventory as fetch_purchase_order_data, calculate_brand_inventory_value, update_variant_barcode
+from shopify import fetch_missing_inventory as fetch_purchase_order_data, calculate_brand_inventory_value, update_variant_barcode, fetch_order_customer
 from shipmondo import (
     fetch_all_shipmondo_items,
     clear_bin_location,
@@ -30,6 +30,7 @@ from shipmondo import (
     apply_batch_update,
     update_barcode
 )
+from microsoft365 import send_missed_pickup_email
 import shopify as shopify_module
 import threading
 
@@ -823,6 +824,79 @@ def create_app() -> Flask:
         except Exception as exc:
             current_app.logger.exception("Failed to assign barcode", exc_info=exc)
             return jsonify({"error": "Failed to assign barcode."}), 500
+
+    # ── Mail Tools ─────────────────────────────────────────────────
+
+    @application.route("/mail-tools/")
+    @oidc.require_login
+    def mail_tools() -> str:
+        """Render the mail tools page."""
+        context = get_user_context()
+        return render_template(
+            "mail_tools.html",
+            **context,
+            active_page="mail_tools",
+        )
+
+    @application.post("/mail-tools/lookup-order/")
+    async def lookup_order() -> Any:
+        """Look up a Shopify order by number and return customer info."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            order_number = str(payload.get("order_number", "")).strip()
+
+            if not order_number:
+                return jsonify({"error": "Order number is required."}), 400
+
+            # Ensure the order number starts with '#'
+            if not order_number.startswith("#"):
+                order_number = f"#{order_number}"
+
+            customer = await asyncio.to_thread(fetch_order_customer, order_number)
+
+            if customer is None:
+                return jsonify({"error": f"Order {order_number} not found or has no customer."}), 404
+
+            return jsonify(customer)
+        except Exception as exc:
+            current_app.logger.exception("Failed to look up order", exc_info=exc)
+            return jsonify({"error": "Failed to look up order."}), 500
+
+    @application.post("/mail-tools/send-missed-pickup/")
+    async def send_missed_pickup() -> Any:
+        """Look up the order, then send the missed-pickup email."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            order_number = str(payload.get("order_number", "")).strip()
+
+            if not order_number:
+                return jsonify({"error": "Order number is required."}), 400
+
+            if not order_number.startswith("#"):
+                order_number = f"#{order_number}"
+
+            customer = await asyncio.to_thread(fetch_order_customer, order_number)
+
+            if customer is None:
+                return jsonify({"error": f"Order {order_number} not found or has no customer."}), 404
+
+            first_name = customer["first_name"]
+            email = customer["email"]
+
+            if not email:
+                return jsonify({"error": "Customer has no email address on file."}), 400
+
+            success, message = await asyncio.to_thread(
+                send_missed_pickup_email, first_name, email, order_number
+            )
+
+            if success:
+                return jsonify({"message": message})
+            else:
+                return jsonify({"error": message}), 500
+        except Exception as exc:
+            current_app.logger.exception("Failed to send missed-pickup email", exc_info=exc)
+            return jsonify({"error": "Failed to send email."}), 500
 
     return application
 
