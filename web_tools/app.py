@@ -22,7 +22,38 @@ from flask_session import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from shopify import fetch_missing_inventory as fetch_purchase_order_data, calculate_brand_inventory_value, update_variant_barcode, fetch_order_customer
+from shopify import (
+    fetch_missing_inventory as fetch_purchase_order_data,
+    calculate_brand_inventory_value,
+    update_variant_barcode,
+    fetch_order_customer,
+    parse_vendor_csv,
+    fetch_shopify_products_by_vendors,
+    compare_vendor_products,
+    add_variants_to_shopify_product,
+    fetch_color_field_options,
+    check_existing_color_metaobjects,
+    create_color_metaobject,
+    upload_file_to_shopify,
+    generate_diagonal_swatch,
+    upload_swatch_bytes_to_shopify,
+    check_linked_option_values,
+    create_option_value_metaobject,
+    fetch_shopify_taxonomy,
+    fetch_all_product_tags,
+    fetch_category_metafields,
+    create_shopify_product,
+    set_product_category_metafields,
+    detect_product_options,
+    create_product_options,
+    fetch_metaobject_type_details,
+    fetch_metaobjects_for_definition,
+    fetch_product_images,
+    add_product_images,
+    reorder_product_images,
+    delete_product_image,
+)
+from chatgpt import fetch_and_translate_vendor_page
 from shipmondo import (
     fetch_all_shipmondo_items,
     clear_bin_location,
@@ -56,6 +87,22 @@ shipmondo_cache = {
 }
 shipmondo_lock = threading.Lock()
 
+# Global Shopify taxonomy cache with thread lock
+taxonomy_cache = {
+    "categories": [],
+    "last_updated": None,
+    "is_refreshing": False
+}
+taxonomy_lock = threading.Lock()
+
+# Global product tags cache
+tags_cache = {
+    "tags": [],
+    "last_updated": None,
+    "is_refreshing": False
+}
+tags_lock = threading.Lock()
+
 
 def fetch_and_cache_shipmondo_items():
     """Fetch all Shipmondo items and update the global cache."""
@@ -85,6 +132,66 @@ def fetch_and_cache_shipmondo_items():
         logger.error(f"Error fetching Shipmondo items: {e}", exc_info=True)
     finally:
         shipmondo_cache["is_refreshing"] = False
+
+
+def fetch_and_cache_taxonomy():
+    """Fetch the Shopify product taxonomy and update the global cache."""
+    if taxonomy_cache["is_refreshing"]:
+        logger.info("Taxonomy cache refresh already in progress, skipping")
+        return
+
+    try:
+        taxonomy_cache["is_refreshing"] = True
+        logger.info(f"Starting taxonomy fetch at {datetime.now()}")
+        categories = fetch_shopify_taxonomy()
+        logger.info(f"Fetched {len(categories)} taxonomy categories")
+
+        with taxonomy_lock:
+            taxonomy_cache["categories"] = categories
+            taxonomy_cache["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        logger.info(f"Successfully cached {len(categories)} taxonomy categories")
+    except Exception as e:
+        logger.error(f"Error fetching taxonomy: {e}", exc_info=True)
+    finally:
+        taxonomy_cache["is_refreshing"] = False
+
+
+def fetch_and_cache_product_tags():
+    """Fetch all product tags from Shopify and update the global cache."""
+    if tags_cache["is_refreshing"]:
+        logger.info("Product tags cache refresh already in progress, skipping")
+        return
+
+    try:
+        tags_cache["is_refreshing"] = True
+        logger.info(f"Starting product tags fetch at {datetime.now()}")
+        tags = fetch_all_product_tags()
+        logger.info(f"Fetched {len(tags)} unique product tags")
+
+        with tags_lock:
+            tags_cache["tags"] = tags
+            tags_cache["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        logger.info(f"Successfully cached {len(tags)} product tags")
+    except Exception as e:
+        logger.error(f"Error fetching product tags: {e}", exc_info=True)
+    finally:
+        tags_cache["is_refreshing"] = False
+
+
+def refresh_all_shopify_caches():
+    """Run all Shopify-dependent cache refreshes sequentially.
+
+    Shopify's API rate-limits concurrent requests, so we must avoid
+    firing multiple heavy fetches in parallel.  This wrapper is used
+    both at startup and for the daily scheduled refresh.
+    """
+    logger.info("refresh_all_shopify_caches: starting sequential refresh")
+    fetch_and_cache_taxonomy()
+    fetch_and_cache_product_tags()
+    logger.info("refresh_all_shopify_caches: all Shopify caches refreshed")
+
 
 def get_db() -> sqlite3.Connection:
     """Return a per-request SQLite connection."""
@@ -171,8 +278,14 @@ def create_app() -> Flask:
     with application.app_context():
         init_db()
     
-    # Initialize background scheduler for Shipmondo cache updates
+    # Initialize background scheduler for cache updates.
+    # IMPORTANT: Shopify rate-limits concurrent API requests, so all
+    # Shopify-dependent refreshes are funnelled through a single
+    # sequential wrapper (refresh_all_shopify_caches).  Shipmondo is
+    # a separate API and can run independently.
     scheduler = BackgroundScheduler()
+
+    # Shipmondo cache (separate API — safe to run independently)
     scheduler.add_job(
         func=fetch_and_cache_shipmondo_items,
         trigger=CronTrigger(hour=4, minute=0),  # Daily at 4:00 UTC
@@ -180,14 +293,26 @@ def create_app() -> Flask:
         name='Update Shipmondo cache',
         replace_existing=True
     )
-    
-    # Initial fetch on startup (run in background, non-blocking)
     scheduler.add_job(
         func=fetch_and_cache_shipmondo_items,
         id='shipmondo_initial_fetch',
         name='Initial Shipmondo cache fetch'
     )
-    
+
+    # All Shopify caches — run sequentially to avoid rate-limit denials
+    scheduler.add_job(
+        func=refresh_all_shopify_caches,
+        trigger=CronTrigger(hour=4, minute=5),  # Daily at 4:05 UTC (after Shipmondo)
+        id='shopify_cache_update',
+        name='Update all Shopify caches (sequential)',
+        replace_existing=True
+    )
+    scheduler.add_job(
+        func=refresh_all_shopify_caches,
+        id='shopify_initial_fetch',
+        name='Initial Shopify cache fetch (sequential)'
+    )
+
     scheduler.start()
 
     application.teardown_appcontext(close_db)
@@ -825,7 +950,638 @@ def create_app() -> Flask:
             current_app.logger.exception("Failed to assign barcode", exc_info=exc)
             return jsonify({"error": "Failed to assign barcode."}), 500
 
+    # ── Product Tools ──────────────────────────────────────────────
+
+    @application.route("/product-tools/")
+    @oidc.require_login
+    def product_tools() -> str:
+        """Render the product tools page."""
+        context = get_user_context()
+        return render_template(
+            "product_tools.html",
+            **context,
+            active_page="product_tools",
+        )
+
+    # Vendor → list of Shopify vendor names to compare against
+    VENDOR_SHOPIFY_BRANDS: dict[str, list[str]] = {
+        "entirem": ["Helikon-Tex", "Tac Maven"],
+    }
+
+    @application.post("/product-tools/compare/")
+    async def product_tools_compare() -> Any:
+        """Compare an uploaded vendor CSV against Shopify."""
+        try:
+            vendor = (request.form.get("vendor") or "").strip()
+            csv_file = request.files.get("csv_file")
+
+            if not vendor:
+                return jsonify({"error": "Vendor is required."}), 400
+
+            if vendor not in VENDOR_SHOPIFY_BRANDS:
+                return jsonify({"error": f"Unsupported vendor: {vendor}"}), 400
+
+            if not csv_file or csv_file.filename == "":
+                return jsonify({"error": "A CSV file is required."}), 400
+
+            # Read and parse CSV
+            csv_content = csv_file.read().decode("utf-8-sig")  # handle BOM
+            vendor_products = parse_vendor_csv(csv_content)
+            current_app.logger.info(
+                f"Parsed {len(vendor_products)} rows from uploaded CSV"
+            )
+
+            if not vendor_products:
+                return jsonify({"error": "No valid rows found in CSV. Check the file format."}), 400
+
+            # Fetch matching Shopify products for the vendor's brands
+            brands = VENDOR_SHOPIFY_BRANDS[vendor]
+            shopify_products = await asyncio.to_thread(
+                fetch_shopify_products_by_vendors, brands,
+            )
+            current_app.logger.info(
+                f"Fetched {len(shopify_products)} products from Shopify"
+            )
+
+            # Compare
+            result = compare_vendor_products(vendor_products, shopify_products)
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to compare products", exc_info=exc
+            )
+            return jsonify({"error": "Failed to compare products."}), 500
+
+    @application.post("/product-tools/add-variants/")
+    async def product_tools_add_variants() -> Any:
+        """Add selected new variants to their existing Shopify products."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            variants = payload.get("variants", [])
+            color_image_urls = payload.get("color_image_urls", {})
+
+            current_app.logger.info(
+                "add-variants: received %d variant(s) in payload, %d product(s) with images",
+                len(variants), len(color_image_urls),
+            )
+
+            if not variants or not isinstance(variants, list):
+                return jsonify({"error": "No variants provided."}), 400
+
+            # Group variants by Shopify product ID
+            by_product: dict[str, list[dict]] = {}
+            for v in variants:
+                pid = v.get("shopify_product_id")
+                if pid:
+                    by_product.setdefault(pid, []).append(v)
+
+            current_app.logger.info(
+                "add-variants: grouped into %d product(s): %s",
+                len(by_product),
+                {pid: len(vlist) for pid, vlist in by_product.items()},
+            )
+
+            if not by_product:
+                return jsonify({"error": "No variants with a valid Shopify product ID found."}), 400
+
+            all_created: list[dict] = []
+            all_errors: list[str] = []
+
+            for product_id, product_variants in by_product.items():
+                current_app.logger.info(
+                    "add-variants: calling mutation for product %s with %d variant(s)",
+                    product_id, len(product_variants),
+                )
+                product_images = color_image_urls.get(product_id, {})
+                result = await asyncio.to_thread(
+                    add_variants_to_shopify_product, product_id, product_variants, product_images
+                )
+                current_app.logger.info(
+                    "add-variants: result for %s — created=%d errors=%d",
+                    product_id,
+                    len(result.get("created", [])),
+                    len(result.get("errors", [])),
+                )
+                all_created.extend(result.get("created", []))
+                all_errors.extend(result.get("errors", []))
+
+            return jsonify({
+                "created": all_created,
+                "errors": all_errors,
+            })
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to add variants", exc_info=exc
+            )
+            return jsonify({"error": "Failed to add variants."}), 500
+
+    @application.post("/product-tools/color-options/")
+    async def product_tools_color_options() -> Any:
+        """Fetch the color metaobject field definitions and valid options."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            # Accept both single product_id and list of product_ids
+            product_ids = payload.get("product_ids", [])
+            if not product_ids:
+                pid = payload.get("product_id", "")
+                if pid:
+                    product_ids = [pid]
+
+            if not product_ids:
+                return jsonify({"error": "product_ids is required."}), 400
+
+            # Try each product ID until one returns a valid definition
+            result = None
+            for pid in product_ids:
+                result = await asyncio.to_thread(fetch_color_field_options, pid)
+                if result.get("metaobject_type"):
+                    break
+
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to fetch color options", exc_info=exc
+            )
+            return jsonify({"error": "Failed to fetch color options."}), 500
+
+    @application.post("/product-tools/check-colors/")
+    async def product_tools_check_colors() -> Any:
+        """Check which color names already exist as metaobjects."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            # Accept both single product_id and list of product_ids
+            product_ids = payload.get("product_ids", [])
+            if not product_ids:
+                pid = payload.get("product_id", "")
+                if pid:
+                    product_ids = [pid]
+            color_names = payload.get("color_names", [])
+
+            if not product_ids:
+                return jsonify({"error": "product_ids is required."}), 400
+            if not color_names:
+                return jsonify({"existing": {}, "missing": [], "on_product": []})
+
+            # Try each product ID until one succeeds (has linked metaobjects)
+            result = None
+            for pid in product_ids:
+                result = await asyncio.to_thread(
+                    check_existing_color_metaobjects, pid, color_names
+                )
+                # If we found any existing colors or the metaobject type was
+                # discovered (missing != all), this product worked
+                if result.get("existing") or len(result.get("missing", [])) < len(color_names):
+                    break
+
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to check colors", exc_info=exc
+            )
+            return jsonify({"error": "Failed to check colors."}), 500
+
+    @application.post("/product-tools/generate-swatch/")
+    async def product_tools_generate_swatch() -> Any:
+        """Generate a 300×300 diagonal-split swatch PNG and return it as a data URI."""
+        try:
+            import base64
+            payload = request.get_json(silent=True) or {}
+            top_left = payload.get("top_left", {})
+            bottom_right = payload.get("bottom_right", {})
+
+            if not top_left or not bottom_right:
+                return jsonify({"error": "top_left and bottom_right are required."}), 400
+
+            png_bytes = await asyncio.to_thread(
+                generate_diagonal_swatch, top_left, bottom_right
+            )
+            b64 = base64.b64encode(png_bytes).decode("ascii")
+            data_uri = f"data:image/png;base64,{b64}"
+
+            return jsonify({"data_uri": data_uri})
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to generate swatch", exc_info=exc
+            )
+            return jsonify({"error": f"Failed to generate swatch: {exc}"}), 500
+
+    @application.post("/product-tools/create-color/")
+    async def product_tools_create_color() -> Any:
+        """Create a new color metaobject."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            metaobject_type = payload.get("metaobject_type", "")
+            display_name = payload.get("display_name", "")
+            fields = payload.get("fields", {})
+            file_fields = payload.get("file_fields", [])  # field keys that need file upload
+
+            if not metaobject_type:
+                return jsonify({"error": "metaobject_type is required."}), 400
+            if not display_name:
+                return jsonify({"error": "display_name is required."}), 400
+
+            # Upload any file_reference fields (e.g. swatch image URL → Shopify file GID)
+            for fk in file_fields:
+                raw = fields.get(fk, "").strip()
+                if raw and raw.startswith("data:"):
+                    # Data URI from generated swatch — decode and staged-upload
+                    current_app.logger.info(
+                        "Uploading data-URI swatch for field '%s'", fk
+                    )
+                    try:
+                        import base64
+                        # data:image/png;base64,XXXX
+                        _header, b64data = raw.split(",", 1)
+                        png_bytes = base64.b64decode(b64data)
+                        file_gid = await asyncio.to_thread(
+                            upload_swatch_bytes_to_shopify,
+                            png_bytes,
+                            filename=f"{display_name.replace(' ', '_')}_swatch.png",
+                            alt=display_name,
+                        )
+                        fields[fk] = file_gid
+                        current_app.logger.info(
+                            "Uploaded swatch for field '%s' → %s", fk, file_gid
+                        )
+                    except Exception as upload_exc:
+                        current_app.logger.exception(
+                            "Failed to upload swatch for field '%s'", fk
+                        )
+                        return jsonify({"error": f"Swatch upload failed for field '{fk}': {upload_exc}"}), 500
+                elif raw and raw.startswith("http"):
+                    current_app.logger.info(
+                        "Uploading file for field '%s': %s", fk, raw
+                    )
+                    try:
+                        file_gid = await asyncio.to_thread(
+                            upload_file_to_shopify, raw, alt=display_name
+                        )
+                        fields[fk] = file_gid
+                        current_app.logger.info(
+                            "Uploaded file for field '%s' → %s", fk, file_gid
+                        )
+                    except Exception as upload_exc:
+                        current_app.logger.exception(
+                            "Failed to upload file for field '%s'", fk
+                        )
+                        return jsonify({"error": f"File upload failed for field '{fk}': {upload_exc}"}), 500
+
+            result = await asyncio.to_thread(
+                create_color_metaobject, metaobject_type, display_name, fields
+            )
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to create color metaobject", exc_info=exc
+            )
+            return jsonify({"error": "Failed to create color."}), 500
+
     # ── Mail Tools ─────────────────────────────────────────────────
+
+    @application.post("/product-tools/check-linked-options/")
+    async def product_tools_check_linked_options() -> Any:
+        """Check which linked option values are missing from the metaobject pool."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_ids = payload.get("product_ids", [])
+            variants = payload.get("variants", [])
+
+            if not product_ids:
+                return jsonify({"error": "product_ids is required."}), 400
+            if not variants:
+                return jsonify({"options": {}})
+
+            # Try each product ID until one returns results
+            result = {"options": {}}
+            for pid in product_ids:
+                result = await asyncio.to_thread(
+                    check_linked_option_values, pid, variants
+                )
+                if result.get("options"):
+                    break
+
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to check linked options", exc_info=exc
+            )
+            return jsonify({"error": "Failed to check linked options."}), 500
+
+    @application.post("/product-tools/create-option-value/")
+    async def product_tools_create_option_value() -> Any:
+        """Create a simple metaobject for a linked option value (e.g. size)."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            metaobject_type = payload.get("metaobject_type", "")
+            display_name = payload.get("display_name", "")
+
+            if not metaobject_type:
+                return jsonify({"error": "metaobject_type is required."}), 400
+            if not display_name:
+                return jsonify({"error": "display_name is required."}), 400
+
+            result = await asyncio.to_thread(
+                create_option_value_metaobject, metaobject_type, display_name
+            )
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to create option value metaobject", exc_info=exc
+            )
+            return jsonify({"error": "Failed to create option value."}), 500
+
+    # ── Product Creation Endpoints ────────────────────────────────
+
+    @application.get("/product-tools/taxonomy/")
+    def product_tools_taxonomy() -> Any:
+        """Return the cached Shopify product taxonomy categories."""
+        with taxonomy_lock:
+            return jsonify({
+                "categories": taxonomy_cache["categories"],
+                "last_updated": taxonomy_cache["last_updated"],
+            })
+
+    @application.get("/product-tools/tags/")
+    def product_tools_tags() -> Any:
+        """Return the cached product tags."""
+        with tags_lock:
+            return jsonify({
+                "tags": tags_cache["tags"],
+                "last_updated": tags_cache["last_updated"],
+            })
+
+    @application.post("/product-tools/category-metafields/")
+    async def product_tools_category_metafields() -> Any:
+        """Fetch metafield attributes for a given taxonomy category."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            category_id = payload.get("category_id", "").strip()
+
+            if not category_id:
+                return jsonify({"error": "category_id is required."}), 400
+
+            metafields = await asyncio.to_thread(fetch_category_metafields, category_id)
+            return jsonify({"metafields": metafields})
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to fetch category metafields", exc_info=exc
+            )
+            return jsonify({"error": "Failed to fetch category metafields."}), 500
+
+    @application.post("/product-tools/save-category-metafields/")
+    async def product_tools_save_category_metafields() -> Any:
+        """Save category metafield values to a product."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_id = payload.get("product_id", "").strip()
+            metafield_values = payload.get("metafield_values", [])
+
+            if not product_id:
+                return jsonify({"error": "product_id is required."}), 400
+
+            result = await asyncio.to_thread(
+                set_product_category_metafields, product_id, metafield_values
+            )
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to save category metafields", exc_info=exc
+            )
+            return jsonify({"error": "Failed to save category metafields."}), 500
+
+    @application.post("/product-tools/translate-description/")
+    async def product_tools_translate_description() -> Any:
+        """Fetch a vendor page URL and translate its description to Danish."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            url = payload.get("url", "").strip()
+            product_name = payload.get("product_name", "").strip()
+
+            if not url:
+                return jsonify({"error": "url is required."}), 400
+
+            result = await asyncio.to_thread(
+                fetch_and_translate_vendor_page, url, product_name
+            )
+
+            if result.get("error"):
+                return jsonify(result), 500
+
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to translate description", exc_info=exc
+            )
+            return jsonify({"error": "Failed to translate description."}), 500
+
+    @application.post("/product-tools/create-product/")
+    async def product_tools_create_product() -> Any:
+        """Create a new Shopify product (draft, published to all channels)."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            title = payload.get("title", "").strip()
+            vendor = payload.get("vendor", "").strip()
+            description_html = payload.get("description_html", "").strip()
+            category_id = payload.get("category_id", "").strip() or None
+            tags = payload.get("tags", [])
+
+            if not title:
+                return jsonify({"error": "title is required."}), 400
+            if not vendor:
+                return jsonify({"error": "vendor is required."}), 400
+
+            result = await asyncio.to_thread(
+                create_shopify_product, title, vendor, description_html, category_id, tags
+            )
+
+            if result.get("product_id"):
+                return jsonify(result), 201
+            else:
+                return jsonify(result), 500
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to create product", exc_info=exc
+            )
+            return jsonify({"error": "Failed to create product."}), 500
+
+    @application.post("/product-tools/detect-product-options/")
+    async def product_tools_detect_product_options() -> Any:
+        """Detect product options from variant data and a reference product."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            vendor = payload.get("vendor", "").strip()
+            variants = payload.get("variants", [])
+
+            if not vendor:
+                return jsonify({"error": "vendor is required."}), 400
+
+            result = await asyncio.to_thread(
+                detect_product_options, vendor, variants,
+            )
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to detect product options", exc_info=exc
+            )
+            return jsonify({"error": "Failed to detect product options."}), 500
+
+    @application.post("/product-tools/create-product-options/")
+    async def product_tools_create_product_options() -> Any:
+        """Create product options on a newly created product."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_id = payload.get("product_id", "").strip()
+            options = payload.get("options", [])
+
+            if not product_id:
+                return jsonify({"error": "product_id is required."}), 400
+            if not options:
+                return jsonify({"error": "options is required."}), 400
+
+            result = await asyncio.to_thread(
+                create_product_options, product_id, options,
+            )
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to create product options", exc_info=exc
+            )
+            return jsonify({"error": "Failed to create product options."}), 500
+
+    @application.post("/product-tools/definition-metaobjects/")
+    @oidc.require_login
+    def product_tools_definition_metaobjects() -> Any:
+        """Return all metaobjects for a given metafield definition."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            namespace = payload.get("namespace", "").strip()
+            key = payload.get("key", "").strip()
+
+            if not namespace or not key:
+                return jsonify({"error": "namespace and key are required."}), 400
+
+            result = fetch_metaobjects_for_definition(namespace, key)
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to fetch metaobjects for definition", exc_info=exc
+            )
+            return jsonify({"error": "Failed to fetch metaobjects."}), 500
+
+    @application.post("/product-tools/metaobject-type-fields/")
+    @oidc.require_login
+    def product_tools_metaobject_type_fields() -> Any:
+        """Return definition (fields + reference options) for a metaobject type."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            metaobject_type = payload.get("metaobject_type", "").strip()
+
+            if not metaobject_type:
+                return jsonify({"error": "metaobject_type is required."}), 400
+
+            result = fetch_metaobject_type_details(metaobject_type)
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to fetch metaobject type details", exc_info=exc
+            )
+            return jsonify({"error": "Failed to fetch metaobject type fields."}), 500
+
+    @application.post("/product-tools/product-images/")
+    async def product_tools_get_images() -> Any:
+        """Fetch all images for a product."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_id = payload.get("product_id", "").strip()
+            if not product_id:
+                return jsonify({"error": "product_id is required."}), 400
+            images = await asyncio.to_thread(fetch_product_images, product_id)
+            return jsonify({"images": images})
+        except Exception as exc:
+            current_app.logger.exception("Failed to fetch product images", exc_info=exc)
+            return jsonify({"error": "Failed to fetch product images."}), 500
+
+    @application.post("/product-tools/add-product-images/")
+    async def product_tools_add_images() -> Any:
+        """Add images to a product by URL."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_id = payload.get("product_id", "").strip()
+            image_urls = payload.get("image_urls", [])
+            if not product_id:
+                return jsonify({"error": "product_id is required."}), 400
+            if not image_urls:
+                return jsonify({"error": "image_urls is required."}), 400
+            result = await asyncio.to_thread(add_product_images, product_id, image_urls)
+            return jsonify(result)
+        except Exception as exc:
+            current_app.logger.exception("Failed to add product images", exc_info=exc)
+            return jsonify({"error": "Failed to add product images."}), 500
+
+    @application.post("/product-tools/reorder-product-images/")
+    async def product_tools_reorder_images() -> Any:
+        """Reorder product images."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_id = payload.get("product_id", "").strip()
+            media_ids = payload.get("media_ids", [])
+            if not product_id:
+                return jsonify({"error": "product_id is required."}), 400
+            if not media_ids:
+                return jsonify({"error": "media_ids is required."}), 400
+            result = await asyncio.to_thread(reorder_product_images, product_id, media_ids)
+            return jsonify(result)
+        except Exception as exc:
+            current_app.logger.exception("Failed to reorder product images", exc_info=exc)
+            return jsonify({"error": "Failed to reorder product images."}), 500
+
+    @application.post("/product-tools/delete-product-image/")
+    async def product_tools_delete_image() -> Any:
+        """Delete an image from a product."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_id = payload.get("product_id", "").strip()
+            media_ids = payload.get("media_ids", [])
+            if not product_id:
+                return jsonify({"error": "product_id is required."}), 400
+            if not media_ids:
+                return jsonify({"error": "media_ids is required."}), 400
+            result = await asyncio.to_thread(delete_product_image, product_id, media_ids)
+            return jsonify(result)
+        except Exception as exc:
+            current_app.logger.exception("Failed to delete product image", exc_info=exc)
+            return jsonify({"error": "Failed to delete product image."}), 500
+
+    @application.post("/product-tools/stage-image-uploads/")
+    async def product_tools_stage_uploads() -> Any:
+        """Create staged upload targets for file-based image uploads."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            files = payload.get("files", [])
+            if not files:
+                return jsonify({"error": "files is required."}), 400
+            from shopify import create_staged_uploads
+            targets = await asyncio.to_thread(create_staged_uploads, files)
+            return jsonify({"targets": targets})
+        except Exception as exc:
+            current_app.logger.exception("Failed to create staged uploads", exc_info=exc)
+            return jsonify({"error": "Failed to create staged uploads."}), 500
 
     @application.route("/mail-tools/")
     @oidc.require_login
