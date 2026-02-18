@@ -1,0 +1,3798 @@
+{% extends "base.html" %}
+
+{% block title %}Product Tools{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/product_tools.css') }}">
+{% endblock %}
+
+{% block page_title %}Product Tools{% endblock %}
+
+{% block content %}
+  <div class="tool-section">
+    <h2>Vendor Product Comparison</h2>
+    <p class="tool-description">
+      Compare vendor product catalogues with Shopify to find completely new
+      products and new variants for existing products.
+    </p>
+
+    <div class="input-row">
+      <div class="input-group">
+        <label for="vendor-select">Vendor:</label>
+        <select id="vendor-select" v-model="selectedVendor">
+          <option value="" disabled>Select a vendor…</option>
+          <option value="entirem">Entire M (Helikon-Tex / Tac Maven)</option>
+        </select>
+      </div>
+
+      <div class="input-group">
+        <label for="csv-file">Product CSV:</label>
+        <input type="file" id="csv-file" accept=".csv,.txt" @change="onFileSelected" ref="csvInput">
+        <small v-if="csvFile" class="file-info">📄 [[ csvFile.name ]] ([[ formatFileSize(csvFile.size) ]])</small>
+      </div>
+    </div>
+
+    <button @click="compareProducts" :disabled="loading || !selectedVendor || !csvFile" class="btn-action btn-compare">
+      <span v-if="!loading">🔍 Compare Products</span>
+      <span v-else>Fetching data… (this may take a minute)</span>
+    </button>
+
+    <div v-if="error" class="error-message" style="margin-top:1rem;">[[ error ]]</div>
+
+    <!-- Summary -->
+    <div v-if="result" class="result-summary">
+      <div class="summary-card">
+        <span class="summary-number">[[ newProductCount ]]</span>
+        <span class="summary-label">New Products</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-number">[[ result.new_variants.length ]]</span>
+        <span class="summary-label">New Variants</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Products Section -->
+  <div v-if="result && result.new_products.length > 0" class="tool-section">
+    <h2 class="collapsible-header" @click="newProductsCollapsed = !newProductsCollapsed">
+      <span class="collapse-chevron" :class="{ collapsed: newProductsCollapsed }">▼</span>
+      New Products <span class="badge">[[ newProductCount ]]</span>
+    </h2>
+    <div v-show="!newProductsCollapsed" class="collapsible-body">
+    <p class="tool-description">
+      Products found in the vendor catalogue that don't exist in Shopify at all.
+      Select a product to create it in Shopify as a draft.
+    </p>
+
+    <div class="table-controls">
+      <input type="text" v-model="newProductSearch" placeholder="Filter by SKU, product or color…" class="filter-input">
+    </div>
+
+    <div class="product-group-list">
+      <div v-for="group in filteredNewProducts" :key="group.code" class="product-group-card">
+        <div class="product-group-header" @click="toggleNewProductGroup(group.code)">
+          <span class="collapse-chevron" :class="{ collapsed: !expandedNewProducts[group.code] }">▼</span>
+          <strong>[[ group.baseName ]]</strong>
+          <span class="badge">[[ group.variants.length ]] variant[[ group.variants.length > 1 ? 's' : '' ]]</span>
+          <span class="color-badges">
+            <span v-for="c in group.colors" :key="c" class="color-badge">[[ c ]]</span>
+          </span>
+          <button
+            @click.stop="openCreateProductModal(group)"
+            class="btn-sm btn-create-product"
+            :disabled="creatingProduct"
+            title="Create this product in Shopify">
+            ➕ Create Product
+          </button>
+        </div>
+        <div v-show="expandedNewProducts[group.code]" class="product-group-body">
+          <div class="data-table-wrapper scrollable-table">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>SKU</th>
+                  <th>Color</th>
+                  <th>Size</th>
+                  <th>EAN</th>
+                  <th class="num">Price</th>
+                  <th class="num">MSRP</th>
+                  <th>Weight</th>
+                  <th>Origin</th>
+                  <th>HS Code</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="p in group.variants" :key="p.sku">
+                  <td class="mono">[[ p.sku ]]</td>
+                  <td>[[ p.color ]]</td>
+                  <td>[[ p.size ]]</td>
+                  <td class="mono">[[ p.ean ]]</td>
+                  <td class="num">[[ p.price ]] [[ p.currency ]]</td>
+                  <td class="num">[[ p.msrp ]] [[ p.currency ]]</td>
+                  <td>[[ p.weight ]] [[ p.weight_unit ]]</td>
+                  <td>[[ p.country_of_origin ]]</td>
+                  <td class="mono">[[ p.hs_code ]]</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+  </div>
+
+  <!-- New Variants Section -->
+  <div v-if="result && result.new_variants.length > 0" class="tool-section">
+    <h2 class="collapsible-header" @click="newVariantsCollapsed = !newVariantsCollapsed">
+      <span class="collapse-chevron" :class="{ collapsed: newVariantsCollapsed }">▼</span>
+      New Variants for Existing Products <span class="badge">[[ result.new_variants.length ]]</span>
+    </h2>
+    <div v-show="!newVariantsCollapsed" class="collapsible-body">
+    <p class="tool-description">
+      Variants found in the vendor catalogue for products that already exist in
+      Shopify, but whose SKU is not yet present. Select variants to add them.
+    </p>
+
+    <div class="table-controls">
+      <input type="text" v-model="newVariantSearch" placeholder="Filter by SKU, product or name…" class="filter-input">
+      <div class="select-controls">
+        <button @click="selectAllVariants" class="btn-sm btn-outline">Select All</button>
+        <button @click="deselectAllVariants" class="btn-sm btn-outline">Deselect All</button>
+        <button
+          @click="addSelectedVariants"
+          :disabled="addingVariants || selectedVariantSkus.length === 0"
+          class="btn-sm btn-apply">
+          <span v-if="!addingVariants">➕ Add Selected ([[ selectedVariantSkus.length ]])</span>
+          <span v-else>Adding…</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="data-table-wrapper scrollable-table">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th class="check-col"><span class="custom-checkbox" :class="{ checked: allVariantsSelected }" @click="toggleAllVariants"></span></th>
+            <th @click="sortNewVariants('sku')" class="sortable">
+              SKU <span v-if="newVariantSort.key === 'sku'">[[ newVariantSort.asc ? '▲' : '▼' ]]</span>
+            </th>
+            <th @click="sortNewVariants('shopify_product_title')" class="sortable">
+              Shopify Product <span v-if="newVariantSort.key === 'shopify_product_title'">[[ newVariantSort.asc ? '▲' : '▼' ]]</span>
+            </th>
+            <th>Color</th>
+            <th>EAN</th>
+            <th class="num">Price</th>
+            <th class="num">MSRP</th>
+            <th>Weight</th>
+            <th>Size</th>
+            <th>Origin</th>
+            <th>HS Code</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(v, index) in filteredNewVariants" :key="v.sku" :class="{ 'row-selected': selectedVariantSkus.includes(v.sku) }">
+            <td class="check-col"><span class="custom-checkbox" :class="{ checked: selectedVariantSkus.includes(v.sku) }" @click="onVariantCheckboxClick($event, index, v.sku)"></span></td>
+            <td class="mono">[[ v.sku ]]</td>
+            <td>[[ v.shopify_product_title ]]</td>
+            <td>[[ v.color ]]</td>
+            <td class="mono">[[ v.ean ]]</td>
+            <td class="num">[[ v.price ]] [[ v.currency ]]</td>
+            <td class="num">[[ v.msrp ]] [[ v.currency ]]</td>
+            <td>[[ v.weight ]] [[ v.weight_unit ]]</td>
+            <td>[[ v.size ]]</td>
+            <td>[[ v.country_of_origin ]]</td>
+            <td class="mono">[[ v.hs_code ]]</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Add Variants Result -->
+    <div v-if="addVariantResult" class="result-section">
+      <div v-if="addVariantResult.errors && addVariantResult.errors.length > 0" class="error-message">
+        <p><strong>Some errors occurred:</strong></p>
+        <ul>
+          <li v-for="err in addVariantResult.errors">[[ err ]]</li>
+        </ul>
+      </div>
+      <div v-if="addVariantResult.created && addVariantResult.created.length > 0" class="success-message">
+        <p><strong>Successfully created [[ addVariantResult.created.length ]] variant(s).</strong></p>
+        <ul>
+          <li v-for="c in addVariantResult.created">[[ c.sku ]] — [[ c.title ]]</li>
+        </ul>
+      </div>
+      <div v-if="(!addVariantResult.created || addVariantResult.created.length === 0) && (!addVariantResult.errors || addVariantResult.errors.length === 0)" class="error-message">
+        <p><strong>No variants were created and no errors were returned.</strong> Check the server logs for details.</p>
+      </div>
+    </div>
+    </div>
+  </div>
+
+  <!-- Image URL Modal -->
+  <div v-if="showImageModal" class="modal-overlay" @click.self="showImageModal = false">
+    <div class="modal-dialog">
+      <h3>Add Variant Images</h3>
+      <p class="tool-description">
+        Provide an image URL for each new color variant. Leave blank to skip.
+      </p>
+      <div class="image-url-list">
+        <div v-for="entry in colorImageEntries" :key="entry.key" class="image-url-row">
+          <div class="image-url-label">
+            <strong>[[ entry.productTitle ]]</strong>
+            <span class="color-badge">[[ entry.color ]]</span>
+            <small class="variant-count">([[ entry.skus.length ]] variant[[ entry.skus.length > 1 ? 's' : '' ]])</small>
+          </div>
+          <input
+            type="url"
+            v-model="colorImageUrls[entry.key]"
+            placeholder="https://… image URL"
+            class="image-url-input"
+          >
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button @click="showImageModal = false" class="btn-sm btn-outline">Cancel</button>
+        <button @click="submitVariantsWithImages" :disabled="addingVariants" class="btn-sm btn-apply">
+          <span v-if="!addingVariants">➕ Add [[ pendingVariants.length ]] Variant(s)</span>
+          <span v-else>Adding…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Resolve Missing Linked Option Values Modal -->
+  <div v-if="showOptionMappingModal" class="modal-overlay" @click.self="cancelOptionMapping">
+    <div class="modal-dialog modal-dialog-wide">
+      <h3>Resolve Missing Option Values</h3>
+      <p class="tool-description">
+        Some option values don't have matching entries in Shopify.
+        Replace them with an existing value or create new ones.
+      </p>
+
+      <div v-if="optionMappingError" class="error-message" style="margin-bottom: 1rem;">
+        [[ optionMappingError ]]
+      </div>
+
+      <div class="color-creation-list">
+        <div v-for="(form, fi) in optionMappingForms" :key="form.optionName + '::' + form.value" class="color-creation-card">
+          <div class="color-creation-header">
+            <span class="color-badge">[[ form.optionName ]]</span>
+            <span class="color-badge color-badge-lg">[[ form.value ]]</span>
+            <span v-if="form.created" class="color-created-badge">✓ Resolved</span>
+          </div>
+
+          <div v-if="!form.created" class="color-creation-fields">
+            <div class="field-group">
+              <div class="color-type-toggle">
+                <button
+                  @click="form.action = 'replace'"
+                  :class="['btn-toggle', { active: form.action === 'replace' }]"
+                  type="button">
+                  Replace with existing
+                </button>
+                <button
+                  @click="form.action = 'create'"
+                  :class="['btn-toggle', { active: form.action === 'create' }]"
+                  type="button">
+                  Create new
+                </button>
+              </div>
+
+              <!-- Searchable replacement dropdown -->
+              <div v-if="form.action === 'replace'" class="searchable-select" style="margin-top: 0.5rem;">
+                <div class="select-input-wrapper" @click="openDropdown('optMap_' + fi, fi)">
+                  <div class="select-pills">
+                    <span v-if="form.replacement" class="select-pill">
+                      [[ form.replacement ]]
+                      <span class="pill-remove" @click.stop="form.replacement = ''">×</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="form.search"
+                      @input="openDropdown('optMap_' + fi, fi)"
+                      @focus="openDropdown('optMap_' + fi, fi)"
+                      :placeholder="form.replacement ? '' : 'Search ' + form.optionName + '…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === 'optMap_' + fi + '_' + fi" class="select-dropdown">
+                  <div
+                    v-for="opt in filteredOptionMappingChoices(fi)"
+                    :key="opt.gid"
+                    @mousedown.prevent="selectOptionMapping(fi, opt.displayName)"
+                    :class="['select-option', { selected: form.replacement === opt.displayName }]">
+                    <span class="option-check">[[ form.replacement === opt.displayName ? '✓' : '' ]]</span>
+                    [[ opt.displayName ]]
+                  </div>
+                  <div v-if="filteredOptionMappingChoices(fi).length === 0" class="select-option disabled">
+                    No matching options
+                  </div>
+                </div>
+              </div>
+
+              <p v-if="form.action === 'create'" class="tool-description" style="margin-top: 0.5rem;">
+                A new "[[ form.value ]]" entry will be created in Shopify.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button @click="cancelOptionMapping" class="btn-sm btn-outline">Cancel</button>
+        <button
+          @click="applyOptionMappings"
+          :disabled="optionMappingBusy || !allOptionMappingsValid"
+          class="btn-sm btn-apply">
+          <span v-if="!optionMappingBusy">Apply & Continue</span>
+          <span v-else>Applying…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Color Metaobject Modal -->
+  <div v-if="showColorModal" class="modal-overlay" @click.self="cancelColorCreation">
+    <div class="modal-dialog modal-dialog-wide">
+      <h3>Create Missing Color[[ missingColors.length > 1 ? 's' : '' ]]</h3>
+      <p class="tool-description">
+        The following color[[ missingColors.length > 1 ? 's don\'t' : ' doesn\'t' ]] exist yet in Shopify.
+        Fill in the details to create [[ missingColors.length > 1 ? 'them' : 'it' ]] before adding variants.
+      </p>
+
+      <div v-if="colorCreationError" class="error-message" style="margin-bottom: 1rem;">
+        [[ colorCreationError ]]
+      </div>
+
+      <div class="color-creation-list">
+        <div v-for="(colorDef, ci) in colorCreationForms" :key="colorDef.name" class="color-creation-card">
+          <div class="color-creation-header">
+            <span class="color-badge color-badge-lg">[[ colorDef.name ]]</span>
+            <span v-if="colorDef.created" class="color-created-badge">✓ [[ colorDef.action === 'replace' ? 'Renamed' : 'Created' ]]</span>
+          </div>
+
+          <div v-if="!colorDef.created" class="color-creation-fields">
+            <!-- Action toggle: Replace with existing / Create new -->
+            <div class="field-group">
+              <div class="color-type-toggle">
+                <button
+                  @click="colorDef.action = 'replace'"
+                  :class="['btn-toggle', { active: colorDef.action === 'replace' }]"
+                  type="button">
+                  Replace with existing
+                </button>
+                <button
+                  @click="colorDef.action = 'create'"
+                  :class="['btn-toggle', { active: colorDef.action === 'create' }]"
+                  type="button">
+                  Create new
+                </button>
+              </div>
+            </div>
+
+            <!-- REPLACE: searchable dropdown of existing color metaobjects -->
+            <div v-if="colorDef.action === 'replace'" class="field-group">
+              <label class="field-label">Replace "[[ colorDef.name ]]" with</label>
+              <div class="searchable-select">
+                <div class="select-input-wrapper" @click="openDropdown('colorReplace', ci)">
+                  <div class="select-pills">
+                    <span v-if="colorDef.replacement" class="select-pill">
+                      [[ colorDef.replacement ]]
+                      <span class="pill-remove" @click.stop="colorDef.replacement = ''">×</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="colorDef.replacementSearch"
+                      @input="openDropdown('colorReplace', ci)"
+                      @focus="openDropdown('colorReplace', ci)"
+                      :placeholder="colorDef.replacement ? '' : 'Search existing colors…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === 'colorReplace_' + ci" class="select-dropdown">
+                  <div
+                    v-for="opt in filteredAvailableColors(ci)"
+                    :key="opt.gid"
+                    @mousedown.prevent="selectColorReplacement(ci, opt.displayName)"
+                    :class="['select-option', { selected: colorDef.replacement === opt.displayName }]">
+                    <span class="option-check">[[ colorDef.replacement === opt.displayName ? '✓' : '' ]]</span>
+                    [[ opt.displayName ]]
+                  </div>
+                  <div v-if="filteredAvailableColors(ci).length === 0" class="select-option disabled">
+                    No matching colors
+                  </div>
+                </div>
+              </div>
+              <small class="tool-description" style="margin-top: 0.35rem;">
+                All variants with color "[[ colorDef.name ]]" will be renamed to "[[ colorDef.replacement || '…' ]]".
+              </small>
+            </div>
+
+            <!-- CREATE: swatch table + reference fields -->
+            <template v-if="colorDef.action === 'create'">
+            <!-- Color Representation: 2×2 swatch table -->
+            <div class="field-group">
+              <label class="field-label">Color Representation</label>
+              <div class="swatch-grid">
+                <table class="swatch-table">
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>Type</th>
+                      <th>Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td class="swatch-label">◸ Top-left</td>
+                      <td>
+                        <div class="color-type-toggle">
+                          <button
+                            @click="colorDef.swatchHalves[0].type = 'code'; colorDef.swatchHalves[0].value = ''; colorDef.swatchHalves[0].fileName = ''"
+                            :class="['btn-toggle', { active: colorDef.swatchHalves[0].type === 'code' }]"
+                            type="button">Color</button>
+                          <button
+                            @click="colorDef.swatchHalves[0].type = 'image'; colorDef.swatchHalves[0].value = ''; colorDef.swatchHalves[0].fileName = ''"
+                            :class="['btn-toggle', { active: colorDef.swatchHalves[0].type === 'image' }]"
+                            type="button">Image</button>
+                        </div>
+                      </td>
+                      <td>
+                        <div v-if="colorDef.swatchHalves[0].type === 'code'" class="color-code-row">
+                          <input type="color" v-model="colorDef.swatchHalves[0].value" class="color-picker">
+                          <input type="text" v-model="colorDef.swatchHalves[0].value" placeholder="#000000" class="color-hex-input" maxlength="7">
+                        </div>
+                        <div v-else class="image-input-area">
+                          <label class="file-upload-btn">
+                            <input type="file" accept="image/*" @change="onSwatchFileChange(ci, 0, $event)" style="display:none">
+                            [[ colorDef.swatchHalves[0].fileName ? 'Change file…' : 'Upload image…' ]]
+                          </label>
+                          <template v-if="colorDef.swatchHalves[0].fileName">
+                            <div class="image-file-info">
+                              <img :src="colorDef.swatchHalves[0].value" class="image-thumb" alt="preview">
+                              <span class="image-file-name">[[ colorDef.swatchHalves[0].fileName ]]</span>
+                              <button type="button" class="image-clear-btn" @click="clearSwatchFile(ci, 0)" title="Remove">✕</button>
+                            </div>
+                          </template>
+                          <template v-else>
+                            <span class="image-input-or">or</span>
+                            <input type="text" v-model="colorDef.swatchHalves[0].value" placeholder="https://… image URL" class="image-url-input">
+                          </template>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class="swatch-label">◿ Bottom-right</td>
+                      <td>
+                        <div class="color-type-toggle">
+                          <button
+                            @click="colorDef.swatchHalves[1].type = 'code'; colorDef.swatchHalves[1].value = ''; colorDef.swatchHalves[1].fileName = ''"
+                            :class="['btn-toggle', { active: colorDef.swatchHalves[1].type === 'code' }]"
+                            type="button">Color</button>
+                          <button
+                            @click="colorDef.swatchHalves[1].type = 'image'; colorDef.swatchHalves[1].value = ''; colorDef.swatchHalves[1].fileName = ''"
+                            :class="['btn-toggle', { active: colorDef.swatchHalves[1].type === 'image' }]"
+                            type="button">Image</button>
+                        </div>
+                      </td>
+                      <td>
+                        <div v-if="colorDef.swatchHalves[1].type === 'code'" class="color-code-row">
+                          <input type="color" v-model="colorDef.swatchHalves[1].value" class="color-picker">
+                          <input type="text" v-model="colorDef.swatchHalves[1].value" placeholder="#000000" class="color-hex-input" maxlength="7">
+                        </div>
+                        <div v-else class="image-input-area">
+                          <label class="file-upload-btn">
+                            <input type="file" accept="image/*" @change="onSwatchFileChange(ci, 1, $event)" style="display:none">
+                            [[ colorDef.swatchHalves[1].fileName ? 'Change file…' : 'Upload image…' ]]
+                          </label>
+                          <template v-if="colorDef.swatchHalves[1].fileName">
+                            <div class="image-file-info">
+                              <img :src="colorDef.swatchHalves[1].value" class="image-thumb" alt="preview">
+                              <span class="image-file-name">[[ colorDef.swatchHalves[1].fileName ]]</span>
+                              <button type="button" class="image-clear-btn" @click="clearSwatchFile(ci, 1)" title="Remove">✕</button>
+                            </div>
+                          </template>
+                          <template v-else>
+                            <span class="image-input-or">or</span>
+                            <input type="text" v-model="colorDef.swatchHalves[1].value" placeholder="https://… image URL" class="image-url-input">
+                          </template>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="swatch-preview-area">
+                  <div class="swatch-preview"
+                       :style="swatchPreviewStyle(colorDef)"
+                       title="Diagonal swatch preview">
+                    <span v-if="!hasSwatchInput(colorDef)" class="swatch-placeholder">Preview</span>
+                  </div>
+                  <small class="tool-description" style="margin-top: 0.25rem; display: block; text-align: center;">
+                    [[ needsDiagonalSwatch(colorDef) ? 'Diagonal split swatch will be generated' : 'Single color/image swatch' ]]
+                  </small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Dynamic reference fields (base color, base pattern, etc.) -->
+            <div v-for="refField in referenceFields" :key="refField.key" class="field-group">
+              <label class="field-label">
+                [[ refField.name ]]
+                <small>([[ refField.multi ? 'multi-select' : 'single-select' ]])</small>
+              </label>
+
+              <!-- Multi-select with search -->
+              <div v-if="refField.multi" class="searchable-select">
+                <div class="select-input-wrapper" @click="openDropdown(refField.key, ci)">
+                  <div class="select-pills">
+                    <span v-for="gid in (colorDef.refSelections[refField.key] || [])" :key="gid" class="select-pill">
+                      [[ getOptionLabel(gid, refField.key) ]]
+                      <span class="pill-remove" @click.stop="removeRefSelection(ci, refField.key, gid)">×</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="colorDef.refSearches[refField.key]"
+                      @input="openDropdown(refField.key, ci)"
+                      @focus="openDropdown(refField.key, ci)"
+                      :placeholder="'Search ' + refField.name + '…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === refField.key + '_' + ci" class="select-dropdown">
+                  <div
+                    v-for="opt in filteredRefOptions(ci, refField.key)"
+                    :key="opt.gid"
+                    @mousedown.prevent="toggleRefSelection(ci, refField.key, opt.gid)"
+                    :class="['select-option', { selected: (colorDef.refSelections[refField.key] || []).includes(opt.gid) }]">
+                    <span class="option-check">[[ (colorDef.refSelections[refField.key] || []).includes(opt.gid) ? '✓' : '' ]]</span>
+                    [[ opt.displayName ]]
+                  </div>
+                  <div v-if="filteredRefOptions(ci, refField.key).length === 0" class="select-option disabled">
+                    No matching options
+                  </div>
+                </div>
+              </div>
+
+              <!-- Single-select with search -->
+              <div v-else class="searchable-select">
+                <div class="select-input-wrapper" @click="openDropdown(refField.key, ci)">
+                  <div class="select-pills">
+                    <span v-if="colorDef.refSelections[refField.key]" class="select-pill">
+                      [[ getOptionLabel(colorDef.refSelections[refField.key], refField.key) ]]
+                      <span class="pill-remove" @click.stop="clearRefSelection(ci, refField.key)">×</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="colorDef.refSearches[refField.key]"
+                      @input="openDropdown(refField.key, ci)"
+                      @focus="openDropdown(refField.key, ci)"
+                      :placeholder="colorDef.refSelections[refField.key] ? '' : 'Search ' + refField.name + '…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === refField.key + '_' + ci" class="select-dropdown">
+                  <div
+                    v-for="opt in filteredRefOptions(ci, refField.key)"
+                    :key="opt.gid"
+                    @mousedown.prevent="setRefSelection(ci, refField.key, opt.gid)"
+                    :class="['select-option', { selected: colorDef.refSelections[refField.key] === opt.gid }]">
+                    <span class="option-check">[[ colorDef.refSelections[refField.key] === opt.gid ? '✓' : '' ]]</span>
+                    [[ opt.displayName ]]
+                  </div>
+                  <div v-if="filteredRefOptions(ci, refField.key).length === 0" class="select-option disabled">
+                    No matching options
+                  </div>
+                </div>
+              </div>
+            </div>
+            </template><!-- end v-if action=create -->
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button @click="cancelColorCreation" class="btn-sm btn-outline">Cancel</button>
+        <button
+          @click="submitColorCreations"
+          :disabled="colorCreating || !allColorFormsValid"
+          class="btn-sm btn-apply">
+          <span v-if="!colorCreating">
+            [[ allColorsCreated ? '✓ All Done — Continue' : 'Apply' ]]
+          </span>
+          <span v-else>Creating…</span>
+        </button>
+        <button
+          v-if="allColorsCreated"
+          @click="proceedAfterColorCreation"
+          class="btn-sm btn-apply">
+          Continue ➜
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Empty state -->
+  <div v-if="result && result.new_products.length === 0 && result.new_variants.length === 0" class="tool-section">
+    <div class="success-message">
+      <p><strong>Everything is in sync!</strong> No new products or variants were found.</p>
+    </div>
+  </div>
+
+  <!-- Create Product Modal (multi-step) -->
+  <div v-if="showCreateProductModal" class="modal-overlay" @click.self="cancelCreateProduct">
+    <div class="modal-dialog modal-dialog-wide">
+      <!-- Step indicator -->
+      <div class="step-indicator">
+        <span :class="['step', { active: cpStep === 1, done: cpStep > 1 }]">1. Product Details</span>
+        <span class="step-arrow">→</span>
+        <span :class="['step', { active: cpStep === 2, done: cpStep > 2 }]">2. Category Metafields</span>
+        <span class="step-arrow">→</span>
+        <span :class="['step', { active: cpStep === 3, done: cpStep > 3 }]">3. Product Options</span>
+        <span class="step-arrow">→</span>
+        <span :class="['step', { active: cpStep === 4, done: cpStep > 4 }]">4. Add Variants</span>
+        <span class="step-arrow">→</span>
+        <span :class="['step', { active: cpStep === 5, done: cpStep > 5 }]">5. Images</span>
+      </div>
+
+      <!-- Step 1: Product Details -->
+      <div v-if="cpStep === 1">
+        <h3>Create New Product</h3>
+        <p class="tool-description">
+          Set up the basic product details. The product will be created as a draft
+          and published to all sales channels.
+        </p>
+
+        <div v-if="cpError" class="error-message" style="margin-bottom: 1rem;">[[ cpError ]]</div>
+
+        <div class="cp-form">
+          <div class="field-group">
+            <label class="field-label">Product Title</label>
+            <input type="text" v-model="cpTitle" class="cp-input" placeholder="e.g. Helikon-Tex - Classic Army T-Shirt">
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">Vendor</label>
+            <input type="text" v-model="cpVendor" class="cp-input" readonly>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">Product Category</label>
+            <div class="searchable-select">
+              <div class="select-input-wrapper" @click="openDropdown('cpCategory', 0)">
+                <div class="select-pills">
+                  <span v-if="cpCategoryId" class="select-pill">
+                    [[ cpCategoryName ]]
+                    <span class="pill-remove" @click.stop="cpCategoryId = ''; cpCategoryName = ''">×</span>
+                  </span>
+                  <input
+                    type="text"
+                    v-model="cpCategorySearch"
+                    @input="openDropdown('cpCategory', 0)"
+                    @focus="openDropdown('cpCategory', 0)"
+                    :placeholder="cpCategoryId ? '' : 'Search categories…'"
+                    class="pill-search-input"
+                  >
+                </div>
+              </div>
+              <div v-if="activeDropdown === 'cpCategory_0'" class="select-dropdown">
+                <div
+                  v-for="cat in filteredTaxonomyCategories"
+                  :key="cat.id"
+                  @mousedown.prevent="selectCategory(cat)"
+                  :class="['select-option', { selected: cpCategoryId === cat.id }]">
+                  <span class="option-check">[[ cpCategoryId === cat.id ? '✓' : '' ]]</span>
+                  [[ cat.fullName ]]
+                </div>
+                <div v-if="filteredTaxonomyCategories.length === 0" class="select-option disabled">
+                  No matching categories
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">Tags</label>
+            <div class="searchable-select">
+              <div class="select-input-wrapper" @click="openDropdown('cpTags', 0)">
+                <div class="select-pills">
+                  <span v-for="tag in cpTags" :key="tag" class="select-pill">
+                    [[ tag ]]
+                    <span class="pill-remove" @click.stop="cpTags = cpTags.filter(t => t !== tag)">&times;</span>
+                  </span>
+                  <input
+                    type="text"
+                    v-model="cpTagSearch"
+                    @input="openDropdown('cpTags', 0)"
+                    @focus="openDropdown('cpTags', 0)"
+                    @keydown.enter.prevent="cpAddCustomTag"
+                    :placeholder="cpTags.length ? '' : 'Search or add tags…'"
+                    class="pill-search-input"
+                  >
+                </div>
+              </div>
+              <div v-if="activeDropdown === 'cpTags_0'" class="select-dropdown">
+                <div
+                  v-for="tag in filteredProductTags"
+                  :key="tag"
+                  @mousedown.prevent="cpToggleTag(tag)"
+                  :class="['select-option', { selected: cpTags.includes(tag) }]">
+                  <span class="option-check">[[ cpTags.includes(tag) ? '✓' : '' ]]</span>
+                  [[ tag ]]
+                </div>
+                <div
+                  v-if="cpTagSearch.trim() && !allProductTags.includes(cpTagSearch.trim()) && !cpTags.includes(cpTagSearch.trim())"
+                  @mousedown.prevent="cpAddCustomTag"
+                  class="select-option" style="font-style: italic;">
+                  + Add "[[ cpTagSearch.trim() ]]"
+                </div>
+                <div v-if="filteredProductTags.length === 0 && !cpTagSearch.trim()" class="select-option disabled">
+                  No tags available
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label class="field-label">Product Description</label>
+            <div class="description-source-toggle">
+              <button
+                @click="cpDescSource = 'url'"
+                :class="['btn-toggle', { active: cpDescSource === 'url' }]"
+                type="button">
+                Translate from URL
+              </button>
+              <button
+                @click="cpDescSource = 'manual'"
+                :class="['btn-toggle', { active: cpDescSource === 'manual' }]"
+                type="button">
+                Manual
+              </button>
+            </div>
+
+            <div v-if="cpDescSource === 'url'" class="url-translate-row">
+              <input
+                type="url"
+                v-model="cpDescUrl"
+                placeholder="https://vendor-site.com/product-page"
+                class="cp-input"
+              >
+              <button
+                @click="translateDescription"
+                :disabled="cpTranslating || !cpDescUrl"
+                class="btn-sm btn-action">
+                <span v-if="!cpTranslating">🌐 Translate</span>
+                <span v-else>Translating…</span>
+              </button>
+            </div>
+
+            <textarea
+              v-model="cpDescriptionHtml"
+              rows="8"
+              class="cp-textarea"
+              placeholder="Product description (HTML supported)…"
+            ></textarea>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button @click="cancelCreateProduct" class="btn-sm btn-outline">Cancel</button>
+          <button
+            @click="createProduct"
+            :disabled="creatingProduct || !cpTitle"
+            class="btn-sm btn-apply">
+            <span v-if="!creatingProduct">Create Product →</span>
+            <span v-else>Creating…</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 2: Category Metafields -->
+      <div v-if="cpStep === 2">
+        <h3>Category Metafields</h3>
+        <p class="tool-description">
+          Product <strong>[[ cpTitle ]]</strong> was created successfully.
+          <span v-if="cpCategoryMetafields.length > 0">
+            Set the applicable category attributes below, then let the user optionally
+            match variant options to category metafields.
+          </span>
+          <span v-else>
+            No category metafields available. Proceed directly to adding variants.
+          </span>
+        </p>
+
+        <div v-if="cpError" class="error-message" style="margin-bottom: 1rem;">[[ cpError ]]</div>
+
+        <div v-if="cpCategoryMetafields.length > 0" class="cp-metafields-list">
+          <div v-for="mf in cpCategoryMetafields" :key="mf.handle" class="color-creation-card">
+            <div class="color-creation-header">
+              <span class="color-badge color-badge-lg">[[ mf.name ]]</span>
+              <small v-if="mf.description" class="tool-description" style="margin:0;">[[ mf.description ]]</small>
+            </div>
+            <div class="color-creation-fields">
+              <div class="field-group" v-if="mf.values && mf.values.length > 0">
+                <div class="searchable-select">
+                  <div class="select-input-wrapper" @click="openDropdown('cpMf_' + mf.handle, 0)">
+                    <div class="select-pills">
+                      <span v-if="cpMetafieldValues[mf.handle]" class="select-pill">
+                        [[ cpMetafieldValueLabel(mf.handle) ]]
+                        <span class="pill-remove" @click.stop="cpMetafieldValues[mf.handle] = ''">×</span>
+                      </span>
+                      <input
+                        type="text"
+                        v-model="cpMetafieldSearches[mf.handle]"
+                        @input="openDropdown('cpMf_' + mf.handle, 0)"
+                        @focus="openDropdown('cpMf_' + mf.handle, 0)"
+                        :placeholder="cpMetafieldValues[mf.handle] ? '' : 'Search ' + mf.name + '…'"
+                        class="pill-search-input"
+                      >
+                    </div>
+                  </div>
+                  <div v-if="activeDropdown === 'cpMf_' + mf.handle + '_0'" class="select-dropdown">
+                    <div
+                      v-for="val in filteredMetafieldValues(mf.handle)"
+                      :key="val.id"
+                      @mousedown.prevent="cpMetafieldValues[mf.handle] = val.id; activeDropdown = null"
+                      :class="['select-option', { selected: cpMetafieldValues[mf.handle] === val.id }]">
+                      <span class="option-check">[[ cpMetafieldValues[mf.handle] === val.id ? '✓' : '' ]]</span>
+                      [[ val.name ]]
+                    </div>
+                    <div v-if="filteredMetafieldValues(mf.handle).length === 0" class="select-option disabled">
+                      No matching values
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="field-group">
+                <input type="text" v-model="cpMetafieldValues[mf.handle]" class="cp-input" :placeholder="mf.name + '…'">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button @click="cancelCreateProduct" class="btn-sm btn-outline">Cancel</button>
+          <button @click="proceedToOptions" :disabled="cpSavingMetafields" class="btn-sm btn-apply">
+            <span v-if="!cpSavingMetafields">Continue to Options →</span>
+            <span v-else>Saving metafields…</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 3: Product Options -->
+      <div v-if="cpStep === 3">
+        <h3>Product Options</h3>
+        <p class="tool-description">
+          <span v-if="cpDetectingOptions">Detecting options from variant data…</span>
+          <span v-else-if="cpDetectedOptions.length > 0">
+            The following options were detected from the variant data.
+            <span v-if="cpReferenceProductId">Option structure was copied from an existing product of the same vendor.</span>
+            Review the options and their metafield linking below, then create them on the product.
+          </span>
+          <span v-else>
+            No options detected from your variant data. You can proceed directly to adding variants.
+          </span>
+        </p>
+
+        <div v-if="cpError" class="error-message" style="margin-bottom: 1rem;">[[ cpError ]]</div>
+
+        <div v-if="!cpDetectingOptions && cpDetectedOptions.length > 0" class="cp-metafields-list">
+          <div v-for="(opt, optIdx) in cpDetectedOptions" :key="opt.name" class="color-creation-card">
+            <div class="color-creation-header">
+              <span class="color-badge color-badge-lg">[[ opt.name ]]</span>
+            </div>
+            <div class="color-creation-fields">
+              <!-- Metafield linking -->
+              <div class="field-group">
+                <label class="field-label">Linked Metafield</label>
+                <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                  <div class="searchable-select" style="max-width: 380px; flex: 1;">
+                    <div class="select-input-wrapper" @click="openDropdown('cpLink_' + optIdx, 0)">
+                      <div class="select-pills">
+                        <span v-if="cpOptionLinkKey(optIdx)" class="select-pill">
+                          [[ cpOptionLinkLabel(optIdx) ]]
+                          <span class="pill-remove" @click.stop="cpSetOptionLink(optIdx, '')">×</span>
+                        </span>
+                        <input
+                          type="text"
+                          v-model="cpLinkSearch[optIdx]"
+                          @input="openDropdown('cpLink_' + optIdx, 0)"
+                          @focus="openDropdown('cpLink_' + optIdx, 0)"
+                          :placeholder="cpOptionLinkKey(optIdx) ? '' : 'Search metafields…'"
+                          class="pill-search-input"
+                        >
+                      </div>
+                    </div>
+                    <div v-if="activeDropdown === 'cpLink_' + optIdx + '_0'" class="select-dropdown">
+                      <div
+                        @mousedown.prevent="cpSetOptionLink(optIdx, ''); activeDropdown = null"
+                        :class="['select-option', { selected: !cpOptionLinkKey(optIdx) }]">
+                        <span class="option-check">[[ !cpOptionLinkKey(optIdx) ? '✓' : '' ]]</span>
+                        None (plain text)
+                      </div>
+                      <div
+                        v-for="def in filteredLinkableDefs(optIdx)"
+                        :key="def.namespace + '.' + def.key"
+                        @mousedown.prevent="cpSetOptionLink(optIdx, def.namespace + '.' + def.key); activeDropdown = null"
+                        :class="['select-option', { selected: cpOptionLinkKey(optIdx) === def.namespace + '.' + def.key }]">
+                        <span class="option-check">[[ cpOptionLinkKey(optIdx) === def.namespace + '.' + def.key ? '✓' : '' ]]</span>
+                        [[ def.name ]] ([[ def.namespace ]].[[ def.key ]])
+                      </div>
+                      <div v-if="filteredLinkableDefs(optIdx).length === 0" class="select-option disabled">
+                        No matching metafields
+                      </div>
+                    </div>
+                  </div>
+                  <small v-if="opt.linked_metafield" class="tool-description" style="margin:0;">
+                    🔗 [[ opt.linked_metafield.namespace ]].[[ opt.linked_metafield.key ]]
+                  </small>
+                  <small v-else class="tool-description" style="margin:0;">Not linked</small>
+                </div>
+              </div>
+              <!-- Values -->
+              <div class="field-group">
+                <label class="field-label">Values ([[ opt.values.length ]])</label>
+                <div style="display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center;">
+                  <template v-for="(val, valIdx) in opt.values" :key="val">
+                    <!-- Inline rename editor -->
+                    <span v-if="cpEditingValue.optIdx === optIdx && cpEditingValue.valIdx === valIdx"
+                      class="select-pill pill-editing" style="padding: 0;">
+                      <input type="text" v-model="cpEditingValue.text"
+                        @keydown.enter.prevent="cpConfirmRename(optIdx, valIdx, val)"
+                        @keydown.escape.prevent="cpCancelRename()"
+                        @blur="cpConfirmRename(optIdx, valIdx, val)"
+                        @vue:mounted="({el}) => { el.focus(); el.select(); }"
+                        class="cp-input" style="width: 120px; padding: 0.15rem 0.4rem; font-size: 0.85rem; margin: 0; border: none;">
+                    </span>
+                    <!-- Normal pill (click to rename if missing) -->
+                    <span v-else
+                      :class="['select-pill', { 'pill-warning': opt.missing_values && opt.missing_values.includes(val) }]"
+                      :title="opt.missing_values && opt.missing_values.includes(val) ? 'Click to rename — metaobject not found' : ''"
+                      @dblclick="cpStartRename(optIdx, valIdx, val)">
+                      [[ val ]]
+                      <span v-if="opt.missing_values && opt.missing_values.includes(val)" style="color: #856404; cursor: pointer;"
+                        @click.stop="cpStartRename(optIdx, valIdx, val)" title="Rename value"> ✎</span>
+                      <span class="pill-remove" @click="cpRemoveOptionValue(optIdx, val)" title="Remove value">×</span>
+                    </span>
+                  </template>
+                </div>
+                <!-- Add new value input -->
+                <div style="display: flex; gap: 0.35rem; margin-top: 0.4rem; align-items: center;">
+                  <input type="text"
+                    v-model="cpNewValueInputs[optIdx]"
+                    @keydown.enter.prevent="cpAddOptionValue(optIdx)"
+                    :placeholder="'Add a value…'"
+                    class="cp-input" style="max-width: 200px; padding: 0.25rem 0.5rem; font-size: 0.85rem;">
+                  <button @click="cpAddOptionValue(optIdx)" class="btn-sm btn-outline"
+                    style="padding: 0.2rem 0.5rem; font-size: 0.8rem;"
+                    :disabled="!cpNewValueInputs[optIdx]">+ Add</button>
+                </div>
+                <!-- Missing-values notice with Create button -->
+                <div v-if="opt.linked_metafield && opt.missing_values && opt.missing_values.length > 0"
+                  style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.4rem; flex-wrap: wrap;">
+                  <small class="tool-description" style="margin: 0;">
+                    ⚠ [[ opt.missing_values.length ]] value(s) have no matching metaobject.
+                  </small>
+                  <button v-if="opt.metaobject_type"
+                    @click="cpOpenMetaobjectCreation(optIdx)"
+                    class="btn-sm btn-outline"
+                    style="padding: 0.2rem 0.6rem; font-size: 0.8rem;"
+                    :disabled="cpMoCreating">
+                    Create Metaobject[[ opt.missing_values.length > 1 ? 's' : '' ]]
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button @click="cancelCreateProduct" class="btn-sm btn-outline">Cancel</button>
+          <button
+            @click="createProductOptions"
+            :disabled="cpCreatingOptions || cpDetectingOptions"
+            class="btn-sm btn-apply">
+            <span v-if="cpDetectingOptions">Detecting…</span>
+            <span v-else-if="cpCreatingOptions">Creating options…</span>
+            <span v-else-if="cpDetectedOptions.length > 0">Create Options & Continue →</span>
+            <span v-else>Skip to Variants →</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 4: Add Variants -->
+      <div v-if="cpStep === 4">
+        <h3>Add Variants to [[ cpTitle ]]</h3>
+        <p class="tool-description">
+          The product has been created without variants. Select which variants to add,
+          then proceed through the standard variant creation flow (colors, options, images).
+        </p>
+
+        <div v-if="cpError" class="error-message" style="margin-bottom: 1rem;">[[ cpError ]]</div>
+        <div v-if="cpVariantResult" class="result-section">
+          <div v-if="cpVariantResult.errors && cpVariantResult.errors.length > 0" class="error-message">
+            <p><strong>Some errors occurred:</strong></p>
+            <ul><li v-for="err in cpVariantResult.errors">[[ err ]]</li></ul>
+          </div>
+          <div v-if="cpVariantResult.created && cpVariantResult.created.length > 0" class="success-message">
+            <p><strong>Successfully created [[ cpVariantResult.created.length ]] variant(s).</strong></p>
+            <ul><li v-for="c in cpVariantResult.created">[[ c.sku ]] — [[ c.title ]]</li></ul>
+          </div>
+        </div>
+
+        <!-- Color Image URLs -->
+        <div v-if="cpUniqueColors.length > 0" style="margin-bottom: 1rem;">
+          <h4 style="margin-bottom: 0.5rem;">Color Images</h4>
+          <p class="tool-description" style="margin-top: 0;">
+            Provide an image URL for each color. Leave blank to skip.
+          </p>
+          <div class="image-url-list">
+            <div v-for="color in cpUniqueColors" :key="color" class="image-url-row">
+              <div class="image-url-label">
+                <span class="color-badge">[[ color ]]</span>
+              </div>
+              <input
+                type="url"
+                v-model="cpColorImageUrls[color]"
+                placeholder="https://… image URL"
+                class="image-url-input"
+              >
+            </div>
+          </div>
+        </div>
+
+        <div class="table-controls">
+          <div class="select-controls">
+            <button @click="cpSelectAllVariants" class="btn-sm btn-outline">Select All</button>
+            <button @click="cpDeselectAllVariants" class="btn-sm btn-outline">Deselect All</button>
+          </div>
+        </div>
+
+        <div class="data-table-wrapper scrollable-table" style="max-height: 40vh;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="check-col">
+                  <span class="custom-checkbox" :class="{ checked: cpAllVariantsSelected }" @click="cpToggleAllVariants"></span>
+                </th>
+                <th>SKU</th>
+                <th>Color</th>
+                <th>Size</th>
+                <th>EAN</th>
+                <th class="num">Price</th>
+                <th>Weight</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="v in cpGroupVariants" :key="v.sku" :class="{ 'row-selected': cpSelectedSkus.includes(v.sku) }">
+                <td class="check-col">
+                  <span class="custom-checkbox" :class="{ checked: cpSelectedSkus.includes(v.sku) }" @click="cpToggleVariant(v.sku)"></span>
+                </td>
+                <td class="mono">[[ v.sku ]]</td>
+                <td>[[ v.color ]]</td>
+                <td>[[ v.size ]]</td>
+                <td class="mono">[[ v.ean ]]</td>
+                <td class="num">[[ v.price ]] [[ v.currency ]]</td>
+                <td>[[ v.weight ]] [[ v.weight_unit ]]</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="modal-actions">
+          <button @click="cancelCreateProduct" class="btn-sm btn-outline">Close</button>
+          <button
+            @click="cpAddVariants"
+            :disabled="addingVariants || cpSelectedSkus.length === 0"
+            class="btn-sm btn-apply">
+            <span v-if="!addingVariants">➕ Add Selected ([[ cpSelectedSkus.length ]])</span>
+            <span v-else>Adding…</span>
+          </button>
+          <button v-if="cpVariantResult && cpVariantResult.created && cpVariantResult.created.length > 0"
+            @click="cpGoToImagesStep"
+            class="btn-sm btn-apply" style="margin-left: 0.5rem;">
+            Images →
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 5: Product Images -->
+      <div v-if="cpStep === 5">
+        <h3>Product Images for [[ cpTitle ]]</h3>
+        <p class="tool-description">
+          Add images by URL or file upload. Drag thumbnails to reorder. The first image becomes the main product image.
+        </p>
+
+        <div v-if="cpImgError" class="error-message" style="margin-bottom: 1rem;">[[ cpImgError ]]</div>
+        <div v-if="cpImgSuccess" class="success-message" style="margin-bottom: 1rem;">[[ cpImgSuccess ]]</div>
+
+        <!-- Add images -->
+        <div style="margin-bottom: 1.5rem;">
+          <h4 style="margin-bottom: 0.5rem;">Add Images</h4>
+          <div style="display: flex; gap: 0.5rem; align-items: flex-start; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 280px;">
+              <textarea v-model="cpImgUrlInput" placeholder="Paste image URL(s), one per line"
+                rows="3" class="cp-input" style="width: 100%; font-size: 0.9rem;"></textarea>
+            </div>
+            <button @click="cpAddImagesByUrl" :disabled="cpImgUploading || !cpImgUrlInput.trim()"
+              class="btn-sm btn-apply" style="white-space: nowrap;">
+              <span v-if="!cpImgUploading">➕ Add by URL</span>
+              <span v-else>Uploading…</span>
+            </button>
+          </div>
+          <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: center;">
+            <label class="btn-sm btn-outline" style="cursor: pointer; margin: 0;">
+              📁 Choose Files
+              <input type="file" multiple accept="image/*" @change="cpAddImagesByFile" style="display: none;">
+            </label>
+            <small v-if="cpImgUploading" class="tool-description" style="margin: 0;">Uploading images…</small>
+          </div>
+        </div>
+
+        <!-- Image grid with drag-and-drop -->
+        <div v-if="cpImages.length > 0">
+          <h4 style="margin-bottom: 0.5rem;">Current Images ([[ cpImages.length ]])</h4>
+          <p class="tool-description" style="margin-top: 0;">Drag to reorder. The first image is the main product image.</p>
+          <div class="cp-image-grid"
+            @dragover.prevent
+            @drop.prevent>
+            <div v-for="(img, idx) in cpImages" :key="img.id"
+              class="cp-image-card"
+              :class="{ 'cp-image-main': idx === 0, 'cp-image-dragging': cpDragIdx === idx }"
+              draggable="true"
+              @dragstart="cpImageDragStart(idx, $event)"
+              @dragenter.prevent="cpImageDragEnter(idx)"
+              @dragend="cpImageDragEnd">
+              <div class="cp-image-thumb">
+                <img :src="img.url" :alt="img.alt || ('Image ' + (idx + 1))" loading="lazy">
+              </div>
+              <div class="cp-image-actions">
+                <span v-if="idx === 0" class="cp-image-badge">Main</span>
+                <span class="cp-image-pos">#[[ idx + 1 ]]</span>
+                <button @click="cpDeleteImage(img.id)" class="cp-image-delete" title="Delete image"
+                  :disabled="cpImgUploading">×</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="!cpImgLoading" style="color: #666; font-style: italic; margin: 1rem 0;">
+          No images yet. Add some above.
+        </div>
+        <div v-if="cpImgLoading" style="color: #666; margin: 1rem 0;">Loading images…</div>
+
+        <div class="modal-actions">
+          <button @click="cancelCreateProduct" class="btn-sm btn-outline">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Metaobject Creation Modal (on top of Create Product modal) -->
+  <div v-if="cpShowMoModal" class="modal-overlay" style="z-index: 1100;" @click.self="cpCancelMoCreation">
+    <div class="modal-dialog modal-dialog-wide">
+      <h3>Create Missing Metaobject[[ cpMoForms.length > 1 ? 's' : '' ]]</h3>
+      <p class="tool-description">
+        The following value[[ cpMoForms.length > 1 ? 's don\'t' : ' doesn\'t' ]] exist as
+        <strong>[[ cpMoType ]]</strong> metaobject[[ cpMoForms.length > 1 ? 's' : '' ]] yet.
+        Fill in the details to create [[ cpMoForms.length > 1 ? 'them' : 'it' ]].
+      </p>
+
+      <div v-if="cpMoError" class="error-message" style="margin-bottom: 1rem;">[[ cpMoError ]]</div>
+
+      <div class="color-creation-list">
+        <div v-for="(form, fi) in cpMoForms" :key="form.name" class="color-creation-card">
+          <div class="color-creation-header">
+            <span class="color-badge color-badge-lg">[[ form.name ]]</span>
+            <span v-if="form.created" class="color-created-badge">✓ Created</span>
+          </div>
+
+          <div v-if="!form.created" class="color-creation-fields">
+
+            <!-- Swatch table for color-like metaobjects (replaces individual color + file_reference fields) -->
+            <template v-if="form.swatchHalves">
+              <div class="field-group">
+                <label class="field-label">Color Representation</label>
+                <div class="swatch-grid">
+                  <table class="swatch-table">
+                    <thead>
+                      <tr>
+                        <th></th>
+                        <th>Type</th>
+                        <th>Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td class="swatch-label">◸ Top-left</td>
+                        <td>
+                          <div class="color-type-toggle">
+                            <button
+                              @click="form.swatchHalves[0].type = 'code'; form.swatchHalves[0].value = ''; form.swatchHalves[0].fileName = ''"
+                              :class="['btn-toggle', { active: form.swatchHalves[0].type === 'code' }]"
+                              type="button">Color</button>
+                            <button
+                              @click="form.swatchHalves[0].type = 'image'; form.swatchHalves[0].value = ''; form.swatchHalves[0].fileName = ''"
+                              :class="['btn-toggle', { active: form.swatchHalves[0].type === 'image' }]"
+                              type="button">Image</button>
+                          </div>
+                        </td>
+                        <td>
+                          <div v-if="form.swatchHalves[0].type === 'code'" class="color-code-row">
+                            <input type="color" v-model="form.swatchHalves[0].value" class="color-picker">
+                            <input type="text" v-model="form.swatchHalves[0].value" placeholder="#000000" class="color-hex-input" maxlength="7">
+                          </div>
+                          <div v-else class="image-input-area">
+                            <label class="file-upload-btn">
+                              <input type="file" accept="image/*" @change="cpMoOnSwatchFileChange(fi, 0, $event)" style="display:none">
+                              [[ form.swatchHalves[0].fileName ? 'Change file…' : 'Upload image…' ]]
+                            </label>
+                            <template v-if="form.swatchHalves[0].fileName">
+                              <div class="image-file-info">
+                                <img :src="form.swatchHalves[0].value" class="image-thumb" alt="preview">
+                                <span class="image-file-name">[[ form.swatchHalves[0].fileName ]]</span>
+                                <button type="button" class="image-clear-btn" @click="cpMoClearSwatchFile(fi, 0)" title="Remove">✕</button>
+                              </div>
+                            </template>
+                            <template v-else>
+                              <span class="image-input-or">or</span>
+                              <input type="text" v-model="form.swatchHalves[0].value" placeholder="https://… image URL" class="image-url-input">
+                            </template>
+                          </div>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td class="swatch-label">◿ Bottom-right</td>
+                        <td>
+                          <div class="color-type-toggle">
+                            <button
+                              @click="form.swatchHalves[1].type = 'code'; form.swatchHalves[1].value = ''; form.swatchHalves[1].fileName = ''"
+                              :class="['btn-toggle', { active: form.swatchHalves[1].type === 'code' }]"
+                              type="button">Color</button>
+                            <button
+                              @click="form.swatchHalves[1].type = 'image'; form.swatchHalves[1].value = ''; form.swatchHalves[1].fileName = ''"
+                              :class="['btn-toggle', { active: form.swatchHalves[1].type === 'image' }]"
+                              type="button">Image</button>
+                          </div>
+                        </td>
+                        <td>
+                          <div v-if="form.swatchHalves[1].type === 'code'" class="color-code-row">
+                            <input type="color" v-model="form.swatchHalves[1].value" class="color-picker">
+                            <input type="text" v-model="form.swatchHalves[1].value" placeholder="#000000" class="color-hex-input" maxlength="7">
+                          </div>
+                          <div v-else class="image-input-area">
+                            <label class="file-upload-btn">
+                              <input type="file" accept="image/*" @change="cpMoOnSwatchFileChange(fi, 1, $event)" style="display:none">
+                              [[ form.swatchHalves[1].fileName ? 'Change file…' : 'Upload image…' ]]
+                            </label>
+                            <template v-if="form.swatchHalves[1].fileName">
+                              <div class="image-file-info">
+                                <img :src="form.swatchHalves[1].value" class="image-thumb" alt="preview">
+                                <span class="image-file-name">[[ form.swatchHalves[1].fileName ]]</span>
+                                <button type="button" class="image-clear-btn" @click="cpMoClearSwatchFile(fi, 1)" title="Remove">✕</button>
+                              </div>
+                            </template>
+                            <template v-else>
+                              <span class="image-input-or">or</span>
+                              <input type="text" v-model="form.swatchHalves[1].value" placeholder="https://… image URL" class="image-url-input">
+                            </template>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <div class="swatch-preview-area">
+                    <div class="swatch-preview"
+                         :style="cpMoSwatchPreviewStyle(form)"
+                         title="Diagonal swatch preview">
+                      <span v-if="!cpMoHasSwatchInput(form)" class="swatch-placeholder">Preview</span>
+                    </div>
+                    <small class="tool-description" style="margin-top: 0.25rem; display: block; text-align: center;">
+                      [[ cpMoNeedsDiagonalSwatch(form) ? 'Diagonal split swatch will be generated' : 'Single color/image swatch' ]]
+                    </small>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <template v-for="fieldDef in cpMoFieldDefs">
+            <div v-if="!(form.swatchHalves && (fieldDef.type === 'color' || fieldDef.type.toLowerCase().includes('file_reference')))"
+                 :key="fieldDef.key" class="field-group">
+              <label class="field-label">
+                [[ fieldDef.name ]]
+                <small v-if="fieldDef.key === cpMoDisplayNameKey" style="color: #666;">(display name)</small>
+              </label>
+
+              <!-- Color picker for color-type fields (non-swatch fallback) -->
+              <template v-if="fieldDef.type === 'color'">
+                <div class="color-code-row">
+                  <input type="color" v-model="form.fieldValues[fieldDef.key]" class="color-picker">
+                  <input type="text" v-model="form.fieldValues[fieldDef.key]"
+                    placeholder="#000000" class="color-hex-input" maxlength="7">
+                </div>
+              </template>
+
+              <!-- File reference (non-swatch fallback) -->
+              <template v-else-if="fieldDef.type.toLowerCase().includes('file_reference')">
+                <input type="url" v-model="form.fieldValues[fieldDef.key]"
+                  placeholder="https://… image URL" class="image-url-input">
+              </template>
+
+              <!-- Reference fields: multi-select -->
+              <template v-else-if="(fieldDef.type.toLowerCase().includes('metaobject_reference') || fieldDef.type.toLowerCase().includes('taxonomy_value_reference')) && fieldDef.type.toLowerCase().includes('list.')">
+                <div class="searchable-select">
+                  <div class="select-input-wrapper" @click="cpMoOpenDropdown(fieldDef.key, fi)">
+                    <div class="select-pills">
+                      <span v-for="gid in (form.fieldValues[fieldDef.key] || [])" :key="gid" class="select-pill">
+                        [[ cpMoGetLabel(gid, fieldDef.key) ]]
+                        <span class="pill-remove" @click.stop="cpMoRemoveRef(fi, fieldDef.key, gid)">×</span>
+                      </span>
+                      <input type="text"
+                        v-model="form.fieldSearches[fieldDef.key]"
+                        @input="cpMoOpenDropdown(fieldDef.key, fi)"
+                        @focus="cpMoOpenDropdown(fieldDef.key, fi)"
+                        :placeholder="'Search ' + fieldDef.name + '…'"
+                        class="pill-search-input">
+                    </div>
+                  </div>
+                  <div v-if="cpMoActiveDropdown === fieldDef.key + '_' + fi" class="select-dropdown">
+                    <div v-for="refOpt in cpMoFilteredRefOptions(fi, fieldDef.key)" :key="refOpt.gid"
+                      @mousedown.prevent="cpMoToggleRef(fi, fieldDef.key, refOpt.gid)"
+                      :class="['select-option', { selected: (form.fieldValues[fieldDef.key] || []).includes(refOpt.gid) }]">
+                      <span class="option-check">[[ (form.fieldValues[fieldDef.key] || []).includes(refOpt.gid) ? '✓' : '' ]]</span>
+                      [[ refOpt.displayName ]]
+                    </div>
+                    <div v-if="cpMoFilteredRefOptions(fi, fieldDef.key).length === 0" class="select-option disabled">
+                      No matching options
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Reference fields: single-select -->
+              <template v-else-if="fieldDef.type.toLowerCase().includes('metaobject_reference') || fieldDef.type.toLowerCase().includes('taxonomy_value_reference')">
+                <div class="searchable-select">
+                  <div class="select-input-wrapper" @click="cpMoOpenDropdown(fieldDef.key, fi)">
+                    <div class="select-pills">
+                      <span v-if="form.fieldValues[fieldDef.key]" class="select-pill">
+                        [[ cpMoGetLabel(form.fieldValues[fieldDef.key], fieldDef.key) ]]
+                        <span class="pill-remove" @click.stop="form.fieldValues[fieldDef.key] = ''">×</span>
+                      </span>
+                      <input type="text"
+                        v-model="form.fieldSearches[fieldDef.key]"
+                        @input="cpMoOpenDropdown(fieldDef.key, fi)"
+                        @focus="cpMoOpenDropdown(fieldDef.key, fi)"
+                        :placeholder="form.fieldValues[fieldDef.key] ? '' : 'Search ' + fieldDef.name + '…'"
+                        class="pill-search-input">
+                    </div>
+                  </div>
+                  <div v-if="cpMoActiveDropdown === fieldDef.key + '_' + fi" class="select-dropdown">
+                    <div v-for="refOpt in cpMoFilteredRefOptions(fi, fieldDef.key)" :key="refOpt.gid"
+                      @mousedown.prevent="cpMoSetRef(fi, fieldDef.key, refOpt.gid)"
+                      :class="['select-option', { selected: form.fieldValues[fieldDef.key] === refOpt.gid }]">
+                      <span class="option-check">[[ form.fieldValues[fieldDef.key] === refOpt.gid ? '✓' : '' ]]</span>
+                      [[ refOpt.displayName ]]
+                    </div>
+                    <div v-if="cpMoFilteredRefOptions(fi, fieldDef.key).length === 0" class="select-option disabled">
+                      No matching options
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Plain text fields -->
+              <template v-else>
+                <input type="text" v-model="form.fieldValues[fieldDef.key]"
+                  :placeholder="fieldDef.name" class="cp-input">
+              </template>
+            </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button @click="cpCancelMoCreation" class="btn-sm btn-outline">Cancel</button>
+        <button
+          @click="cpSubmitMoCreations"
+          :disabled="cpMoCreating || cpMoAllCreated"
+          class="btn-sm btn-apply">
+          <span v-if="!cpMoCreating">
+            [[ cpMoAllCreated ? '✓ All Created' : 'Create' ]]
+          </span>
+          <span v-else>Creating…</span>
+        </button>
+        <button
+          v-if="cpMoAllCreated"
+          @click="cpFinishMoCreation"
+          class="btn-sm btn-apply">
+          Continue ➜
+        </button>
+      </div>
+    </div>
+  </div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+<script>
+const { createApp } = Vue;
+const PT_STATE_KEY = 'productToolsState';
+
+function loadSavedState() {
+  try {
+    const raw = sessionStorage.getItem(PT_STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+createApp({
+  delimiters: ['[[', ']]'],
+  data() {
+    const saved = loadSavedState();
+    return {
+      selectedVendor: (saved && saved.selectedVendor) || '',
+      csvFile: null,
+      loading: false,
+      error: null,
+      result: (saved && saved.result) || null,
+
+      // Collapsible sections
+      newProductsCollapsed: (saved && saved.newProductsCollapsed) || false,
+      newVariantsCollapsed: (saved && saved.newVariantsCollapsed) || false,
+
+      // New products table
+      newProductSearch: (saved && saved.newProductSearch) || '',
+      newProductSort: (saved && saved.newProductSort) || { key: 'base_name', asc: true },
+      expandedNewProducts: {},
+
+      // New variants table
+      newVariantSearch: (saved && saved.newVariantSearch) || '',
+      newVariantSort: (saved && saved.newVariantSort) || { key: 'shopify_product_title', asc: true },
+      selectedVariantSkus: (saved && saved.selectedVariantSkus) || [],
+      lastClickedVariantIndex: null,
+      addingVariants: false,
+      addVariantResult: (saved && saved.addVariantResult) || null,
+
+      // Image URL modal
+      showImageModal: false,
+      pendingVariants: [],
+      colorImageUrls: {},
+
+      // Color creation modal
+      showColorModal: false,
+      missingColors: [],
+      colorCreationForms: [],
+      colorFieldOptions: {},       // { base_color: [...], base_pattern: [...] }
+      colorMetaobjectType: '',
+      colorMetaobjectFields: [],   // field definitions from Shopify
+      availableColorMetaobjects: [],  // [{displayName, gid}, …] for replace-with-existing
+      colorCreating: false,
+      colorCreationError: null,
+      activeDropdown: null,        // e.g. 'baseColor_0', 'basePattern_1'
+
+      // Linked option mapping modal
+      showOptionMappingModal: false,
+      optionMappingData: {},       // { "Størrelse": { missing: [...], available: [...], metaobject_type: "..." } }
+      optionMappingForms: [],      // [{ optionName, value, action: 'replace'|'create', replacement: '', search: '', creating: false, created: false }]
+      optionMappingError: null,
+      optionMappingBusy: false,
+
+      // Cross-modal state
+      colorsOnProductCache: [],      // color names already on the product's variants
+      deferredColorCreations: [],    // colors deferred from option mapping for color creation
+
+      // ── Create Product state ───────────────────────────────
+      showCreateProductModal: false,
+      cpStep: 1,                     // 1=details, 2=metafields, 3=options, 4=variants
+      cpError: null,
+      creatingProduct: false,
+
+      // Step 1: Product details
+      cpTitle: '',
+      cpVendor: '',
+      cpDescSource: 'url',
+      cpDescUrl: '',
+      cpDescriptionHtml: '',
+      cpTranslating: false,
+      cpCategoryId: '',
+      cpCategoryName: '',
+      cpCategorySearch: '',
+      cpTags: [],                    // selected tags (strings)
+      cpTagSearch: '',
+      allProductTags: [],            // cached from server
+      tagsLoaded: false,
+      taxonomyCategories: [],        // fetched once from server
+      taxonomyLoaded: false,
+
+      // Step 2: Category metafields
+      cpCategoryMetafields: [],
+      cpMetafieldValues: {},
+      cpMetafieldSearches: {},
+      cpMetafieldOptionMatch: {},
+      cpSavingMetafields: false,
+
+      // Step 3: Product Options
+      cpDetectedOptions: [],
+      cpDetectingOptions: false,
+      cpCreatingOptions: false,
+      cpReferenceProductId: null,
+      cpLinkableMetafieldDefs: [],   // available metafield definitions for linking
+      cpLinkSearch: {},              // per-option-index search text for linked metafield dropdown
+      cpNewValueInputs: {},          // per-option-index text input for adding values
+      cpOptionMetaobjectPool: {},    // { 'ns.key': { type: '...', objects: { displayName: gid } } }
+      cpEditingValue: { optIdx: null, valIdx: null, text: '' },  // inline-edit state for option pills
+
+      // Step 3: Metaobject creation modal
+      cpShowMoModal: false,
+      cpMoOptionIdx: null,           // which option we're creating metaobjects for
+      cpMoType: '',                  // metaobject type string
+      cpMoDisplayNameKey: null,      // the field key used as display name
+      cpMoFieldDefs: [],             // field definitions for the metaobject
+      cpMoFieldOptions: {},          // reference field options { key: [{gid, displayName}] }
+      cpMoForms: [],                 // one form per missing value
+      cpMoCreating: false,
+      cpMoError: null,
+      cpMoActiveDropdown: null,
+      cpMoColorFieldKey: null,       // key of the 'color' field (if color-like metaobject)
+      cpMoSwatchFieldKey: null,      // key of the 'file_reference' field (if color-like metaobject)
+
+      // Step 4: Variants
+      cpCreatedProductId: null,
+      cpGroupVariants: [],
+      cpSelectedSkus: [],
+      cpVariantResult: null,
+      cpCurrentGroup: null,
+      cpColorImageUrls: {},
+
+      // Step 5: Images
+      cpImages: [],
+      cpImgUrlInput: '',
+      cpImgUploading: false,
+      cpImgLoading: false,
+      cpImgError: null,
+      cpImgSuccess: null,
+      cpDragIdx: null,
+      cpDragOverIdx: null,
+    };
+  },
+  computed: {
+    filteredNewProducts() {
+      if (!this.result) return [];
+      let items = [...this.result.new_products];
+      if (this.newProductSearch) {
+        const q = this.newProductSearch.toLowerCase();
+        items = items.filter(p =>
+          p.sku.toLowerCase().includes(q) ||
+          p.base_name.toLowerCase().includes(q) ||
+          (p.color && p.color.toLowerCase().includes(q)) ||
+          (p.ean && p.ean.toLowerCase().includes(q))
+        );
+      }
+      // Group by product_code
+      const groups = new Map();
+      for (const p of items) {
+        const code = p.product_code || p.sku;
+        if (!groups.has(code)) {
+          groups.set(code, {
+            code,
+            baseName: p.base_name || code,
+            variants: [],
+            colors: new Set(),
+          });
+        }
+        const g = groups.get(code);
+        g.variants.push(p);
+        if (p.color) g.colors.add(p.color);
+      }
+      // Sort groups by base name
+      const key = this.newProductSort.key;
+      const asc = this.newProductSort.asc;
+      const sorted = [...groups.values()].sort((a, b) => {
+        const va = (a.baseName || '').toLowerCase();
+        const vb = (b.baseName || '').toLowerCase();
+        return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      });
+      // Convert color Sets to arrays
+      for (const g of sorted) {
+        g.colors = [...g.colors].sort();
+      }
+      return sorted;
+    },
+    newProductCount() {
+      if (!this.result) return 0;
+      const codes = new Set();
+      for (const p of this.result.new_products) {
+        codes.add(p.product_code || p.sku);
+      }
+      return codes.size;
+    },
+    filteredNewVariants() {
+      if (!this.result) return [];
+      let items = [...this.result.new_variants];
+      if (this.newVariantSearch) {
+        const q = this.newVariantSearch.toLowerCase();
+        items = items.filter(v =>
+          v.sku.toLowerCase().includes(q) ||
+          v.base_name.toLowerCase().includes(q) ||
+          v.shopify_product_title.toLowerCase().includes(q) ||
+          (v.color && v.color.toLowerCase().includes(q)) ||
+          (v.ean && v.ean.toLowerCase().includes(q))
+        );
+      }
+      const key = this.newVariantSort.key;
+      const asc = this.newVariantSort.asc;
+      items.sort((a, b) => {
+        const va = (a[key] || '').toString().toLowerCase();
+        const vb = (b[key] || '').toString().toLowerCase();
+        return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      });
+      return items;
+    },
+    allVariantsSelected() {
+      if (!this.result || this.filteredNewVariants.length === 0) return false;
+      return this.filteredNewVariants.every(v => this.selectedVariantSkus.includes(v.sku));
+    },
+    cpAllVariantsSelected() {
+      return this.cpGroupVariants.length > 0 && this.cpSelectedSkus.length === this.cpGroupVariants.length;
+    },
+    cpUniqueColors() {
+      const colors = new Set();
+      for (const v of this.cpGroupVariants) {
+        const c = (v.color || '').trim();
+        if (c) colors.add(c);
+      }
+      return [...colors].sort();
+    },
+    colorImageEntries() {
+      // Only show rows for colors that _openImageModal decided need images
+      // (i.e. colors whose key exists in colorImageUrls)
+      const map = new Map();
+      for (const v of this.pendingVariants) {
+        const color = (v.color || '').trim();
+        if (!color) continue;
+        const key = `${v.shopify_product_id}::${color}`;
+        if (!(key in this.colorImageUrls)) continue;
+        if (!map.has(key)) {
+          map.set(key, {
+            key,
+            productId: v.shopify_product_id,
+            productTitle: v.shopify_product_title || v.shopify_product_id,
+            color,
+            skus: [],
+          });
+        }
+        map.get(key).skus.push(v.sku);
+      }
+      return [...map.values()];
+    },
+    allColorsCreated() {
+      return this.colorCreationForms.length > 0 &&
+        this.colorCreationForms.every(f => f.created);
+    },
+    uncreatedColors() {
+      return this.colorCreationForms.filter(f => !f.created);
+    },
+    allColorFormsValid() {
+      // Every form must either be completed, or have a valid replacement/create state
+      return this.colorCreationForms.length > 0 &&
+        this.colorCreationForms.every(f =>
+          f.created ||
+          f.action === 'create' ||
+          (f.action === 'replace' && f.replacement)
+        );
+    },
+    referenceFields() {
+      // Dynamically discover which metaobject fields are references
+      // or taxonomy value references — both need dropdown selectors.
+      // Match case-insensitively since Shopify may return various type names.
+      return this.colorMetaobjectFields
+        .filter(f => {
+          const t = (f.type || '').toLowerCase();
+          return t.includes('metaobject_reference') || t.includes('taxonomy_value_reference');
+        })
+        .map(f => ({
+          key: f.key,
+          name: f.name,
+          multi: (f.type || '').toLowerCase().includes('list.'),
+          optionCount: (this.colorFieldOptions[f.key] || []).length,
+        }));
+    },
+    allOptionMappingsValid() {
+      if (this.optionMappingForms.length === 0) return false;
+      return this.optionMappingForms.every(f =>
+        f.created || f.action === 'create' || (f.action === 'replace' && f.replacement)
+      );
+    },
+    filteredTaxonomyCategories() {
+      const q = (this.cpCategorySearch || '').toLowerCase().trim();
+      if (!q) return this.taxonomyCategories.slice(0, 50);
+      return this.taxonomyCategories
+        .filter(c => c.fullName.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+        .slice(0, 50);
+    },
+    filteredProductTags() {
+      const q = (this.cpTagSearch || '').toLowerCase().trim();
+      const tags = this.allProductTags.filter(t => !this.cpTags.includes(t));
+      if (!q) return tags.slice(0, 50);
+      return tags.filter(t => t.toLowerCase().includes(q)).slice(0, 50);
+    },
+    cpAllVariantsSelected() {
+      if (this.cpGroupVariants.length === 0) return false;
+      return this.cpGroupVariants.every(v => this.cpSelectedSkus.includes(v.sku));
+    },
+    cpMoAllCreated() {
+      return this.cpMoForms.length > 0 && this.cpMoForms.every(f => f.created);
+    },
+  },
+  mounted() {
+    this._onBeforeUnload = () => this._saveState();
+    window.addEventListener('beforeunload', this._onBeforeUnload);
+
+    // Close searchable dropdowns when clicking outside
+    this._onDocClick = (e) => {
+      const el = e.target.closest('.searchable-select');
+      if (!el) {
+        if (this.activeDropdown) this.activeDropdown = null;
+        if (this.cpMoActiveDropdown) this.cpMoActiveDropdown = null;
+      }
+    };
+    document.addEventListener('click', this._onDocClick);
+  },
+  beforeUnmount() {
+    window.removeEventListener('beforeunload', this._onBeforeUnload);
+    document.removeEventListener('click', this._onDocClick);
+  },
+  methods: {
+    _saveState() {
+      try {
+        const snapshot = {
+          selectedVendor: this.selectedVendor,
+          result: this.result,
+          newProductsCollapsed: this.newProductsCollapsed,
+          newVariantsCollapsed: this.newVariantsCollapsed,
+          newProductSearch: this.newProductSearch,
+          newProductSort: this.newProductSort,
+          newVariantSearch: this.newVariantSearch,
+          newVariantSort: this.newVariantSort,
+          selectedVariantSkus: this.selectedVariantSkus,
+          addVariantResult: this.addVariantResult,
+        };
+        sessionStorage.setItem(PT_STATE_KEY, JSON.stringify(snapshot));
+      } catch { /* storage full or unavailable – ignore */ }
+    },
+    onFileSelected(event) {
+      const files = event.target.files;
+      this.csvFile = files && files.length > 0 ? files[0] : null;
+    },
+    formatFileSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    },
+    async compareProducts() {
+      if (!this.csvFile) {
+        this.error = 'Please select a CSV file.';
+        return;
+      }
+      this.loading = true;
+      this.error = null;
+      this.result = null;
+      this.selectedVariantSkus = [];
+      this.addVariantResult = null;
+
+      try {
+        const formData = new FormData();
+        formData.append('vendor', this.selectedVendor);
+        formData.append('csv_file', this.csvFile);
+
+        const response = await fetch('/product-tools/compare/', {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          this.error = data.error || 'Failed to compare products.';
+        } else {
+          this.result = data;
+        }
+      } catch (err) {
+        this.error = 'An error occurred while comparing products.';
+        console.error(err);
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    sortNewProducts(key) {
+      if (this.newProductSort.key === key) {
+        this.newProductSort.asc = !this.newProductSort.asc;
+      } else {
+        this.newProductSort = { key, asc: true };
+      }
+    },
+    toggleNewProductGroup(code) {
+      this.expandedNewProducts[code] = !this.expandedNewProducts[code];
+    },
+    sortNewVariants(key) {
+      if (this.newVariantSort.key === key) {
+        this.newVariantSort.asc = !this.newVariantSort.asc;
+      } else {
+        this.newVariantSort = { key, asc: true };
+      }
+    },
+
+    onVariantCheckboxClick(event, index, sku) {
+      if (event.shiftKey && this.lastClickedVariantIndex !== null) {
+        // Shift-click: select/deselect the entire range based on the anchor's state
+        const start = Math.min(this.lastClickedVariantIndex, index);
+        const end = Math.max(this.lastClickedVariantIndex, index);
+        const rangeSkus = this.filteredNewVariants.slice(start, end + 1).map(v => v.sku);
+        const anchorSku = this.filteredNewVariants[this.lastClickedVariantIndex].sku;
+        const selecting = this.selectedVariantSkus.includes(anchorSku);
+        if (selecting) {
+          const combined = new Set([...this.selectedVariantSkus, ...rangeSkus]);
+          this.selectedVariantSkus = [...combined];
+        } else {
+          const removeSet = new Set(rangeSkus);
+          this.selectedVariantSkus = this.selectedVariantSkus.filter(s => !removeSet.has(s));
+        }
+      } else {
+        // Normal click: toggle the single item (always create a new array for reactivity)
+        if (this.selectedVariantSkus.includes(sku)) {
+          this.selectedVariantSkus = this.selectedVariantSkus.filter(s => s !== sku);
+        } else {
+          this.selectedVariantSkus = [...this.selectedVariantSkus, sku];
+        }
+      }
+      this.lastClickedVariantIndex = index;
+    },
+
+    selectAllVariants() {
+      const skus = this.filteredNewVariants.map(v => v.sku);
+      const combined = new Set([...this.selectedVariantSkus, ...skus]);
+      this.selectedVariantSkus = [...combined];
+    },
+    deselectAllVariants() {
+      const filterSkus = new Set(this.filteredNewVariants.map(v => v.sku));
+      this.selectedVariantSkus = this.selectedVariantSkus.filter(s => !filterSkus.has(s));
+    },
+    toggleAllVariants() {
+      if (this.allVariantsSelected) {
+        this.deselectAllVariants();
+      } else {
+        this.selectAllVariants();
+      }
+    },
+
+    async addSelectedVariants() {
+      if (this.selectedVariantSkus.length === 0) return;
+
+      // Collect the selected variant objects
+      const selected = this.result.new_variants.filter(v =>
+        this.selectedVariantSkus.includes(v.sku)
+      );
+
+      this.pendingVariants = selected;
+      this.addVariantResult = null;
+
+      const allPids = [...new Set(selected.map(v => v.shopify_product_id).filter(Boolean))];
+
+      // ── Step 1: Check ALL linked options for missing metaobject values ──
+      if (allPids.length > 0) {
+        try {
+          this.loading = true;
+          const checkResp = await fetch('/product-tools/check-linked-options/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ product_ids: allPids, variants: selected }),
+          });
+          const checkData = await checkResp.json();
+          const missingOptions = checkData.options || {};
+          const hasMissing = Object.values(missingOptions).some(o => o.missing && o.missing.length > 0);
+
+          if (hasMissing) {
+            this.optionMappingData = missingOptions;
+            this.optionMappingForms = [];
+            for (const [optName, optInfo] of Object.entries(missingOptions)) {
+              for (const val of optInfo.missing) {
+                this.optionMappingForms.push({
+                  optionName: optName,
+                  value: val,
+                  action: 'replace',
+                  replacement: '',
+                  search: '',
+                  creating: false,
+                  created: false,
+                });
+              }
+            }
+            this.optionMappingError = null;
+            this.showOptionMappingModal = true;
+            this.loading = false;
+            return; // Will continue via applyOptionMappings → _proceedAfterOptionMapping
+          }
+        } catch (err) {
+          console.error('Error checking linked options:', err);
+          // Non-fatal: proceed
+        } finally {
+          this.loading = false;
+        }
+      }
+
+      // No missing linked options — proceed to color check
+      this._proceedAfterOptionMapping();
+    },
+
+    async _proceedAfterOptionMapping() {
+      const selected = this.pendingVariants;
+      const allPids = [...new Set(selected.map(v => v.shopify_product_id).filter(Boolean))];
+      const allColors = [...new Set(selected.map(v => (v.color || '').trim()).filter(Boolean))];
+
+      // Colors deferred from the option mapping modal ("create new" for Farve)
+      const deferredColors = this.deferredColorCreations || [];
+      this.deferredColorCreations = [];
+
+      // Track which colors are already on the product (have existing variants)
+      this.colorsOnProductCache = [];
+
+      // ── Step 2: Check colors ─────────────────────────────────
+      if (allPids.length > 0 && allColors.length > 0) {
+        try {
+          this.loading = true;
+          const checkResp = await fetch('/product-tools/check-colors/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ product_ids: allPids, color_names: allColors }),
+          });
+          const checkData = await checkResp.json();
+
+          // Store colors already on the product so the image modal can skip them
+          this.colorsOnProductCache = checkData.on_product || [];
+
+          // Merge deferred colors into the missing list (avoid duplicates)
+          let missingColors = checkData.missing || [];
+          for (const dc of deferredColors) {
+            if (!missingColors.includes(dc)) {
+              missingColors.push(dc);
+            }
+          }
+
+          if (missingColors.length > 0) {
+            // Fetch field options for the color creation form
+            const optResp = await fetch('/product-tools/color-options/', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ product_ids: allPids }),
+            });
+            const optData = await optResp.json();
+
+            if (!optResp.ok || optData.error) {
+              console.error('Failed to fetch color options:', optData);
+              this.error = optData.error || 'Failed to fetch color field options from Shopify.';
+              this.loading = false;
+              return;
+            }
+
+            this.colorMetaobjectType = optData.metaobject_type || '';
+            this.colorMetaobjectFields = optData.fields || [];
+            this.colorFieldOptions = optData.field_options || {};
+            this.availableColorMetaobjects = checkData.available || [];
+            this.missingColors = missingColors;
+
+            // Build a form entry per missing color with dynamic ref field slots
+            const refFields = (optData.fields || []).filter(f => {
+              const t = (f.type || '').toLowerCase();
+              return t.includes('metaobject_reference') || t.includes('taxonomy_value_reference');
+            });
+            this.colorCreationForms = missingColors.map(name => {
+              const refSelections = {};
+              const refSearches = {};
+              for (const rf of refFields) {
+                refSelections[rf.key] = rf.type.toLowerCase().includes('list.') ? [] : '';
+                refSearches[rf.key] = '';
+              }
+              return {
+                name,
+                action: 'create',       // 'create' or 'replace'
+                replacement: '',        // displayName picked from existing
+                replacementSearch: '',  // search text for dropdown
+                swatchHalves: [
+                  { type: 'code', value: '', fileName: '' },
+                  { type: 'code', value: '', fileName: '' },
+                ],
+                refSelections,
+                refSearches,
+                created: false,
+                createdGid: null,
+              };
+            });
+
+            this.colorCreationError = null;
+            this.showColorModal = true;
+            this.loading = false;
+            return; // Don't proceed to image modal yet
+          }
+        } catch (err) {
+          console.error('Error checking colors:', err);
+          // Non-fatal: proceed without color creation
+        } finally {
+          this.loading = false;
+        }
+      }
+
+      // No missing colors to create — but some colors may be new to this product
+      // (metaobject exists but never used on this product) → prompt for images
+      this.pendingVariants = selected;
+      this._openImageModal(selected);
+    },
+
+    _openImageModal(selected) {
+      // Show image URL prompts for colors that are NEW to the product.
+      // Colors already on the product will have their images reused server-side.
+      const colorsOnProduct = new Set(this.colorsOnProductCache || []);
+
+      this.colorImageUrls = {};
+      const seen = new Set();
+      for (const v of selected) {
+        const color = (v.color || '').trim();
+        if (!color) continue;
+        // Skip colors that already have variants on the product
+        if (colorsOnProduct.has(color)) continue;
+        const key = `${v.shopify_product_id}::${color}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          this.colorImageUrls[key] = '';
+        }
+      }
+
+      // If all colors already exist on the product, skip the modal
+      if (seen.size === 0) {
+        this.submitVariantsWithImages();
+        return;
+      }
+      this.showImageModal = true;
+    },
+
+    // ── Color creation modal helpers ──────────────────────────
+
+    getOptionLabel(gid, fieldKey) {
+      const options = this.colorFieldOptions[fieldKey] || [];
+      const opt = options.find(o => o.gid === gid);
+      return opt ? opt.displayName : gid;
+    },
+
+    openDropdown(fieldKey, index) {
+      this.activeDropdown = `${fieldKey}_${index}`;
+    },
+
+    filteredRefOptions(ci, fieldKey) {
+      const options = this.colorFieldOptions[fieldKey] || [];
+      const q = (this.colorCreationForms[ci]?.refSearches?.[fieldKey] || '').toLowerCase();
+      if (!q) return options;
+      return options.filter(o => o.displayName.toLowerCase().includes(q));
+    },
+
+    toggleRefSelection(ci, fieldKey, gid) {
+      const form = this.colorCreationForms[ci];
+      const current = form.refSelections[fieldKey] || [];
+      const idx = current.indexOf(gid);
+      if (idx >= 0) {
+        form.refSelections[fieldKey] = current.filter(g => g !== gid);
+      } else {
+        form.refSelections[fieldKey] = [...current, gid];
+      }
+    },
+
+    removeRefSelection(ci, fieldKey, gid) {
+      const form = this.colorCreationForms[ci];
+      form.refSelections[fieldKey] = (form.refSelections[fieldKey] || []).filter(g => g !== gid);
+    },
+
+    setRefSelection(ci, fieldKey, gid) {
+      const form = this.colorCreationForms[ci];
+      form.refSelections[fieldKey] = gid;
+      this.activeDropdown = null;
+    },
+
+    clearRefSelection(ci, fieldKey) {
+      const form = this.colorCreationForms[ci];
+      form.refSelections[fieldKey] = '';
+    },
+
+    cancelColorCreation() {
+      this.showColorModal = false;
+      this.colorCreationForms = [];
+      this.missingColors = [];
+      this.availableColorMetaobjects = [];
+      this.activeDropdown = null;
+    },
+
+    // ── Color replacement helpers ───────────────────────────
+
+    filteredAvailableColors(ci) {
+      const q = (this.colorCreationForms[ci]?.replacementSearch || '').toLowerCase();
+      if (!q) return this.availableColorMetaobjects;
+      return this.availableColorMetaobjects.filter(
+        o => o.displayName.toLowerCase().includes(q)
+      );
+    },
+
+    selectColorReplacement(ci, displayName) {
+      this.colorCreationForms[ci].replacement = displayName;
+      this.colorCreationForms[ci].replacementSearch = '';
+      this.activeDropdown = null;
+    },
+
+    // ── Swatch helpers ──────────────────────────────────────
+
+    onSwatchFileChange(ci, halfIdx, event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        this.colorCreationForms[ci].swatchHalves[halfIdx].value = e.target.result;
+        this.colorCreationForms[ci].swatchHalves[halfIdx].fileName = file.name;
+      };
+      reader.readAsDataURL(file);
+    },
+
+    clearSwatchFile(ci, halfIdx) {
+      this.colorCreationForms[ci].swatchHalves[halfIdx].value = '';
+      this.colorCreationForms[ci].swatchHalves[halfIdx].fileName = '';
+    },
+
+    hasSwatchInput(colorDef) {
+      return colorDef.swatchHalves.some(h => !!h.value);
+    },
+
+    needsDiagonalSwatch(colorDef) {
+      const h0 = colorDef.swatchHalves[0];
+      const h1 = colorDef.swatchHalves[1];
+      const h0Active = !!h0.value;
+      const h1Active = !!h1.value;
+      return h0Active && h1Active && (h0.value !== h1.value || h0.type !== h1.type);
+    },
+
+    swatchPreviewStyle(colorDef) {
+      const h0 = colorDef.swatchHalves[0];
+      const h1 = colorDef.swatchHalves[1];
+      const h0Active = !!h0.value;
+      const h1Active = !!h1.value;
+
+      const resolve = (h) => {
+        if (h.type === 'code') return h.value || '#ccc';
+        if (h.type === 'image' && h.value) return `url(${h.value})`;
+        return '#ccc';
+      };
+
+      if (h0Active && h1Active && (h0.value !== h1.value || h0.type !== h1.type)) {
+        // Diagonal preview using CSS
+        const c0 = resolve(h0);
+        const c1 = resolve(h1);
+        const isBg0 = c0.startsWith('url(');
+        const isBg1 = c1.startsWith('url(');
+        if (!isBg0 && !isBg1) {
+          return {
+            background: `linear-gradient(to bottom right, ${c0} 50%, ${c1} 50%)`,
+          };
+        }
+        // For image combos, show a simple split indicator
+        return {
+          background: `linear-gradient(to bottom right, ${isBg0 ? '#888' : c0} 50%, ${isBg1 ? '#666' : c1} 50%)`,
+        };
+      }
+
+      if (h0Active) {
+        const c = resolve(h0);
+        if (c.startsWith('url(')) return { backgroundImage: c, backgroundSize: 'cover' };
+        return { backgroundColor: c };
+      }
+      if (h1Active) {
+        const c = resolve(h1);
+        if (c.startsWith('url(')) return { backgroundImage: c, backgroundSize: 'cover' };
+        return { backgroundColor: c };
+      }
+      return { backgroundColor: '#eee' };
+    },
+
+    // ── Linked option mapping modal helpers ──────────────────
+
+    filteredOptionMappingChoices(fi) {
+      const form = this.optionMappingForms[fi];
+      if (!form) return [];
+      const available = (this.optionMappingData[form.optionName] || {}).available || [];
+      const q = (form.search || '').toLowerCase();
+      if (!q) return available;
+      return available.filter(o => o.displayName.toLowerCase().includes(q));
+    },
+
+    selectOptionMapping(fi, displayName) {
+      const form = this.optionMappingForms[fi];
+      form.replacement = displayName;
+      form.search = '';
+      this.activeDropdown = null;
+    },
+
+    cancelOptionMapping() {
+      this.showOptionMappingModal = false;
+      this.optionMappingForms = [];
+      this.optionMappingData = {};
+      this.optionMappingError = null;
+      this.activeDropdown = null;
+    },
+
+    async applyOptionMappings() {
+      this.optionMappingBusy = true;
+      this.optionMappingError = null;
+
+      // Map option names to variant data keys
+      const optionToKey = {
+        'Størrelse': 'size',
+        'Farve': 'color',
+      };
+
+      // Collect color names that the user wants to create via the detailed modal
+      const deferredColorCreations = [];
+
+      for (const form of this.optionMappingForms) {
+        if (form.created) continue;
+
+        if (form.action === 'replace') {
+          if (!form.replacement) {
+            this.optionMappingError = `Please select a replacement for "${form.optionName}" = "${form.value}".`;
+            this.optionMappingBusy = false;
+            return;
+          }
+          // Apply replacement to all pending variants
+          const dataKey = optionToKey[form.optionName];
+          if (dataKey) {
+            for (const v of this.pendingVariants) {
+              if ((v[dataKey] || '').trim() === form.value) {
+                v[dataKey] = form.replacement;
+              }
+            }
+          }
+          form.created = true;
+
+        } else if (form.action === 'create') {
+          // Colors need the detailed color creation modal (color code, base color, etc.)
+          if (form.optionName === 'Farve') {
+            deferredColorCreations.push(form.value);
+            form.created = true; // mark resolved — will be handled by color modal
+            continue;
+          }
+
+          // Create a new metaobject via the backend
+          const moType = (this.optionMappingData[form.optionName] || {}).metaobject_type;
+          if (!moType) {
+            this.optionMappingError = `Unknown metaobject type for "${form.optionName}".`;
+            this.optionMappingBusy = false;
+            return;
+          }
+          try {
+            form.creating = true;
+            const resp = await fetch('/product-tools/create-option-value/', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                metaobject_type: moType,
+                display_name: form.value,
+              }),
+            });
+            const data = await resp.json();
+            if (data.errors && data.errors.length > 0) {
+              this.optionMappingError = `Error creating "${form.value}": ${data.errors.join(', ')}`;
+              form.creating = false;
+              this.optionMappingBusy = false;
+              return;
+            }
+            if (data.metaobject) {
+              form.created = true;
+            } else {
+              this.optionMappingError = `Failed to create "${form.value}" — no metaobject returned.`;
+              form.creating = false;
+              this.optionMappingBusy = false;
+              return;
+            }
+          } catch (err) {
+            this.optionMappingError = `Network error creating "${form.value}": ${err.message}`;
+            form.creating = false;
+            this.optionMappingBusy = false;
+            return;
+          } finally {
+            form.creating = false;
+          }
+        }
+      }
+
+      // Store deferred color creations so _proceedAfterOptionMapping
+      // can feed them into the color creation modal
+      this.deferredColorCreations = deferredColorCreations;
+
+      this.optionMappingBusy = false;
+      this.showOptionMappingModal = false;
+      this.activeDropdown = null;
+
+      // Continue with the rest of the flow (color check → image modal)
+      this._proceedAfterOptionMapping();
+    },
+
+    async submitColorCreations() {
+      this.colorCreating = true;
+      this.colorCreationError = null;
+
+      for (const form of this.colorCreationForms) {
+        if (form.created) continue;
+
+        // ── REPLACE: rename variant color values to match an existing metaobject ──
+        if (form.action === 'replace') {
+          if (!form.replacement) {
+            this.colorCreationError = `Please select a replacement for "${form.name}".`;
+            this.colorCreating = false;
+            return;
+          }
+          // Rename all pending variants that have this color
+          for (const v of this.pendingVariants) {
+            if ((v.color || '').trim() === form.name) {
+              v.color = form.replacement;
+            }
+          }
+          form.created = true;
+          continue;
+        }
+
+        // ── CREATE: build a new color metaobject ──
+        // Build the fields payload
+        const fields = {};
+
+        // Name / label field — try common field keys
+        const nameKey = this.colorMetaobjectFields.find(
+          f => f.key === 'name' || f.key === 'label' || f.key === 'title'
+        );
+        if (nameKey) {
+          fields[nameKey.key] = form.name;
+        }
+
+        // Color code or image — derived from swatchHalves
+        const colorField = this.colorMetaobjectFields.find(f => f.key === 'color');
+        const swatchField = this.colorMetaobjectFields.find(
+          f => f.key === 'swatch' || f.key === 'image' || f.key === 'pattern_image'
+        );
+
+        // Track which fields are file references (need server-side upload)
+        const fileFields = [];
+
+        const h0 = form.swatchHalves[0];
+        const h1 = form.swatchHalves[1];
+        const h0Active = !!h0.value;
+        const h1Active = !!h1.value;
+        const isDiagonal = h0Active && h1Active && (h0.value !== h1.value || h0.type !== h1.type);
+
+        if (isDiagonal && swatchField) {
+          // Generate a diagonal swatch image server-side
+          try {
+            const swatchResp = await fetch('/product-tools/generate-swatch/', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                top_left: { type: h0.type, value: h0.value },
+                bottom_right: { type: h1.type, value: h1.value },
+              }),
+            });
+            const swatchData = await swatchResp.json();
+            if (swatchData.error) {
+              this.colorCreationError = `Swatch error for "${form.name}": ${swatchData.error}`;
+              this.colorCreating = false;
+              return;
+            }
+            // The endpoint returns a data URI — pass it to the create-color endpoint for upload
+            fields[swatchField.key] = swatchData.data_uri;
+            fileFields.push(swatchField.key);
+          } catch (err) {
+            this.colorCreationError = `Swatch generation failed for "${form.name}": ${err.message}`;
+            this.colorCreating = false;
+            return;
+          }
+        } else if (h0Active || h1Active) {
+          // Single swatch — pick whichever half has a value
+          const active = h0Active ? h0 : h1;
+          if (active.type === 'code' && colorField) {
+            fields[colorField.key] = active.value;
+          } else if (active.type === 'image' && swatchField) {
+            fields[swatchField.key] = active.value;
+            fileFields.push(swatchField.key);
+          } else if (active.type === 'code' && swatchField) {
+            // Generate a solid-color swatch image
+            try {
+              const swatchResp = await fetch('/product-tools/generate-swatch/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  top_left: { type: active.type, value: active.value },
+                  bottom_right: { type: active.type, value: active.value },
+                }),
+              });
+              const swatchData = await swatchResp.json();
+              if (swatchData.error) {
+                this.colorCreationError = `Swatch error for "${form.name}": ${swatchData.error}`;
+                this.colorCreating = false;
+                return;
+              }
+              fields[swatchField.key] = swatchData.data_uri;
+              fileFields.push(swatchField.key);
+            } catch (err) {
+              this.colorCreationError = `Swatch generation failed for "${form.name}": ${err.message}`;
+              this.colorCreating = false;
+              return;
+            }
+          }
+        }
+
+        // Reference fields (dynamically discovered)
+        for (const refField of this.referenceFields) {
+          const selection = form.refSelections[refField.key];
+          if (!selection || (Array.isArray(selection) && selection.length === 0)) continue;
+
+          if (refField.multi) {
+            fields[refField.key] = JSON.stringify(selection);
+          } else {
+            fields[refField.key] = selection;
+          }
+        }
+
+        try {
+          const resp = await fetch('/product-tools/create-color/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              metaobject_type: this.colorMetaobjectType,
+              display_name: form.name,
+              fields,
+              file_fields: fileFields,
+            }),
+          });
+          const data = await resp.json();
+
+          if (data.errors && data.errors.length > 0) {
+            this.colorCreationError = `Error creating "${form.name}": ${data.errors.join(', ')}`;
+            this.colorCreating = false;
+            return;
+          }
+
+          if (data.metaobject) {
+            form.created = true;
+            form.createdGid = data.metaobject.id;
+          } else {
+            this.colorCreationError = `Failed to create "${form.name}" — no metaobject returned.`;
+            this.colorCreating = false;
+            return;
+          }
+        } catch (err) {
+          this.colorCreationError = `Network error creating "${form.name}": ${err.message}`;
+          this.colorCreating = false;
+          return;
+        }
+      }
+
+      this.colorCreating = false;
+
+      // If all created, auto-proceed
+      if (this.allColorsCreated) {
+        this.proceedAfterColorCreation();
+      }
+    },
+
+    proceedAfterColorCreation() {
+      this.showColorModal = false;
+      this.activeDropdown = null;
+      // Proceed to image modal — newly created colors are not in
+      // _colorsOnProduct, so _openImageModal will prompt for them.
+      this._openImageModal(this.pendingVariants);
+    },
+
+    async submitVariantsWithImages() {
+      const count = this.pendingVariants.length;
+      if (!confirm(`Add ${count} variant(s) to Shopify?`)) return;
+
+      this.addingVariants = true;
+      this.addVariantResult = null;
+      this.showImageModal = false;
+
+      // Build a color_image_urls mapping: { product_id: { color: url } }
+      const colorImages = {};
+      for (const [key, url] of Object.entries(this.colorImageUrls)) {
+        if (!url || !url.trim()) continue;
+        const [productId, color] = key.split('::');
+        if (!colorImages[productId]) colorImages[productId] = {};
+        colorImages[productId][color] = url.trim();
+      }
+
+      try {
+        const response = await fetch('/product-tools/add-variants/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            variants: this.pendingVariants,
+            color_image_urls: colorImages,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          this.addVariantResult = { errors: [data.error || 'Failed to add variants.'], created: [] };
+        } else {
+          this.addVariantResult = data;
+          // Remove successfully added SKUs from the list
+          if (data.created && data.created.length > 0) {
+            const createdSkus = new Set(data.created.map(c => c.sku));
+            this.result.new_variants = this.result.new_variants.filter(v => !createdSkus.has(v.sku));
+            this.selectedVariantSkus = this.selectedVariantSkus.filter(s => !createdSkus.has(s));
+          }
+        }
+      } catch (err) {
+        this.addVariantResult = { errors: ['An error occurred while adding variants.'], created: [] };
+        console.error(err);
+      } finally {
+        this.addingVariants = false;
+        this.pendingVariants = [];
+      }
+    },
+
+    /* ── Create Product Flow ─────────────────────────────────── */
+
+    async loadTaxonomy() {
+      if (this.taxonomyLoaded) return;
+      try {
+        const resp = await fetch('/product-tools/taxonomy/');
+        const data = await resp.json();
+        this.taxonomyCategories = data.categories || [];
+        this.taxonomyLoaded = true;
+      } catch (err) {
+        console.error('Failed to load taxonomy:', err);
+      }
+    },
+
+    async loadProductTags() {
+      if (this.tagsLoaded) return;
+      try {
+        const resp = await fetch('/product-tools/tags/');
+        const data = await resp.json();
+        this.allProductTags = data.tags || [];
+        this.tagsLoaded = true;
+      } catch (err) {
+        console.error('Failed to load product tags:', err);
+      }
+    },
+
+    getVendorDisplayName(vendorKey) {
+      const VENDOR_MAP = {
+        'entirem': 'Helikon-Tex',
+      };
+      return VENDOR_MAP[vendorKey] || vendorKey;
+    },
+
+    async openCreateProductModal(group) {
+      await this.loadTaxonomy();
+      await this.loadProductTags();
+
+      // Determine the vendor from the selected vendor key
+      const VENDOR_BRAND_MAP = {
+        'entirem': ['Helikon-Tex', 'Tac Maven'],
+      };
+      const brands = VENDOR_BRAND_MAP[this.selectedVendor] || [];
+      const vendor = brands.length > 0 ? brands[0] : this.selectedVendor;
+
+      this.cpCurrentGroup = group;
+      this.cpTitle = `${vendor} - ${group.baseName}`;
+      this.cpVendor = vendor;
+      this.cpDescSource = 'url';
+      this.cpDescUrl = '';
+      this.cpDescriptionHtml = '';
+      this.cpTranslating = false;
+      this.cpCategoryId = '';
+      this.cpCategoryName = '';
+      this.cpCategorySearch = '';
+      this.cpTags = [];
+      this.cpTagSearch = '';
+      this.cpError = null;
+      this.cpStep = 1;
+      this.cpCreatedProductId = null;
+      this.cpCategoryMetafields = [];
+      this.cpMetafieldValues = {};
+      this.cpMetafieldSearches = {};
+      this.cpMetafieldOptionMatch = {};
+      this.cpDetectedOptions = [];
+      this.cpDetectingOptions = false;
+      this.cpCreatingOptions = false;
+      this.cpReferenceProductId = null;
+      this.cpLinkableMetafieldDefs = [];
+      this.cpLinkSearch = {};
+      this.cpGroupVariants = [...group.variants];
+      this.cpSelectedSkus = group.variants.map(v => v.sku);
+      this.cpVariantResult = null;
+      this.showCreateProductModal = true;
+    },
+
+    cancelCreateProduct() {
+      this.showCreateProductModal = false;
+      this.activeDropdown = null;
+      // If product was created and variants added, remove from new_products list
+      if (this.cpCreatedProductId && this.cpCurrentGroup) {
+        const code = this.cpCurrentGroup.code;
+        this.result.new_products = this.result.new_products.filter(p =>
+          (p.product_code || p.sku) !== code
+        );
+      }
+    },
+
+    selectCategory(cat) {
+      this.cpCategoryId = cat.id;
+      this.cpCategoryName = cat.fullName;
+      this.cpCategorySearch = '';
+      this.activeDropdown = null;
+    },
+
+    cpToggleTag(tag) {
+      if (this.cpTags.includes(tag)) {
+        this.cpTags = this.cpTags.filter(t => t !== tag);
+      } else {
+        this.cpTags.push(tag);
+      }
+      this.cpTagSearch = '';
+    },
+
+    cpAddCustomTag() {
+      const tag = (this.cpTagSearch || '').trim();
+      if (tag && !this.cpTags.includes(tag)) {
+        this.cpTags.push(tag);
+      }
+      this.cpTagSearch = '';
+    },
+
+    filteredLinkableDefs(optIdx) {
+      const q = (this.cpLinkSearch[optIdx] || '').toLowerCase().trim();
+      if (!q) return this.cpLinkableMetafieldDefs;
+      return this.cpLinkableMetafieldDefs.filter(d =>
+        d.name.toLowerCase().includes(q) ||
+        (d.namespace + '.' + d.key).toLowerCase().includes(q)
+      );
+    },
+
+    cpOptionLinkLabel(optIdx) {
+      const key = this.cpOptionLinkKey(optIdx);
+      if (!key) return '';
+      const def = this.cpLinkableMetafieldDefs.find(d => d.namespace + '.' + d.key === key);
+      return def ? `${def.name} (${def.namespace}.${def.key})` : key;
+    },
+
+    async translateDescription() {
+      if (!this.cpDescUrl) return;
+      this.cpTranslating = true;
+      this.cpError = null;
+      try {
+        const resp = await fetch('/product-tools/translate-description/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: this.cpDescUrl,
+            product_name: this.cpTitle,
+          }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpError = data.error;
+        } else {
+          this.cpDescriptionHtml = data.description_html || '';
+        }
+      } catch (err) {
+        this.cpError = 'Failed to translate description.';
+        console.error(err);
+      } finally {
+        this.cpTranslating = false;
+      }
+    },
+
+    async createProduct() {
+      this.creatingProduct = true;
+      this.cpError = null;
+
+      try {
+        const resp = await fetch('/product-tools/create-product/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: this.cpTitle,
+            vendor: this.cpVendor,
+            description_html: this.cpDescriptionHtml,
+            category_id: this.cpCategoryId || null,
+            tags: this.cpTags,
+          }),
+        });
+        const data = await resp.json();
+
+        if (data.errors && data.errors.length > 0) {
+          this.cpError = data.errors.join(', ');
+          if (!data.product_id) {
+            this.creatingProduct = false;
+            return;
+          }
+        }
+
+        if (!data.product_id) {
+          this.cpError = 'Product creation failed — no product ID returned.';
+          this.creatingProduct = false;
+          return;
+        }
+
+        this.cpCreatedProductId = data.product_id;
+
+        // Fetch category metafields if a category was selected
+        if (this.cpCategoryId) {
+          try {
+            const mfResp = await fetch('/product-tools/category-metafields/', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ category_id: this.cpCategoryId }),
+            });
+            const mfData = await mfResp.json();
+            this.cpCategoryMetafields = mfData.metafields || [];
+            this.cpMetafieldValues = {};
+            this.cpMetafieldSearches = {};
+            this.cpMetafieldOptionMatch = {};
+            for (const mf of this.cpCategoryMetafields) {
+              this.cpMetafieldValues[mf.handle] = '';
+              this.cpMetafieldSearches[mf.handle] = '';
+              this.cpMetafieldOptionMatch[mf.handle] = false;
+            }
+          } catch (err) {
+            console.error('Failed to fetch category metafields:', err);
+          }
+        }
+
+        this.cpStep = 2;
+      } catch (err) {
+        this.cpError = 'An error occurred while creating the product.';
+        console.error(err);
+      } finally {
+        this.creatingProduct = false;
+      }
+    },
+
+    cpMetafieldValueLabel(handle) {
+      const mf = this.cpCategoryMetafields.find(m => m.handle === handle);
+      if (!mf || !mf.values) return this.cpMetafieldValues[handle];
+      const val = mf.values.find(v => v.id === this.cpMetafieldValues[handle]);
+      return val ? val.name : this.cpMetafieldValues[handle];
+    },
+
+    filteredMetafieldValues(handle) {
+      const mf = this.cpCategoryMetafields.find(m => m.handle === handle);
+      if (!mf || !mf.values) return [];
+      const q = (this.cpMetafieldSearches[handle] || '').toLowerCase();
+      if (!q) return mf.values.slice(0, 50);
+      return mf.values.filter(v => v.name.toLowerCase().includes(q)).slice(0, 50);
+    },
+
+    async proceedToOptions() {
+      // Save category metafield values to the product
+      const metafield_values = [];
+      for (const mf of this.cpCategoryMetafields) {
+        const value = this.cpMetafieldValues[mf.handle];
+        if (value) {
+          const valObj = mf.values ? mf.values.find(v => v.id === value) : null;
+          metafield_values.push({ name: mf.name, value: value, value_name: valObj ? valObj.name : '' });
+        }
+      }
+
+      if (metafield_values.length > 0) {
+        this.cpSavingMetafields = true;
+        this.cpError = null;
+        try {
+          const resp = await fetch('/product-tools/save-category-metafields/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              product_id: this.cpCreatedProductId,
+              metafield_values: metafield_values,
+            }),
+          });
+          const data = await resp.json();
+          if (data.errors && data.errors.length > 0) {
+            this.cpError = 'Metafield errors: ' + data.errors.join(', ');
+          }
+        } catch (err) {
+          console.error('Failed to save metafields:', err);
+          this.cpError = 'Failed to save category metafields.';
+        } finally {
+          this.cpSavingMetafields = false;
+        }
+      }
+
+      // Move to step 3 (options) and detect options
+      this.cpStep = 3;
+      if (!this.cpError) this.cpError = null;
+      this.cpDetectedOptions = [];
+      this.cpReferenceProductId = null;
+      this.cpDetectingOptions = true;
+
+      try {
+        const resp = await fetch('/product-tools/detect-product-options/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            vendor: this.cpVendor,
+            variants: this.cpGroupVariants,
+          }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpError = data.error;
+        } else {
+          this.cpDetectedOptions = data.options || [];
+          this.cpReferenceProductId = data.reference_product_id || null;
+          this.cpLinkableMetafieldDefs = data.linkable_metafield_definitions || [];
+
+          // Pre-load metaobject pools for all initially linked options
+          this.cpOptionMetaobjectPool = {};
+          const loadPromises = [];
+          for (const opt of this.cpDetectedOptions) {
+            if (opt.linked_metafield && opt.linked_metafield.namespace && opt.linked_metafield.key) {
+              loadPromises.push(
+                this._cpLoadMetaobjectPool(opt.linked_metafield.namespace, opt.linked_metafield.key)
+              );
+            }
+          }
+          if (loadPromises.length > 0) {
+            await Promise.all(loadPromises);
+            // Re-resolve values against loaded pools
+            for (const opt of this.cpDetectedOptions) {
+              if (!opt.linked_metafield) continue;
+              const cacheKey = `${opt.linked_metafield.namespace}.${opt.linked_metafield.key}`;
+              const pool = this.cpOptionMetaobjectPool[cacheKey];
+              if (!pool) continue;
+              // Set the metaobject_type from the pool if not already set
+              if (!opt.metaobject_type) opt.metaobject_type = pool.type;
+              // Re-resolve: some values the backend marked as resolved may
+              // already be correct, but update missing ones from the pool
+              const resolved = { ...(opt.resolved_values || {}) };
+              const missing = [];
+              for (const val of opt.values) {
+                if (!resolved[val] && pool.objects[val]) {
+                  resolved[val] = pool.objects[val];
+                } else if (!resolved[val]) {
+                  missing.push(val);
+                }
+              }
+              opt.resolved_values = resolved;
+              opt.missing_values = missing;
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to detect product options:', err);
+        this.cpError = 'Failed to detect product options.';
+      } finally {
+        this.cpDetectingOptions = false;
+      }
+    },
+
+    cpOptionLinkKey(optIdx) {
+      const opt = this.cpDetectedOptions[optIdx];
+      if (opt && opt.linked_metafield) {
+        return opt.linked_metafield.namespace + '.' + opt.linked_metafield.key;
+      }
+      return '';
+    },
+
+    async cpSetOptionLink(optIdx, selectValue) {
+      const opt = this.cpDetectedOptions[optIdx];
+      if (!opt) return;
+      this.cpLinkSearch[optIdx] = '';
+      if (!selectValue) {
+        // Unlink
+        opt.linked_metafield = null;
+        opt.metaobject_type = null;
+        opt.resolved_values = {};
+        opt.missing_values = [];
+        return;
+      }
+
+      const [ns, ...keyParts] = selectValue.split('.');
+      const key = keyParts.join('.');
+      opt.linked_metafield = { namespace: ns, key: key };
+
+      // Load metaobject pool for this definition (cached)
+      const pool = await this._cpLoadMetaobjectPool(ns, key);
+      if (pool) {
+        opt.metaobject_type = pool.type;
+        // Resolve current values against the pool
+        const resolved = {};
+        const missing = [];
+        for (const val of opt.values) {
+          if (pool.objects[val]) {
+            resolved[val] = pool.objects[val];
+          } else {
+            missing.push(val);
+          }
+        }
+        opt.resolved_values = resolved;
+        opt.missing_values = missing;
+      } else {
+        // Fallback: mark all as missing
+        opt.metaobject_type = null;
+        opt.resolved_values = {};
+        opt.missing_values = [...opt.values];
+      }
+    },
+
+    async _cpLoadMetaobjectPool(namespace, key) {
+      const cacheKey = `${namespace}.${key}`;
+      if (this.cpOptionMetaobjectPool[cacheKey]) {
+        return this.cpOptionMetaobjectPool[cacheKey];
+      }
+      try {
+        const resp = await fetch('/product-tools/definition-metaobjects/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ namespace, key }),
+        });
+        const data = await resp.json();
+        if (data.metaobject_type && data.metaobjects) {
+          const objects = {};
+          for (const mo of data.metaobjects) {
+            objects[mo.displayName] = mo.gid;
+          }
+          const pool = { type: data.metaobject_type, objects };
+          this.cpOptionMetaobjectPool[cacheKey] = pool;
+          return pool;
+        }
+      } catch (err) {
+        console.error('Failed to load metaobject pool for', cacheKey, err);
+      }
+      return null;
+    },
+
+    // ── Step 3: Value editing helpers ───────────────────────────
+
+    // Option name → variant field mapping
+    _cpOptionFieldMap: { 'Farve': 'color', 'Størrelse': 'size' },
+
+    cpStartRename(optIdx, valIdx, val) {
+      this.cpEditingValue = { optIdx, valIdx, text: val };
+    },
+
+    cpCancelRename() {
+      this.cpEditingValue = { optIdx: null, valIdx: null, text: '' };
+    },
+
+    cpConfirmRename(optIdx, valIdx, oldVal) {
+      const newVal = (this.cpEditingValue.text || '').trim();
+      this.cpEditingValue = { optIdx: null, valIdx: null, text: '' };
+      if (!newVal || newVal === oldVal) return;
+      this.cpRenameOptionValue(optIdx, oldVal, newVal);
+    },
+
+    cpRenameOptionValue(optIdx, oldVal, newVal) {
+      const opt = this.cpDetectedOptions[optIdx];
+      if (!opt) return;
+
+      // 1. Rename in option values list
+      const idx = opt.values.indexOf(oldVal);
+      if (idx >= 0) {
+        opt.values.splice(idx, 1, newVal);
+      }
+
+      // 2. Update resolved / missing tracking
+      if (opt.resolved_values && opt.resolved_values[oldVal]) {
+        opt.resolved_values[newVal] = opt.resolved_values[oldVal];
+        delete opt.resolved_values[oldVal];
+      }
+      if (opt.missing_values) {
+        const mi = opt.missing_values.indexOf(oldVal);
+        if (mi >= 0) opt.missing_values.splice(mi, 1);
+      }
+      // Re-resolve the new value against the metaobject pool
+      if (opt.linked_metafield) {
+        const cacheKey = `${opt.linked_metafield.namespace}.${opt.linked_metafield.key}`;
+        const pool = this.cpOptionMetaobjectPool[cacheKey];
+        if (pool && pool.objects[newVal]) {
+          if (!opt.resolved_values) opt.resolved_values = {};
+          opt.resolved_values[newVal] = pool.objects[newVal];
+        } else if (!opt.resolved_values || !opt.resolved_values[newVal]) {
+          if (!opt.missing_values) opt.missing_values = [];
+          if (!opt.missing_values.includes(newVal)) opt.missing_values.push(newVal);
+        }
+      }
+
+      // 3. Update variant data in cpGroupVariants
+      const fieldMap = { 'Farve': 'color', 'Størrelse': 'size' };
+      const field = fieldMap[opt.name];
+      if (field) {
+        for (const v of this.cpGroupVariants) {
+          if ((v[field] || '').trim() === oldVal) {
+            v[field] = newVal;
+          }
+        }
+      }
+    },
+
+    cpRemoveOptionValue(optIdx, val) {
+      const opt = this.cpDetectedOptions[optIdx];
+      if (!opt) return;
+      opt.values = opt.values.filter(v => v !== val);
+      if (opt.missing_values) {
+        opt.missing_values = opt.missing_values.filter(v => v !== val);
+      }
+      if (opt.resolved_values && opt.resolved_values[val]) {
+        delete opt.resolved_values[val];
+      }
+    },
+
+    cpAddOptionValue(optIdx) {
+      const val = (this.cpNewValueInputs[optIdx] || '').trim();
+      if (!val) return;
+      const opt = this.cpDetectedOptions[optIdx];
+      if (!opt) return;
+      if (opt.values.includes(val)) {
+        this.cpNewValueInputs[optIdx] = '';
+        return;
+      }
+      opt.values.push(val);
+      // Try to resolve against loaded metaobject pool
+      if (opt.linked_metafield) {
+        const cacheKey = `${opt.linked_metafield.namespace}.${opt.linked_metafield.key}`;
+        const pool = this.cpOptionMetaobjectPool[cacheKey];
+        if (pool && pool.objects[val]) {
+          if (!opt.resolved_values) opt.resolved_values = {};
+          opt.resolved_values[val] = pool.objects[val];
+        } else {
+          if (!opt.missing_values) opt.missing_values = [];
+          opt.missing_values.push(val);
+        }
+      }
+      this.cpNewValueInputs[optIdx] = '';
+    },
+
+    // ── Step 3: Metaobject creation modal ───────────────────────
+
+    async cpOpenMetaobjectCreation(optIdx) {
+      const opt = this.cpDetectedOptions[optIdx];
+      if (!opt || !opt.metaobject_type || !opt.missing_values || opt.missing_values.length === 0) return;
+
+      this.cpMoOptionIdx = optIdx;
+      this.cpMoType = opt.metaobject_type;
+      this.cpMoError = null;
+      this.cpMoCreating = true; // show loading state on the button
+      this.cpMoFieldDefs = [];
+      this.cpMoFieldOptions = {};
+      this.cpMoForms = [];
+      this.cpMoDisplayNameKey = null;
+      this.cpMoActiveDropdown = null;
+      this.cpMoColorFieldKey = null;
+      this.cpMoSwatchFieldKey = null;
+
+      // Fetch definition + field options
+      try {
+        const resp = await fetch('/product-tools/metaobject-type-fields/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ metaobject_type: opt.metaobject_type }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpError = data.error;
+          this.cpMoCreating = false;
+          return;
+        }
+
+        this.cpMoFieldDefs = data.fields || [];
+        this.cpMoFieldOptions = data.field_options || {};
+        this.cpMoDisplayNameKey = data.displayNameKey || null;
+
+        // Detect color-like metaobject (has both color + file_reference fields)
+        for (const fd of this.cpMoFieldDefs) {
+          if (fd.type === 'color') this.cpMoColorFieldKey = fd.key;
+          if (fd.type.toLowerCase().includes('file_reference')) this.cpMoSwatchFieldKey = fd.key;
+        }
+        const isColorLike = !!(this.cpMoColorFieldKey || this.cpMoSwatchFieldKey);
+
+        // Build a form for each missing value
+        this.cpMoForms = opt.missing_values.map(name => {
+          const fieldValues = {};
+          const fieldSearches = {};
+          for (const fd of this.cpMoFieldDefs) {
+            const ft = fd.type.toLowerCase();
+            if (ft.includes('list.') && (ft.includes('metaobject_reference') || ft.includes('taxonomy_value_reference'))) {
+              fieldValues[fd.key] = [];
+            } else if (ft.includes('metaobject_reference') || ft.includes('taxonomy_value_reference')) {
+              fieldValues[fd.key] = '';
+            } else if (ft === 'color') {
+              fieldValues[fd.key] = '';
+            } else {
+              fieldValues[fd.key] = '';
+            }
+            fieldSearches[fd.key] = '';
+          }
+          // Pre-fill the display name field
+          if (this.cpMoDisplayNameKey && fieldValues.hasOwnProperty(this.cpMoDisplayNameKey)) {
+            fieldValues[this.cpMoDisplayNameKey] = name;
+          }
+          const form = {
+            name,
+            fieldValues,
+            fieldSearches,
+            created: false,
+            createdGid: null,
+          };
+          // Add swatch halves for color-like metaobjects
+          if (isColorLike) {
+            form.swatchHalves = [
+              { type: 'code', value: '', fileName: '' },
+              { type: 'code', value: '', fileName: '' },
+            ];
+          }
+          return form;
+        });
+
+        this.cpShowMoModal = true;
+      } catch (err) {
+        console.error('Failed to fetch metaobject type details:', err);
+        this.cpError = 'Failed to fetch metaobject definition.';
+      } finally {
+        this.cpMoCreating = false;
+      }
+    },
+
+    cpCancelMoCreation() {
+      this.cpShowMoModal = false;
+      this.cpMoForms = [];
+      this.cpMoActiveDropdown = null;
+    },
+
+    cpMoOpenDropdown(fieldKey, index) {
+      this.cpMoActiveDropdown = `${fieldKey}_${index}`;
+    },
+
+    cpMoGetLabel(gid, fieldKey) {
+      const options = this.cpMoFieldOptions[fieldKey] || [];
+      const opt = options.find(o => o.gid === gid);
+      return opt ? opt.displayName : gid;
+    },
+
+    cpMoFilteredRefOptions(fi, fieldKey) {
+      const options = this.cpMoFieldOptions[fieldKey] || [];
+      const q = (this.cpMoForms[fi]?.fieldSearches?.[fieldKey] || '').toLowerCase();
+      if (!q) return options;
+      return options.filter(o => o.displayName.toLowerCase().includes(q));
+    },
+
+    cpMoToggleRef(fi, fieldKey, gid) {
+      const form = this.cpMoForms[fi];
+      const current = form.fieldValues[fieldKey] || [];
+      const idx = current.indexOf(gid);
+      if (idx >= 0) {
+        form.fieldValues[fieldKey] = current.filter(g => g !== gid);
+      } else {
+        form.fieldValues[fieldKey] = [...current, gid];
+      }
+    },
+
+    cpMoRemoveRef(fi, fieldKey, gid) {
+      const form = this.cpMoForms[fi];
+      form.fieldValues[fieldKey] = (form.fieldValues[fieldKey] || []).filter(g => g !== gid);
+    },
+
+    cpMoSetRef(fi, fieldKey, gid) {
+      const form = this.cpMoForms[fi];
+      form.fieldValues[fieldKey] = gid;
+      this.cpMoActiveDropdown = null;
+    },
+
+    // ── cpMo swatch helpers (mirror of color-creation swatch methods) ──
+
+    cpMoOnSwatchFileChange(fi, halfIdx, event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        this.cpMoForms[fi].swatchHalves[halfIdx].value = e.target.result;
+        this.cpMoForms[fi].swatchHalves[halfIdx].fileName = file.name;
+      };
+      reader.readAsDataURL(file);
+    },
+
+    cpMoClearSwatchFile(fi, halfIdx) {
+      this.cpMoForms[fi].swatchHalves[halfIdx].value = '';
+      this.cpMoForms[fi].swatchHalves[halfIdx].fileName = '';
+    },
+
+    cpMoHasSwatchInput(form) {
+      return form.swatchHalves.some(h => !!h.value);
+    },
+
+    cpMoNeedsDiagonalSwatch(form) {
+      const h0 = form.swatchHalves[0];
+      const h1 = form.swatchHalves[1];
+      const h0Active = !!h0.value;
+      const h1Active = !!h1.value;
+      return h0Active && h1Active && (h0.value !== h1.value || h0.type !== h1.type);
+    },
+
+    cpMoSwatchPreviewStyle(form) {
+      const h0 = form.swatchHalves[0];
+      const h1 = form.swatchHalves[1];
+      const h0Active = !!h0.value;
+      const h1Active = !!h1.value;
+
+      const resolve = (h) => {
+        if (h.type === 'code') return h.value || '#ccc';
+        if (h.type === 'image' && h.value) return `url(${h.value})`;
+        return '#ccc';
+      };
+
+      if (h0Active && h1Active && (h0.value !== h1.value || h0.type !== h1.type)) {
+        const c0 = resolve(h0);
+        const c1 = resolve(h1);
+        const isBg0 = c0.startsWith('url(');
+        const isBg1 = c1.startsWith('url(');
+        if (!isBg0 && !isBg1) {
+          return { background: `linear-gradient(to bottom right, ${c0} 50%, ${c1} 50%)` };
+        }
+        return { background: `linear-gradient(to bottom right, ${isBg0 ? '#888' : c0} 50%, ${isBg1 ? '#666' : c1} 50%)` };
+      }
+
+      if (h0Active) {
+        const c = resolve(h0);
+        if (c.startsWith('url(')) return { backgroundImage: c, backgroundSize: 'cover' };
+        return { backgroundColor: c };
+      }
+      if (h1Active) {
+        const c = resolve(h1);
+        if (c.startsWith('url(')) return { backgroundImage: c, backgroundSize: 'cover' };
+        return { backgroundColor: c };
+      }
+      return { backgroundColor: '#eee' };
+    },
+
+    async cpSubmitMoCreations() {
+      this.cpMoCreating = true;
+      this.cpMoError = null;
+
+      for (const form of this.cpMoForms) {
+        if (form.created) continue;
+
+        // Build fields payload
+        const fields = {};
+        const fileFields = [];
+
+        // ── Handle swatch halves for color-like metaobjects ──
+        if (form.swatchHalves) {
+          const h0 = form.swatchHalves[0];
+          const h1 = form.swatchHalves[1];
+          const h0Active = !!h0.value;
+          const h1Active = !!h1.value;
+          const isDiagonal = h0Active && h1Active && (h0.value !== h1.value || h0.type !== h1.type);
+
+          if (isDiagonal && this.cpMoSwatchFieldKey) {
+            // Generate a diagonal swatch image server-side
+            try {
+              const swatchResp = await fetch('/product-tools/generate-swatch/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  top_left: { type: h0.type, value: h0.value },
+                  bottom_right: { type: h1.type, value: h1.value },
+                }),
+              });
+              const swatchData = await swatchResp.json();
+              if (swatchData.error) {
+                this.cpMoError = `Swatch error for "${form.name}": ${swatchData.error}`;
+                this.cpMoCreating = false;
+                return;
+              }
+              fields[this.cpMoSwatchFieldKey] = swatchData.data_uri;
+              fileFields.push(this.cpMoSwatchFieldKey);
+            } catch (err) {
+              this.cpMoError = `Swatch generation failed for "${form.name}": ${err.message}`;
+              this.cpMoCreating = false;
+              return;
+            }
+          } else if (h0Active || h1Active) {
+            // Single swatch — pick whichever half has a value
+            const active = h0Active ? h0 : h1;
+            if (active.type === 'code' && this.cpMoColorFieldKey) {
+              fields[this.cpMoColorFieldKey] = active.value;
+            } else if (active.type === 'image' && this.cpMoSwatchFieldKey) {
+              fields[this.cpMoSwatchFieldKey] = active.value;
+              fileFields.push(this.cpMoSwatchFieldKey);
+            } else if (active.type === 'code' && this.cpMoSwatchFieldKey) {
+              // Generate a solid-color swatch image
+              try {
+                const swatchResp = await fetch('/product-tools/generate-swatch/', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    top_left: { type: active.type, value: active.value },
+                    bottom_right: { type: active.type, value: active.value },
+                  }),
+                });
+                const swatchData = await swatchResp.json();
+                if (swatchData.error) {
+                  this.cpMoError = `Swatch error for "${form.name}": ${swatchData.error}`;
+                  this.cpMoCreating = false;
+                  return;
+                }
+                fields[this.cpMoSwatchFieldKey] = swatchData.data_uri;
+                fileFields.push(this.cpMoSwatchFieldKey);
+              } catch (err) {
+                this.cpMoError = `Swatch generation failed for "${form.name}": ${err.message}`;
+                this.cpMoCreating = false;
+                return;
+              }
+            }
+          }
+        }
+
+        // ── Remaining fields (references, text, non-swatch color/file) ──
+        for (const fd of this.cpMoFieldDefs) {
+          // Skip fields already handled by swatch
+          if (form.swatchHalves && (fd.key === this.cpMoColorFieldKey || fd.key === this.cpMoSwatchFieldKey)) continue;
+
+          const val = form.fieldValues[fd.key];
+          if (val === '' || val === null || val === undefined) continue;
+          if (Array.isArray(val) && val.length === 0) continue;
+
+          const ft = fd.type.toLowerCase();
+          if (ft.includes('file_reference')) {
+            fields[fd.key] = val;
+            fileFields.push(fd.key);
+          } else if (Array.isArray(val)) {
+            fields[fd.key] = JSON.stringify(val);
+          } else {
+            fields[fd.key] = val;
+          }
+        }
+
+        try {
+          const resp = await fetch('/product-tools/create-color/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              metaobject_type: this.cpMoType,
+              display_name: form.name,
+              fields,
+              file_fields: fileFields,
+            }),
+          });
+          const data = await resp.json();
+
+          if (data.errors && data.errors.length > 0) {
+            this.cpMoError = `Error creating "${form.name}": ${data.errors.join(', ')}`;
+            this.cpMoCreating = false;
+            return;
+          }
+          if (data.metaobject) {
+            form.created = true;
+            form.createdGid = data.metaobject.id;
+          } else {
+            this.cpMoError = `Failed to create "${form.name}" — no metaobject returned.`;
+            this.cpMoCreating = false;
+            return;
+          }
+        } catch (err) {
+          this.cpMoError = `Network error creating "${form.name}": ${err.message}`;
+          this.cpMoCreating = false;
+          return;
+        }
+      }
+
+      this.cpMoCreating = false;
+
+      // Auto-proceed if all created
+      if (this.cpMoAllCreated) {
+        this.cpFinishMoCreation();
+      }
+    },
+
+    cpFinishMoCreation() {
+      // Update the parent option's resolved/missing values
+      const optIdx = this.cpMoOptionIdx;
+      const opt = this.cpDetectedOptions[optIdx];
+      if (opt) {
+        if (!opt.resolved_values) opt.resolved_values = {};
+        for (const form of this.cpMoForms) {
+          if (form.created && form.createdGid) {
+            opt.resolved_values[form.name] = form.createdGid;
+
+            // Also add to the cached metaobject pool so future additions resolve
+            if (opt.linked_metafield) {
+              const cacheKey = `${opt.linked_metafield.namespace}.${opt.linked_metafield.key}`;
+              const pool = this.cpOptionMetaobjectPool[cacheKey];
+              if (pool) {
+                pool.objects[form.name] = form.createdGid;
+              }
+            }
+          }
+        }
+        // Keep any previously-missing values that weren't in this batch
+        const createdNames = new Set(this.cpMoForms.filter(f => f.created).map(f => f.name));
+        opt.missing_values = (opt.missing_values || []).filter(v => !createdNames.has(v));
+      }
+
+      this.cpShowMoModal = false;
+      this.cpMoForms = [];
+      this.cpMoActiveDropdown = null;
+    },
+
+    async createProductOptions() {
+      // If no options detected, skip directly to variants
+      if (this.cpDetectedOptions.length === 0) {
+        this._goToVariantsStep();
+        return;
+      }
+
+      this.cpCreatingOptions = true;
+      this.cpError = null;
+
+      // Build the options payload for creation
+      const optionsPayload = this.cpDetectedOptions.map(opt => {
+        const values = opt.values.map(valName => {
+          const entry = { name: valName };
+          // For linked options, include the resolved metaobject GID
+          if (opt.linked_metafield && opt.resolved_values && opt.resolved_values[valName]) {
+            entry.linkedMetafieldValue = opt.resolved_values[valName];
+          }
+          return entry;
+        });
+
+        // For linked options, filter to only values that have resolved GIDs
+        const filteredValues = opt.linked_metafield
+          ? values.filter(v => v.linkedMetafieldValue)
+          : values;
+
+        return {
+          name: opt.name,
+          values: filteredValues.length > 0 ? filteredValues : values,
+          linked_metafield: opt.linked_metafield || null,
+        };
+      }).filter(opt => opt.values.length > 0);
+
+      if (optionsPayload.length === 0) {
+        this.cpCreatingOptions = false;
+        this._goToVariantsStep();
+        return;
+      }
+
+      try {
+        const resp = await fetch('/product-tools/create-product-options/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            product_id: this.cpCreatedProductId,
+            options: optionsPayload,
+          }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpError = data.error;
+        } else if (data.errors && data.errors.length > 0) {
+          this.cpError = 'Option errors: ' + data.errors.join(', ');
+        } else {
+          this._goToVariantsStep();
+        }
+      } catch (err) {
+        console.error('Failed to create product options:', err);
+        this.cpError = 'Failed to create product options.';
+      } finally {
+        this.cpCreatingOptions = false;
+      }
+    },
+
+    _goToVariantsStep() {
+      // Initialize color image URL inputs
+      this.cpColorImageUrls = {};
+      for (const color of this.cpUniqueColors) {
+        this.cpColorImageUrls[color] = '';
+      }
+      this.cpStep = 4;
+      this.cpError = null;
+    },
+
+    cpSelectAllVariants() {
+      this.cpSelectedSkus = this.cpGroupVariants.map(v => v.sku);
+    },
+
+    cpDeselectAllVariants() {
+      this.cpSelectedSkus = [];
+    },
+
+    cpToggleAllVariants() {
+      if (this.cpAllVariantsSelected) {
+        this.cpDeselectAllVariants();
+      } else {
+        this.cpSelectAllVariants();
+      }
+    },
+
+    cpToggleVariant(sku) {
+      if (this.cpSelectedSkus.includes(sku)) {
+        this.cpSelectedSkus = this.cpSelectedSkus.filter(s => s !== sku);
+      } else {
+        this.cpSelectedSkus = [...this.cpSelectedSkus, sku];
+      }
+    },
+
+    async cpAddVariants() {
+      if (this.cpSelectedSkus.length === 0) return;
+
+      const selected = this.cpGroupVariants.filter(v =>
+        this.cpSelectedSkus.includes(v.sku)
+      );
+
+      // Tag each variant with the created product ID
+      for (const v of selected) {
+        v.shopify_product_id = this.cpCreatedProductId;
+        v.shopify_product_title = this.cpTitle;
+      }
+
+      // Build color_image_urls mapping: { product_id: { color: url } }
+      const colorImages = {};
+      for (const [color, url] of Object.entries(this.cpColorImageUrls)) {
+        if (!url || !url.trim()) continue;
+        if (!colorImages[this.cpCreatedProductId]) colorImages[this.cpCreatedProductId] = {};
+        colorImages[this.cpCreatedProductId][color] = url.trim();
+      }
+
+      this.addingVariants = true;
+      this.cpError = null;
+      this.cpVariantResult = null;
+
+      try {
+        const response = await fetch('/product-tools/add-variants/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            variants: selected,
+            color_image_urls: colorImages,
+          }),
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          this.cpVariantResult = { errors: [data.error || 'Failed to add variants.'], created: [] };
+        } else {
+          this.cpVariantResult = data;
+          // Remove successfully added SKUs from the list
+          if (data.created && data.created.length > 0) {
+            const createdSkus = new Set(data.created.map(c => c.sku));
+            this.cpGroupVariants = this.cpGroupVariants.filter(v => !createdSkus.has(v.sku));
+            this.cpSelectedSkus = this.cpSelectedSkus.filter(s => !createdSkus.has(s));
+            // Also remove from new_products
+            if (this.result && this.result.new_products) {
+              this.result.new_products = this.result.new_products.filter(p => !createdSkus.has(p.sku));
+            }
+          }
+        }
+      } catch (err) {
+        this.cpVariantResult = { errors: ['An error occurred while adding variants.'], created: [] };
+        console.error(err);
+      } finally {
+        this.addingVariants = false;
+      }
+    },
+
+    // ── Step 5: Image management ────────────────────────────────
+
+    async cpGoToImagesStep() {
+      this.cpStep = 5;
+      this.cpImgError = null;
+      this.cpImgSuccess = null;
+      this.cpImgUrlInput = '';
+      this.cpImages = [];
+      this.cpImgLoading = true;
+      try {
+        const resp = await fetch('/product-tools/product-images/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ product_id: this.cpCreatedProductId }),
+        });
+        const data = await resp.json();
+        this.cpImages = data.images || [];
+      } catch (err) {
+        console.error('Failed to fetch images:', err);
+        this.cpImgError = 'Failed to load existing images.';
+      } finally {
+        this.cpImgLoading = false;
+      }
+    },
+
+    async cpAddImagesByUrl() {
+      const urls = this.cpImgUrlInput.split('\n').map(u => u.trim()).filter(Boolean);
+      if (urls.length === 0) return;
+      this.cpImgUploading = true;
+      this.cpImgError = null;
+      this.cpImgSuccess = null;
+      try {
+        const resp = await fetch('/product-tools/add-product-images/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ product_id: this.cpCreatedProductId, image_urls: urls }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpImgError = data.error;
+        } else {
+          this.cpImages = data.images || [];
+          this.cpImgUrlInput = '';
+          if (data.errors && data.errors.length > 0) {
+            this.cpImgError = data.errors.join(', ');
+          } else {
+            this.cpImgSuccess = `Added ${urls.length} image(s).`;
+          }
+        }
+      } catch (err) {
+        console.error('Failed to add images:', err);
+        this.cpImgError = 'Failed to add images.';
+      } finally {
+        this.cpImgUploading = false;
+      }
+    },
+
+    async cpAddImagesByFile(event) {
+      const files = event.target.files;
+      if (!files || files.length === 0) return;
+
+      // Upload files to a temporary hosting endpoint is not available,
+      // so convert to object URLs and use the Shopify staged upload flow.
+      // For simplicity, we’ll read files as data URIs, but Shopify’s
+      // productCreateMedia needs a URL.  We’ll use the stagedUploadsCreate
+      // approach.
+      this.cpImgUploading = true;
+      this.cpImgError = null;
+      this.cpImgSuccess = null;
+
+      try {
+        // Step 1: Request staged upload targets from Shopify
+        const stageResp = await fetch('/product-tools/stage-image-uploads/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            files: Array.from(files).map(f => ({
+              filename: f.name,
+              mimeType: f.type || 'image/jpeg',
+              fileSize: f.size,
+            })),
+          }),
+        });
+        const stageData = await stageResp.json();
+        if (stageData.error) {
+          this.cpImgError = stageData.error;
+          return;
+        }
+
+        const targets = stageData.targets || [];
+        const uploadedUrls = [];
+
+        // Step 2: Upload each file to its staged target
+        for (let i = 0; i < targets.length; i++) {
+          const target = targets[i];
+          const file = files[i];
+          const formData = new FormData();
+          for (const param of target.parameters) {
+            formData.append(param.name, param.value);
+          }
+          formData.append('file', file);
+
+          const uploadResp = await fetch(target.url, {
+            method: 'POST',
+            body: formData,
+          });
+          if (uploadResp.ok) {
+            uploadedUrls.push(target.resourceUrl);
+          } else {
+            console.error('Staged upload failed for', file.name);
+          }
+        }
+
+        // Step 3: Attach uploaded files to the product
+        if (uploadedUrls.length > 0) {
+          const addResp = await fetch('/product-tools/add-product-images/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ product_id: this.cpCreatedProductId, image_urls: uploadedUrls }),
+          });
+          const addData = await addResp.json();
+          if (addData.error) {
+            this.cpImgError = addData.error;
+          } else {
+            this.cpImages = addData.images || [];
+            if (addData.errors && addData.errors.length > 0) {
+              this.cpImgError = addData.errors.join(', ');
+            } else {
+              this.cpImgSuccess = `Uploaded ${uploadedUrls.length} image(s).`;
+            }
+          }
+        } else {
+          this.cpImgError = 'No files were uploaded successfully.';
+        }
+      } catch (err) {
+        console.error('Failed to upload images:', err);
+        this.cpImgError = 'Failed to upload images.';
+      } finally {
+        this.cpImgUploading = false;
+        // Reset file input
+        event.target.value = '';
+      }
+    },
+
+    // Drag-and-drop reordering
+    cpImageDragStart(idx, event) {
+      this.cpDragIdx = idx;
+      event.dataTransfer.effectAllowed = 'move';
+    },
+
+    cpImageDragEnter(idx) {
+      if (this.cpDragIdx === null || this.cpDragIdx === idx) return;
+      // Re-arrange in the local array for visual feedback
+      const images = [...this.cpImages];
+      const [dragged] = images.splice(this.cpDragIdx, 1);
+      images.splice(idx, 0, dragged);
+      this.cpImages = images;
+      this.cpDragIdx = idx;
+    },
+
+    async cpImageDragEnd() {
+      const dragIdx = this.cpDragIdx;
+      this.cpDragIdx = null;
+      // Persist the new order to Shopify
+      const mediaIds = this.cpImages.map(img => img.id);
+      try {
+        const resp = await fetch('/product-tools/reorder-product-images/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ product_id: this.cpCreatedProductId, media_ids: mediaIds }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpImgError = data.error;
+        } else if (data.errors && data.errors.length > 0) {
+          this.cpImgError = data.errors.join(', ');
+        } else {
+          this.cpImages = data.images || [];
+        }
+      } catch (err) {
+        console.error('Failed to reorder images:', err);
+      }
+    },
+
+    async cpDeleteImage(mediaId) {
+      this.cpImgError = null;
+      this.cpImgSuccess = null;
+      this.cpImgUploading = true;
+      try {
+        const resp = await fetch('/product-tools/delete-product-image/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ product_id: this.cpCreatedProductId, media_ids: [mediaId] }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpImgError = data.error;
+        } else {
+          this.cpImages = data.images || [];
+        }
+      } catch (err) {
+        console.error('Failed to delete image:', err);
+        this.cpImgError = 'Failed to delete image.';
+      } finally {
+        this.cpImgUploading = false;
+      }
+    },
+  },
+}).mount('#app');
+</script>
+{% endblock %}
