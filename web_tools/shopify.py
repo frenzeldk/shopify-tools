@@ -2774,7 +2774,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
 
         variant_input = {
             "barcode": v.get("ean", "") or v.get("barcode", ""),
-            "inventoryPolicy": "DENY",
+            "inventoryPolicy": v.get("inventory_policy", "DENY"),
             "inventoryItem": {
                 "sku": v.get("sku", ""),
                 "tracked": True,

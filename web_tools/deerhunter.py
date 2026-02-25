@@ -145,6 +145,10 @@ def dh_products_to_vendor_format(products: Dict) -> List[Dict]:
                 if size_key in colour_level_keys:
                     continue
                 size_data = colour_group[size_key]
+                # "På lager" (In stock) → allow overselling (CONTINUE)
+                stock_val = (size_data.get("Stock") or "").strip()
+                inv_policy = "CONTINUE" if stock_val == "På lager" else "DENY"
+
                 vendor_products.append({
                     "sku": size_data["SKU"],
                     "ean": size_data["EAN"],
@@ -162,6 +166,7 @@ def dh_products_to_vendor_format(products: Dict) -> List[Dict]:
                     "weight": size_data["Weight"],
                     "weight_unit": size_data["Weight_Unit"],
                     "country_of_origin": size_data["Country_of_origin"],
+                    "inventory_policy": inv_policy,
                     "variant_image_url": variant_image_url,
                     "color_images": color_images,
                     # Product-level fields for description generation
