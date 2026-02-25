@@ -380,6 +380,32 @@ button:active:not(:disabled) {
 
 .modal-dialog-wide {
   max-width: 850px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: hidden;     /* the step-content div scrolls, not the dialog */
+}
+
+/* Inside the wide (multi-step) modal the step content should scroll
+   while the navigation buttons stay visible at the bottom.            */
+.modal-dialog-wide > .step-indicator {
+  flex-shrink: 0;
+}
+
+.modal-dialog-wide > div:not(.step-indicator) {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.modal-dialog-wide .modal-actions {
+  position: sticky;
+  bottom: 0;
+  background: white;
+  margin-left: -1.5rem;   /* stretch to full dialog width over the padding */
+  margin-right: -1.5rem;
+  padding: 1rem 1.5rem 0.25rem;
+  border-top: 1px solid #eee;
+  z-index: 1;
 }
 
 .modal-dialog h3 {

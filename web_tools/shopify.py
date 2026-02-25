@@ -4012,6 +4012,55 @@ def fetch_category_metafields(category_id: str) -> list[dict]:
         pinned_types,
     )
 
+    # ── Build a comprehensive type map from ALL metafield definitions
+    #    (not just pinned) so we can detect list types for standard
+    #    taxonomy attributes that Shopify does not mark as "pinned".
+    all_defs_query = gql("""
+    query allMetafieldDefs($ownerType: MetafieldOwnerType!, $after: String) {
+        metafieldDefinitions(ownerType: $ownerType, first: 250, after: $after) {
+            edges {
+                node {
+                    name
+                    key
+                    namespace
+                    type { name }
+                }
+            }
+            pageInfo { hasNextPage endCursor }
+        }
+    }
+    """)
+
+    all_def_types: dict[str, str] = {}   # name OR key → type name
+    after = None
+    while True:
+        all_result = _execute(
+            all_defs_query,
+            variable_values={"ownerType": "PRODUCT", "after": after},
+        )
+        for edge in all_result.get("metafieldDefinitions", {}).get("edges", []):
+            node = edge["node"]
+            name = node.get("name", "")
+            key = node.get("key", "")
+            type_name = (node.get("type") or {}).get("name", "")
+            if name:
+                existing = all_def_types.get(name, "")
+                if not existing or type_name.startswith("list."):
+                    all_def_types[name] = type_name
+            if key:
+                existing = all_def_types.get(key, "")
+                if not existing or type_name.startswith("list."):
+                    all_def_types[key] = type_name
+        page_info = all_result.get("metafieldDefinitions", {}).get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+        after = page_info.get("endCursor")
+
+    _log.info(
+        "fetch_category_metafields: all_def_types has %d entries",
+        len(all_def_types),
+    )
+
     if pinned_names:
         metafields = [
             mf for mf in all_metafields
@@ -4037,9 +4086,15 @@ def fetch_category_metafields(category_id: str) -> list[dict]:
         )
         metafields = all_metafields
 
-    # Attach is_list flag based on pinned definition type
+    # Attach is_list flag — check the comprehensive map first (covers
+    # standard taxonomy definitions), then fall back to pinned_types.
     for mf in metafields:
-        type_name = pinned_types.get(mf["handle"], "") or pinned_types.get(mf["name"], "")
+        type_name = (
+            all_def_types.get(mf["name"], "")
+            or all_def_types.get(mf["handle"], "")
+            or pinned_types.get(mf["name"], "")
+            or pinned_types.get(mf["handle"], "")
+        )
         mf["is_list"] = type_name.startswith("list.")
         _log.info(
             "fetch_category_metafields: attr name=%s handle=%s → type=%s is_list=%s",
@@ -4272,16 +4327,68 @@ def set_product_category_metafields(
         # value is a TaxonomyValue GID, resolve it to the matching
         # Metaobject GID so that Shopify accepts the write.
         if "metaobject" in type_name and "TaxonomyValue" in value:
-            resolved = _resolve_taxonomy_to_metaobject(defn, value_name)
-            if resolved:
-                value = resolved
+            # For list types with multiple values, resolve each one individually
+            if is_list:
+                try:
+                    parsed_values = json.loads(value)
+                    if isinstance(parsed_values, list):
+                        # Split value_name by comma to get individual names
+                        individual_names = [n.strip() for n in value_name.split(",")]
+                        resolved_ids = []
+                        all_resolved = True
+                        for i, single_val in enumerate(parsed_values):
+                            single_name = individual_names[i] if i < len(individual_names) else ""
+                            if "TaxonomyValue" in single_val:
+                                resolved = _resolve_taxonomy_to_metaobject(defn, single_name)
+                                if resolved:
+                                    resolved_ids.append(resolved)
+                                else:
+                                    _log.warning(
+                                        "set_product_category_metafields: could not resolve "
+                                        "TaxonomyValue to metaobject for '%s' value '%s', skipping",
+                                        attr_name, single_name,
+                                    )
+                                    all_resolved = False
+                                    break
+                            else:
+                                resolved_ids.append(single_val)
+                        if not all_resolved:
+                            continue
+                        value = json.dumps(resolved_ids)
+                    else:
+                        # Single value wrapped — resolve normally
+                        resolved = _resolve_taxonomy_to_metaobject(defn, value_name)
+                        if resolved:
+                            value = resolved
+                        else:
+                            _log.warning(
+                                "set_product_category_metafields: could not resolve "
+                                "TaxonomyValue to metaobject for '%s', skipping",
+                                attr_name,
+                            )
+                            continue
+                except (json.JSONDecodeError, TypeError):
+                    resolved = _resolve_taxonomy_to_metaobject(defn, value_name)
+                    if resolved:
+                        value = resolved
+                    else:
+                        _log.warning(
+                            "set_product_category_metafields: could not resolve "
+                            "TaxonomyValue to metaobject for '%s', skipping",
+                            attr_name,
+                        )
+                        continue
             else:
-                _log.warning(
-                    "set_product_category_metafields: could not resolve "
-                    "TaxonomyValue to metaobject for '%s', skipping",
-                    attr_name,
-                )
-                continue
+                resolved = _resolve_taxonomy_to_metaobject(defn, value_name)
+                if resolved:
+                    value = resolved
+                else:
+                    _log.warning(
+                        "set_product_category_metafields: could not resolve "
+                        "TaxonomyValue to metaobject for '%s', skipping",
+                        attr_name,
+                    )
+                    continue
 
         if is_list:
             # Value should be a JSON array.  If it already is one, use it;
