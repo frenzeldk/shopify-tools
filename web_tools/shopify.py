@@ -1,6 +1,8 @@
+import asyncio
 import json
 import os
 import logging
+import threading
 from gql import Client, gql
 from gql.transport.aiohttp import AIOHTTPTransport
 
@@ -12,6 +14,76 @@ __SHOPIFY_HEADER__ = {"X-Shopify-Access-Token": os.environ.get("SHOPIFY_API_KEY"
 
 __transport__ = AIOHTTPTransport(url=__SHOPIFY_URL__, headers=__SHOPIFY_HEADER__, ssl=True)
 __gql_client__ = Client(transport=__transport__, fetch_schema_from_transport=True)
+
+# ── Async permanent session management ────────────────────────────
+# A dedicated asyncio event loop runs in a background daemon thread.
+# The GQL client connects once with ``reconnecting=True`` so the
+# underlying aiohttp session is reused across all queries and
+# automatically reconnects on transient failures.
+#
+# All GraphQL calls go through ``_execute()`` which submits work to
+# that loop, keeping every public function synchronous so Flask +
+# waitress and APScheduler can call them without ceremony.
+
+_loop: asyncio.AbstractEventLoop | None = None
+_loop_thread: threading.Thread | None = None
+__session__ = None  # will hold the ReconnectingAsyncClientSession
+
+
+def _run_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Entry-point for the background event-loop thread."""
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+
+async def _connect() -> None:
+    global __session__
+    __session__ = await __gql_client__.connect_async(reconnecting=True)
+
+
+async def _close() -> None:
+    await __gql_client__.close_async()
+
+
+def init_session() -> None:
+    """Start the background event loop and open the persistent GQL session."""
+    global _loop, _loop_thread
+    _loop = asyncio.new_event_loop()
+    _loop_thread = threading.Thread(
+        target=_run_event_loop, args=(_loop,), daemon=True, name="gql-event-loop",
+    )
+    _loop_thread.start()
+    future = asyncio.run_coroutine_threadsafe(_connect(), _loop)
+    future.result(timeout=30)
+    _log.info("GQL async permanent session connected")
+
+
+def shutdown_session() -> None:
+    """Close the GQL session and stop the background event loop."""
+    global _loop, _loop_thread, __session__
+    if _loop is not None and _loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(_close(), _loop)
+        try:
+            future.result(timeout=10)
+        except Exception:
+            _log.warning("Error closing GQL session", exc_info=True)
+        _loop.call_soon_threadsafe(_loop.stop)
+    if _loop_thread is not None:
+        _loop_thread.join(timeout=5)
+    __session__ = None
+    _log.info("GQL async permanent session closed")
+
+
+def _execute(document, *, variable_values=None):
+    """Execute a GQL query/mutation on the persistent async session.
+
+    This is the **only** way GraphQL operations should be dispatched.
+    It submits the coroutine to the dedicated event loop and blocks
+    the calling thread until the result is available.
+    """
+    coro = __session__.execute(document, variable_values=variable_values)
+    future = asyncio.run_coroutine_threadsafe(coro, _loop)
+    return future.result()
 
 
 # ── Global color rename map ──────────────────────────────────────
@@ -82,7 +154,7 @@ def fetch_missing_inventory():
     cursor = None
     while True:
         variables = {"cursor": cursor, "query":"inventory_quantity:<0"}
-        result = __gql_client__.execute(__VARIANTS_QUERY__, variable_values=variables)
+        result = _execute(__VARIANTS_QUERY__, variable_values=variables)
         variants = result["productVariants"]["edges"]
         for v in variants:
             node = v["node"]
@@ -181,7 +253,7 @@ def calculate_brand_inventory_value(brand_name: str = None) -> float:
     
     while True:
         variables = {"cursor": cursor, "query": query}
-        result = __gql_client__.execute(__INVENTORY_VALUE_QUERY__, variable_values=variables)
+        result = _execute(__INVENTORY_VALUE_QUERY__, variable_values=variables)
         variants = result["productVariants"]["edges"]
         
         for v in variants:
@@ -244,7 +316,7 @@ def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
         """)
         
         variables = {"query": f'sku:"{sku}"'}
-        result = __gql_client__.execute(query, variable_values=variables)
+        result = _execute(query, variable_values=variables)
         
         variants = result.get("productVariants", {}).get("edges", [])
         if not variants:
@@ -281,7 +353,7 @@ def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
         }
         """)
         
-        product_result = __gql_client__.execute(product_query, variable_values={"variantId": variant_id})
+        product_result = _execute(product_query, variable_values={"variantId": variant_id})
         product_id = product_result.get("productVariant", {}).get("product", {}).get("id")
         
         if not product_id:
@@ -295,7 +367,7 @@ def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
             }]
         }
         
-        mutation_result = __gql_client__.execute(mutation, variable_values=mutation_variables)
+        mutation_result = _execute(mutation, variable_values=mutation_variables)
         
         user_errors = mutation_result.get("productVariantsBulkUpdate", {}).get("userErrors", [])
         if user_errors:
@@ -342,7 +414,7 @@ def fetch_order_customer(order_name: str) -> dict | None:
 
     # Shopify search accepts the order name with or without the '#'.
     variables = {"orderQuery": f"name:{order_name}"}
-    result = __gql_client__.execute(query, variable_values=variables)
+    result = _execute(query, variable_values=variables)
 
     edges = result.get("orders", {}).get("edges", [])
     if not edges:
@@ -549,7 +621,7 @@ def fetch_shopify_products_by_vendors(vendors: list[str]) -> dict[str, dict]:
 
         while has_next_page:
             variables = {"query": f'vendor:"{vendor}"', "after": after_cursor}
-            result = __gql_client__.execute(_PRODUCTS_QUERY, variable_values=variables)
+            result = _execute(_PRODUCTS_QUERY, variable_values=variables)
 
             for edge in result["products"]["edges"]:
                 node = edge["node"]
@@ -567,7 +639,7 @@ def fetch_shopify_products_by_vendors(vendors: list[str]) -> dict[str, dict]:
                 v_cursor = v_page_info.get("endCursor")
 
                 while v_has_next:
-                    v_result = __gql_client__.execute(
+                    v_result = _execute(
                         _VARIANT_PAGE_QUERY,
                         variable_values={"productId": product_id, "after": v_cursor},
                     )
@@ -712,7 +784,7 @@ def _discover_color_metaobject_type_from_definitions() -> str | None:
     }
     """)
     try:
-        result = __gql_client__.execute(defs_query)
+        result = _execute(defs_query)
         for edge in result.get("metaobjectDefinitions", {}).get("edges", []):
             mo_type = edge["node"].get("type", "")
             if "color" in mo_type.lower() or "colour" in mo_type.lower():
@@ -756,7 +828,7 @@ def _discover_color_metaobject_type(product_id: str) -> str | None:
         }
     }
     """)
-    result = __gql_client__.execute(product_info_query, variable_values={"id": product_id})
+    result = _execute(product_info_query, variable_values={"id": product_id})
     options = result.get("product", {}).get("options", [])
 
     sample_gid = None
@@ -792,7 +864,7 @@ def _discover_color_metaobject_type(product_id: str) -> str | None:
         metaobject(id: $id) { type }
     }
     """)
-    type_result = __gql_client__.execute(type_query, variable_values={"id": sample_gid})
+    type_result = _execute(type_query, variable_values={"id": sample_gid})
     mo_type = type_result.get("metaobject", {}).get("type")
     log.info("_discover_color_metaobject_type: type = %s", mo_type)
     return mo_type
@@ -829,7 +901,7 @@ def fetch_color_metaobject_definition(product_id: str) -> dict:
         }
     }
     """)
-    result = __gql_client__.execute(
+    result = _execute(
         product_info_query, variable_values={"id": product_id}
     )
     options = result.get("product", {}).get("options", [])
@@ -871,7 +943,7 @@ def fetch_color_metaobject_definition(product_id: str) -> dict:
             metaobject(id: $id) { type }
         }
         """)
-        type_result = __gql_client__.execute(
+        type_result = _execute(
             type_query, variable_values={"id": sample_gid}
         )
         mo_type = (type_result.get("metaobject") or {}).get("type")
@@ -908,7 +980,7 @@ def fetch_color_metaobject_definition(product_id: str) -> dict:
                 }
             }
             """)
-            def_result_a = __gql_client__.execute(
+            def_result_a = _execute(
                 def_query_a, variable_values={"id": sample_gid}
             )
             field_defs = (
@@ -944,7 +1016,7 @@ def fetch_color_metaobject_definition(product_id: str) -> dict:
                 }
             }
             """)
-            def_result_b = __gql_client__.execute(def_query_b)
+            def_result_b = _execute(def_query_b)
             for edge in def_result_b.get("metaobjectDefinitions", {}).get("edges", []):
                 node = edge.get("node", {})
                 if node.get("type") == mo_type:
@@ -969,7 +1041,7 @@ def fetch_color_metaobject_definition(product_id: str) -> dict:
                 }
             }
             """)
-            fields_result = __gql_client__.execute(
+            fields_result = _execute(
                 fields_query, variable_values={"id": sample_gid}
             )
             raw_fields = (fields_result.get("metaobject") or {}).get("fields", [])
@@ -1074,7 +1146,7 @@ def fetch_metaobject_options_for_field(field_validations: list[dict]) -> list[di
     }
     """)
     try:
-        node_result = __gql_client__.execute(node_query, variable_values={"id": ref_def_gid})
+        node_result = _execute(node_query, variable_values={"id": ref_def_gid})
         ref_type = (node_result.get("node") or {}).get("type")
     except Exception as exc:
         log.exception(
@@ -1108,7 +1180,7 @@ def fetch_metaobject_options_for_field(field_validations: list[dict]) -> list[di
     options = []
     after = None
     while True:
-        result = __gql_client__.execute(list_query, variable_values={"type": ref_type, "after": after})
+        result = _execute(list_query, variable_values={"type": ref_type, "after": after})
         for edge in result.get("metaobjects", {}).get("edges", []):
             node = edge["node"]
             options.append({
@@ -1165,7 +1237,7 @@ def fetch_taxonomy_attribute_options(
         options: list[dict] = []
         after: str | None = None
         while True:
-            result = __gql_client__.execute(
+            result = _execute(
                 val_query, variable_values={"id": attr_gid, "after": after},
             )
             node = result.get("node") or {}
@@ -1231,7 +1303,7 @@ def fetch_taxonomy_attribute_options(
         }
         """)
         try:
-            cat_result = __gql_client__.execute(
+            cat_result = _execute(
                 cat_query, variable_values={"id": category_id},
             )
             cat_node = cat_result.get("node") or {}
@@ -1299,7 +1371,7 @@ def fetch_taxonomy_attribute_options(
     scan_after: str | None = None
     while True:
         try:
-            result = __gql_client__.execute(
+            result = _execute(
                 scan_query, variable_values={"after": scan_after},
             )
         except Exception as exc:
@@ -1412,7 +1484,7 @@ def fetch_metaobject_type_details(
         }
     }
     """)
-    def_result = __gql_client__.execute(def_query)
+    def_result = _execute(def_query)
 
     matched = None
     for edge in def_result.get("metaobjectDefinitions", {}).get("edges", []):
@@ -1612,7 +1684,7 @@ def check_existing_color_metaobjects(product_id: str, color_names: list[str]) ->
     all_names: dict[str, str] = {}
     after = None
     while True:
-        result = __gql_client__.execute(list_query, variable_values={"type": mo_type, "after": after})
+        result = _execute(list_query, variable_values={"type": mo_type, "after": after})
         for edge in result.get("metaobjects", {}).get("edges", []):
             node = edge["node"]
             dn = (node.get("displayName") or "").strip()
@@ -1648,7 +1720,7 @@ def check_existing_color_metaobjects(product_id: str, color_names: list[str]) ->
     """)
     after = None
     while True:
-        result = __gql_client__.execute(
+        result = _execute(
             variants_query, variable_values={"id": product_id, "after": after}
         )
         for edge in result.get("product", {}).get("variants", {}).get("edges", []):
@@ -1718,7 +1790,7 @@ def check_linked_option_values(product_id: str, variants_data: list[dict]) -> di
         }
     }
     """)
-    result = __gql_client__.execute(
+    result = _execute(
         product_info_query, variable_values={"id": product_id}
     )
     options = result.get("product", {}).get("options", [])
@@ -1817,7 +1889,7 @@ def check_linked_option_values(product_id: str, variants_data: list[dict]) -> di
             continue
 
         # Discover metaobject type
-        type_result = __gql_client__.execute(
+        type_result = _execute(
             type_query, variable_values={"id": sample_gid}
         )
         mo_type = (type_result.get("metaobject") or {}).get("type")
@@ -1834,7 +1906,7 @@ def check_linked_option_values(product_id: str, variants_data: list[dict]) -> di
         all_display_names: set[str] = set()
         after = None
         while True:
-            lr = __gql_client__.execute(
+            lr = _execute(
                 list_query, variable_values={"type": mo_type, "after": after}
             )
             for edge in lr.get("metaobjects", {}).get("edges", []):
@@ -1898,7 +1970,7 @@ def create_option_value_metaobject(metaobject_type: str, display_name: str) -> d
         }
     }
     """)
-    def_result = __gql_client__.execute(def_query)
+    def_result = _execute(def_query)
     display_key = None
     for edge in def_result.get("metaobjectDefinitions", {}).get("edges", []):
         node = edge["node"]
@@ -1981,7 +2053,7 @@ def create_color_metaobject(
              display_name, metaobject_type, handle, field_inputs)
 
     try:
-        result = __gql_client__.execute(
+        result = _execute(
             create_mutation,
             variable_values={"metaobject": metaobject_input},
         )
@@ -2123,7 +2195,7 @@ def upload_swatch_bytes_to_shopify(
     }
     """)
 
-    result = __gql_client__.execute(create_mutation, variable_values={
+    result = _execute(create_mutation, variable_values={
         "files": [{
             "originalSource": resource_url,
             "filename": filename,
@@ -2155,7 +2227,7 @@ def upload_swatch_bytes_to_shopify(
     """)
     for attempt in range(15):
         time.sleep(2)
-        poll_result = __gql_client__.execute(poll_query, variable_values={"ids": [file_gid]})
+        poll_result = _execute(poll_query, variable_values={"ids": [file_gid]})
         nodes = poll_result.get("nodes", [])
         if nodes and nodes[0]:
             status = nodes[0].get("fileStatus", "PROCESSING")
@@ -2209,7 +2281,7 @@ def upload_file_to_shopify(source_url: str, alt: str = "") -> str:
     }
     """)
 
-    result = __gql_client__.execute(create_mutation, variable_values={
+    result = _execute(create_mutation, variable_values={
         "files": [{
             "originalSource": source_url,
             "filename": filename,
@@ -2250,7 +2322,7 @@ def upload_file_to_shopify(source_url: str, alt: str = "") -> str:
     max_attempts = 15
     for attempt in range(max_attempts):
         time.sleep(2)
-        poll_result = __gql_client__.execute(poll_query, variable_values={"ids": [file_gid]})
+        poll_result = _execute(poll_query, variable_values={"ids": [file_gid]})
         nodes = poll_result.get("nodes", [])
         if nodes and nodes[0]:
             status = nodes[0].get("fileStatus", "PROCESSING")
@@ -2304,7 +2376,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
         }
     }
     """)
-    location_result = __gql_client__.execute(location_query)
+    location_result = _execute(location_query)
     location_edges = location_result.get("locations", {}).get("edges", [])
     if not location_edges:
         return {"created": [], "errors": ["No inventory locations found in Shopify"]}
@@ -2346,7 +2418,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
         }
     }
     """)
-    product_info = __gql_client__.execute(
+    product_info = _execute(
         product_info_query, variable_values={"id": product_id}
     )
     product_data = product_info.get("product", {})
@@ -2554,7 +2626,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
             }
         }
         """)
-        type_result = __gql_client__.execute(type_query, variable_values={"id": sample_gid})
+        type_result = _execute(type_query, variable_values={"id": sample_gid})
         mo_type = type_result.get("metaobject", {}).get("type")
         if not mo_type:
             log.warning("_fetch_metaobject_gids: could not determine metaobject type from %s", sample_gid)
@@ -2581,7 +2653,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
         names_needed = set(display_names)
         after = None
         while True:
-            list_result = __gql_client__.execute(
+            list_result = _execute(
                 list_query, variable_values={"type": mo_type, "after": after}
             )
             for edge in list_result.get("metaobjects", {}).get("edges", []):
@@ -2632,7 +2704,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
             values_to_add = [{"name": val} for val in missing]
 
         try:
-            result = __gql_client__.execute(update_option_mutation, variable_values={
+            result = _execute(update_option_mutation, variable_values={
                 "productId": product_id,
                 "option": {"id": info["id"]},
                 "optionValuesToAdd": values_to_add,
@@ -2869,7 +2941,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
             log.info(
                 "add_variants: updating %d seed variant(s)", len(update_inputs)
             )
-            update_result = __gql_client__.execute(
+            update_result = _execute(
                 update_mutation,
                 variable_values={
                     "productId": product_id,
@@ -2970,7 +3042,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
         }
         if strategy:
             variables["strategy"] = strategy
-        result = __gql_client__.execute(mutation, variable_values=variables)
+        result = _execute(mutation, variable_values=variables)
 
         log.info("add_variants: raw result = %s", result)
 
@@ -3079,7 +3151,7 @@ def _reuse_existing_color_images(
     created_ids = {cv["id"] for cv in created_variants}
     after = None
     while True:
-        result = __gql_client__.execute(
+        result = _execute(
             variants_query, variable_values={"id": product_id, "after": after}
         )
         for edge in result.get("product", {}).get("variants", {}).get("edges", []):
@@ -3151,7 +3223,7 @@ def _reuse_existing_color_images(
             for vid in variant_ids
         ]
         try:
-            update_result = __gql_client__.execute(update_mutation, variable_values={
+            update_result = _execute(update_mutation, variable_values={
                 "productId": product_id,
                 "variants": variant_updates,
             })
@@ -3254,7 +3326,7 @@ def _attach_color_images(
         return errors
 
     try:
-        media_result = __gql_client__.execute(create_media_mutation, variable_values={
+        media_result = _execute(create_media_mutation, variable_values={
             "productId": product_id,
             "media": media_inputs,
         })
@@ -3321,7 +3393,7 @@ def _attach_color_images(
         ]
 
         try:
-            update_result = __gql_client__.execute(update_variants_mutation, variable_values={
+            update_result = _execute(update_variants_mutation, variable_values={
                 "productId": product_id,
                 "variants": variant_updates,
             })
@@ -3383,7 +3455,7 @@ def create_staged_uploads(files: list[dict]) -> list[dict]:
         for f in files
     ]
 
-    result = __gql_client__.execute(mutation, variable_values={"input": stage_inputs})
+    result = _execute(mutation, variable_values={"input": stage_inputs})
 
     user_errors = result.get("stagedUploadsCreate", {}).get("userErrors", [])
     if user_errors:
@@ -3436,7 +3508,7 @@ def fetch_product_images(product_id: str) -> list[dict]:
     images: list[dict] = []
     after = None
     while True:
-        result = __gql_client__.execute(
+        result = _execute(
             query, variable_values={"id": product_id, "after": after}
         )
         edges = result.get("product", {}).get("media", {}).get("edges", [])
@@ -3523,7 +3595,7 @@ def add_product_images(
                 batch_start + 1, batch_start + len(batch), len(media_inputs),
             )
 
-            result = __gql_client__.execute(mutation, variable_values={
+            result = _execute(mutation, variable_values={
                 "productId": product_id,
                 "media": batch,
             })
@@ -3585,7 +3657,7 @@ def reorder_product_images(product_id: str, media_ids: list[str]) -> dict:
     moves = [{"id": mid, "newPosition": str(i)} for i, mid in enumerate(media_ids)]
 
     try:
-        result = __gql_client__.execute(mutation, variable_values={
+        result = _execute(mutation, variable_values={
             "id": product_id,
             "moves": moves,
         })
@@ -3629,7 +3701,7 @@ def delete_product_image(product_id: str, media_ids: list[str]) -> dict:
     """)
 
     try:
-        result = __gql_client__.execute(mutation, variable_values={
+        result = _execute(mutation, variable_values={
             "productId": product_id,
             "mediaIds": media_ids,
         })
@@ -3692,7 +3764,7 @@ def fetch_shopify_taxonomy() -> list[dict]:
     roots: list[dict] = []
     after = None
     while True:
-        result = __gql_client__.execute(root_query, variable_values={"after": after})
+        result = _execute(root_query, variable_values={"after": after})
         edges = result.get("taxonomy", {}).get("categories", {}).get("edges", [])
         for edge in edges:
             node = edge["node"]
@@ -3736,7 +3808,7 @@ def fetch_shopify_taxonomy() -> list[dict]:
     for root in roots:
         after = None
         while True:
-            result = __gql_client__.execute(
+            result = _execute(
                 desc_query,
                 variable_values={"rootId": root["id"], "after": after},
             )
@@ -3784,7 +3856,7 @@ def fetch_all_product_tags() -> list[str]:
     tags: set[str] = set()
     cursor: str | None = None
     while True:
-        result = __gql_client__.execute(query, variable_values={"cursor": cursor})
+        result = _execute(query, variable_values={"cursor": cursor})
         for edge in result.get("products", {}).get("edges", []):
             for tag in edge["node"].get("tags", []):
                 tags.add(tag)
@@ -3845,7 +3917,7 @@ def fetch_category_metafields(category_id: str) -> list[dict]:
     }
     """)
 
-    result = __gql_client__.execute(query, variable_values={"id": category_id})
+    result = _execute(query, variable_values={"id": category_id})
     cat_data = result.get("node")
     if not cat_data:
         _log.warning("fetch_category_metafields: category %s not found", category_id)
@@ -3896,7 +3968,7 @@ def fetch_category_metafields(category_id: str) -> list[dict]:
     pinned_types: dict[str, str] = {}   # key OR name → type name (e.g. "list.taxonomy_value_reference")
     after = None
     while True:
-        defs_result = __gql_client__.execute(
+        defs_result = _execute(
             defs_query,
             variable_values={
                 "ownerType": "PRODUCT",
@@ -4022,7 +4094,7 @@ def set_product_category_metafields(
     all_defs: list[dict] = []
     after = None
     while True:
-        result = __gql_client__.execute(
+        result = _execute(
             defs_query,
             variable_values={"ownerType": "PRODUCT", "after": after},
         )
@@ -4076,7 +4148,7 @@ def set_product_category_metafields(
             }
         }
         """)
-        result = __gql_client__.execute(type_q, variable_values={"id": metaobj_def_id})
+        result = _execute(type_q, variable_values={"id": metaobj_def_id})
         type_handle = (result.get("node") or {}).get("type")
         if not type_handle:
             _log.warning(
@@ -4099,7 +4171,7 @@ def set_product_category_metafields(
         target = value_name.strip().lower()
         mo_after: str | None = None
         while True:
-            result = __gql_client__.execute(
+            result = _execute(
                 mo_query,
                 variable_values={"type": type_handle, "after": mo_after},
             )
@@ -4256,7 +4328,7 @@ def set_product_category_metafields(
     """)
 
     try:
-        result = __gql_client__.execute(
+        result = _execute(
             set_mutation,
             variable_values={"metafields": metafields_to_set},
         )
@@ -4549,7 +4621,7 @@ def fetch_metaobjects_for_definition(
         }
     }
     """)
-    def_result = __gql_client__.execute(
+    def_result = _execute(
         def_query,
         variable_values={"ownerType": "PRODUCT", "ns": namespace, "key": key},
     )
@@ -4601,7 +4673,7 @@ def fetch_metaobjects_for_definition(
         }
     }
     """)
-    node_result = __gql_client__.execute(
+    node_result = _execute(
         node_query, variable_values={"id": ref_def_gid},
     )
     mo_type = (node_result.get("node") or {}).get("type")
@@ -4630,7 +4702,7 @@ def fetch_metaobjects_for_definition(
     metaobjects: list[dict] = []
     after = None
     while True:
-        res = __gql_client__.execute(
+        res = _execute(
             list_query, variable_values={"type": mo_type, "after": after},
         )
         for edge in res.get("metaobjects", {}).get("edges", []):
@@ -4688,7 +4760,7 @@ def _fetch_linkable_metafield_definitions() -> list[dict]:
     defs: list[dict] = []
     after = None
     while True:
-        result = __gql_client__.execute(
+        result = _execute(
             query, variable_values={"ownerType": "PRODUCT", "after": after},
         )
         for edge in result.get("metafieldDefinitions", {}).get("edges", []):
@@ -4737,7 +4809,7 @@ def _find_reference_option_template(vendor: str) -> dict:
     }
     """)
 
-    result = __gql_client__.execute(
+    result = _execute(
         query, variable_values={"query": f'vendor:"{vendor}"'},
     )
 
@@ -4763,7 +4835,7 @@ def _find_reference_option_template(vendor: str) -> dict:
                             metaobject(id: $id) { type }
                         }
                         """)
-                        type_result = __gql_client__.execute(
+                        type_result = _execute(
                             type_query, variable_values={"id": val},
                         )
                         metaobject_type = (
@@ -4812,7 +4884,7 @@ def _resolve_metaobject_values(
     all_mos: dict[str, str] = {}
     after = None
     while True:
-        res = __gql_client__.execute(
+        res = _execute(
             list_query, variable_values={"type": metaobject_type, "after": after},
         )
         for edge in res.get("metaobjects", {}).get("edges", []):
@@ -4933,7 +5005,7 @@ def create_product_options(
                 ns, key, len(gids), opt["name"],
             )
             try:
-                mf_result = __gql_client__.execute(
+                mf_result = _execute(
                     mf_mutation,
                     variable_values={"metafields": [metafield_input]},
                 )
@@ -5013,7 +5085,7 @@ def create_product_options(
     """)
 
     try:
-        result = __gql_client__.execute(mutation, variable_values={
+        result = _execute(mutation, variable_values={
             "productId": product_id,
             "options": options_input,
         })
@@ -5069,7 +5141,7 @@ def fetch_all_publications() -> list[dict]:
         }
     }
     """)
-    result = __gql_client__.execute(query)
+    result = _execute(query)
     pubs = []
     for edge in result.get("publications", {}).get("edges", []):
         node = edge["node"]
@@ -5129,7 +5201,7 @@ def create_shopify_product(
     """)
 
     try:
-        result = __gql_client__.execute(create_mutation, variable_values={
+        result = _execute(create_mutation, variable_values={
             "product": product_input,
             "media": [],
         })
@@ -5156,7 +5228,7 @@ def create_shopify_product(
             }
             """)
             try:
-                pub_result = __gql_client__.execute(publish_mutation, variable_values={
+                pub_result = _execute(publish_mutation, variable_values={
                     "id": product_id,
                     "input": publication_inputs,
                 })

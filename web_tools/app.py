@@ -7,7 +7,9 @@ Does not push POs to Shopify, as this is not supported by the Shopify API.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
+import signal
 import sqlite3
 import os
 import sys
@@ -23,6 +25,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from shopify import (
+    init_session as init_gql_session,
+    shutdown_session as shutdown_gql_session,
     fetch_missing_inventory as fetch_purchase_order_data,
     calculate_brand_inventory_value,
     update_variant_barcode,
@@ -279,6 +283,12 @@ def create_app() -> Flask:
     with application.app_context():
         init_db()
     
+    # ── GQL async permanent session ───────────────────────────────
+    # Open a single persistent GraphQL connection with automatic
+    # reconnection.  Must happen before the scheduler fires any
+    # Shopify-dependent jobs.
+    init_gql_session()
+
     # Initialize background scheduler for cache updates.
     # IMPORTANT: Shopify rate-limits concurrent API requests, so all
     # Shopify-dependent refreshes are funnelled through a single
@@ -1704,7 +1714,7 @@ def _fetch_cleanup_variants():
     """Fetch sold-out and archived variants from Shopify (helper for async execution)."""
     from gql import gql
     
-    gql_client = shopify_module.__gql_client__
+    _gql_execute = shopify_module._execute
     sold_out_skus = []
     archived_skus = []
     
@@ -1743,7 +1753,7 @@ def _fetch_cleanup_variants():
         """)
         
         variables = {"after": after_cursor}
-        result = gql_client.execute(query, variable_values=variables)
+        result = _gql_execute(query, variable_values=variables)
         products = result.get("products", {}).get("edges", [])
         
         for product in products:
@@ -1794,7 +1804,7 @@ def _fetch_cleanup_variants():
                 """)
                 
                 variants_variables = {"productId": product_id, "after": variants_after}
-                variants_result = gql_client.execute(variants_query, variable_values=variants_variables)
+                variants_result = _gql_execute(variants_query, variable_values=variants_variables)
                 variant_edges = variants_result.get("product", {}).get("variants", {}).get("edges", [])
                 
                 for variant in variant_edges:
@@ -1849,7 +1859,7 @@ def _fetch_cleanup_variants():
         """)
         
         variables = {"after": after_cursor}
-        result = gql_client.execute(query, variable_values=variables)
+        result = _gql_execute(query, variable_values=variables)
         products = result.get("products", {}).get("edges", [])
         
         for product in products:
@@ -1895,7 +1905,7 @@ def _fetch_cleanup_variants():
                 """)
                 
                 variants_variables = {"productId": product_id, "after": variants_after}
-                variants_result = gql_client.execute(variants_query, variable_values=variants_variables)
+                variants_result = _gql_execute(variants_query, variable_values=variants_variables)
                 variant_edges = variants_result.get("product", {}).get("variants", {}).get("edges", [])
                 
                 for variant in variant_edges:
@@ -1919,4 +1929,16 @@ def _fetch_cleanup_variants():
 
 if __name__ == "__main__":
     app = create_app()
+
+    # Ensure the GQL session is closed cleanly on interpreter exit
+    # (covers normal shutdown and SIGTERM from systemd).
+    atexit.register(shutdown_gql_session)
+
+    def _handle_sigterm(signum, frame):
+        """Translate SIGTERM into SystemExit so atexit handlers run."""
+        logger.info("Received SIGTERM – shutting down")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     serve(app, host="0.0.0.0", port=int(os.getenv("WAITRESS_PORT", 8000)), url_scheme='https')
