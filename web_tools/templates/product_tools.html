@@ -22,17 +22,18 @@
         <select id="vendor-select" v-model="selectedVendor">
           <option value="" disabled>Select a vendor…</option>
           <option value="entirem">Entire M (Helikon-Tex / Tac Maven)</option>
+          <option value="deerhunter">Deerhunter</option>
         </select>
       </div>
 
-      <div class="input-group">
+      <div class="input-group" v-if="vendorNeedsCsv">
         <label for="csv-file">Product CSV:</label>
         <input type="file" id="csv-file" accept=".csv,.txt" @change="onFileSelected" ref="csvInput">
         <small v-if="csvFile" class="file-info">📄 [[ csvFile.name ]] ([[ formatFileSize(csvFile.size) ]])</small>
       </div>
     </div>
 
-    <button @click="compareProducts" :disabled="loading || !selectedVendor || !csvFile" class="btn-action btn-compare">
+    <button @click="compareProducts" :disabled="loading || !selectedVendor || (vendorNeedsCsv && !csvFile)" class="btn-action btn-compare">
       <span v-if="!loading">🔍 Compare Products</span>
       <span v-else>Fetching data… (this may take a minute)</span>
     </button>
@@ -808,13 +809,135 @@
         <div v-if="cpError" class="error-message" style="margin-bottom: 1rem;">[[ cpError ]]</div>
 
         <div v-if="cpCategoryMetafields.length > 0" class="cp-metafields-list">
-          <div v-for="mf in cpCategoryMetafields" :key="mf.handle" class="color-creation-card">
+          <div v-for="mf in cpPriorityMetafields" :key="mf.handle" class="color-creation-card">
             <div class="color-creation-header">
               <span class="color-badge color-badge-lg">[[ mf.name ]]</span>
               <small v-if="mf.description" class="tool-description" style="margin:0;">[[ mf.description ]]</small>
             </div>
             <div class="color-creation-fields">
-              <div class="field-group" v-if="mf.values && mf.values.length > 0">
+              <!-- Multi-select for list-type metafields -->
+              <div class="field-group" v-if="mf.values && mf.values.length > 0 && mf.is_list">
+                <div class="searchable-select">
+                  <div class="select-input-wrapper" @click="openDropdown('cpMf_' + mf.handle, 0)">
+                    <div class="select-pills">
+                      <span v-for="selId in (cpMetafieldValues[mf.handle] || [])" :key="selId" class="select-pill">
+                        [[ cpMetafieldValueLabelById(mf.handle, selId) ]]
+                        <span class="pill-remove" @click.stop="cpRemoveMetafieldListValue(mf.handle, selId)">×</span>
+                      </span>
+                      <input
+                        type="text"
+                        v-model="cpMetafieldSearches[mf.handle]"
+                        @input="openDropdown('cpMf_' + mf.handle, 0)"
+                        @focus="openDropdown('cpMf_' + mf.handle, 0)"
+                        :placeholder="(cpMetafieldValues[mf.handle] || []).length > 0 ? '' : 'Search ' + mf.name + '…'"
+                        class="pill-search-input"
+                      >
+                    </div>
+                  </div>
+                  <div v-if="activeDropdown === 'cpMf_' + mf.handle + '_0'" class="select-dropdown">
+                    <div
+                      v-for="val in filteredMetafieldValues(mf.handle)"
+                      :key="val.id"
+                      @mousedown.prevent="cpToggleMetafieldListValue(mf.handle, val.id)"
+                      :class="['select-option', { selected: (cpMetafieldValues[mf.handle] || []).includes(val.id) }]">
+                      <span class="option-check">[[ (cpMetafieldValues[mf.handle] || []).includes(val.id) ? '✓' : '' ]]</span>
+                      [[ val.name ]]
+                    </div>
+                    <div v-if="filteredMetafieldValues(mf.handle).length === 0" class="select-option disabled">
+                      No matching values
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="field-group" v-else-if="mf.values && mf.values.length > 0">
+                <div class="searchable-select">
+                  <div class="select-input-wrapper" @click="openDropdown('cpMf_' + mf.handle, 0)">
+                    <div class="select-pills">
+                      <span v-if="cpMetafieldValues[mf.handle]" class="select-pill">
+                        [[ cpMetafieldValueLabel(mf.handle) ]]
+                        <span class="pill-remove" @click.stop="cpMetafieldValues[mf.handle] = ''">×</span>
+                      </span>
+                      <input
+                        type="text"
+                        v-model="cpMetafieldSearches[mf.handle]"
+                        @input="openDropdown('cpMf_' + mf.handle, 0)"
+                        @focus="openDropdown('cpMf_' + mf.handle, 0)"
+                        :placeholder="cpMetafieldValues[mf.handle] ? '' : 'Search ' + mf.name + '…'"
+                        class="pill-search-input"
+                      >
+                    </div>
+                  </div>
+                  <div v-if="activeDropdown === 'cpMf_' + mf.handle + '_0'" class="select-dropdown">
+                    <div
+                      v-for="val in filteredMetafieldValues(mf.handle)"
+                      :key="val.id"
+                      @mousedown.prevent="cpMetafieldValues[mf.handle] = val.id; activeDropdown = null"
+                      :class="['select-option', { selected: cpMetafieldValues[mf.handle] === val.id }]">
+                      <span class="option-check">[[ cpMetafieldValues[mf.handle] === val.id ? '✓' : '' ]]</span>
+                      [[ val.name ]]
+                    </div>
+                    <div v-if="filteredMetafieldValues(mf.handle).length === 0" class="select-option disabled">
+                      No matching values
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="field-group">
+                <input type="text" v-model="cpMetafieldValues[mf.handle]" class="cp-input" :placeholder="mf.name + '…'">
+              </div>
+            </div>
+          </div>
+
+          <!-- Show more / Show less toggle for remaining metafields -->
+          <div v-if="cpOtherMetafields.length > 0" style="margin: 0.75rem 0;">
+            <button @click="cpShowAllMetafields = !cpShowAllMetafields" class="btn-sm btn-outline" type="button" style="font-size: 0.85rem;">
+              <span v-if="!cpShowAllMetafields">Show [[ cpOtherMetafields.length ]] more metafield(s) ▼</span>
+              <span v-else>Hide extra metafields ▲</span>
+            </button>
+          </div>
+
+          <div v-for="mf in cpOtherMetafields" v-show="cpShowAllMetafields" :key="mf.handle" class="color-creation-card">
+            <div class="color-creation-header">
+              <span class="color-badge color-badge-lg">[[ mf.name ]]</span>
+              <small v-if="mf.description" class="tool-description" style="margin:0;">[[ mf.description ]]</small>
+            </div>
+            <div class="color-creation-fields">
+              <!-- Multi-select for list-type metafields -->
+              <div class="field-group" v-if="mf.values && mf.values.length > 0 && mf.is_list">
+                <div class="searchable-select">
+                  <div class="select-input-wrapper" @click="openDropdown('cpMf_' + mf.handle, 0)">
+                    <div class="select-pills">
+                      <span v-for="selId in (cpMetafieldValues[mf.handle] || [])" :key="selId" class="select-pill">
+                        [[ cpMetafieldValueLabelById(mf.handle, selId) ]]
+                        <span class="pill-remove" @click.stop="cpRemoveMetafieldListValue(mf.handle, selId)">×</span>
+                      </span>
+                      <input
+                        type="text"
+                        v-model="cpMetafieldSearches[mf.handle]"
+                        @input="openDropdown('cpMf_' + mf.handle, 0)"
+                        @focus="openDropdown('cpMf_' + mf.handle, 0)"
+                        :placeholder="(cpMetafieldValues[mf.handle] || []).length > 0 ? '' : 'Search ' + mf.name + '…'"
+                        class="pill-search-input"
+                      >
+                    </div>
+                  </div>
+                  <div v-if="activeDropdown === 'cpMf_' + mf.handle + '_0'" class="select-dropdown">
+                    <div
+                      v-for="val in filteredMetafieldValues(mf.handle)"
+                      :key="val.id"
+                      @mousedown.prevent="cpToggleMetafieldListValue(mf.handle, val.id)"
+                      :class="['select-option', { selected: (cpMetafieldValues[mf.handle] || []).includes(val.id) }]">
+                      <span class="option-check">[[ (cpMetafieldValues[mf.handle] || []).includes(val.id) ? '✓' : '' ]]</span>
+                      [[ val.name ]]
+                    </div>
+                    <div v-if="filteredMetafieldValues(mf.handle).length === 0" class="select-option disabled">
+                      No matching values
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <!-- Single-select for non-list metafields -->
+              <div class="field-group" v-else-if="mf.values && mf.values.length > 0">
                 <div class="searchable-select">
                   <div class="select-input-wrapper" @click="openDropdown('cpMf_' + mf.handle, 0)">
                     <div class="select-pills">
@@ -1515,6 +1638,7 @@ createApp({
       cpMetafieldSearches: {},
       cpMetafieldOptionMatch: {},
       cpSavingMetafields: false,
+      cpShowAllMetafields: false,
 
       // Step 3: Product Options
       cpDetectedOptions: [],
@@ -1548,6 +1672,7 @@ createApp({
       cpVariantResult: null,
       cpCurrentGroup: null,
       cpColorImageUrls: {},
+      cpSavedColorImages: {},        // color → [url, …] preserved for Step 5 image upload
 
       // Step 5: Images
       cpImages: [],
@@ -1715,6 +1840,9 @@ createApp({
         .filter(c => c.fullName.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
         .slice(0, 50);
     },
+    vendorNeedsCsv() {
+      return this.selectedVendor === 'entirem';
+    },
     filteredProductTags() {
       const q = (this.cpTagSearch || '').toLowerCase().trim();
       const tags = this.allProductTags.filter(t => !this.cpTags.includes(t));
@@ -1727,6 +1855,18 @@ createApp({
     },
     cpMoAllCreated() {
       return this.cpMoForms.length > 0 && this.cpMoForms.every(f => f.created);
+    },
+    cpPriorityMetafields() {
+      const priority = ['age_group', 'target_gender'];
+      return this.cpCategoryMetafields.filter(mf =>
+        priority.some(p => mf.handle.toLowerCase().includes(p) || mf.name.toLowerCase().includes(p.replace('_', ' ')))
+      );
+    },
+    cpOtherMetafields() {
+      const priority = ['age_group', 'target_gender'];
+      return this.cpCategoryMetafields.filter(mf =>
+        !priority.some(p => mf.handle.toLowerCase().includes(p) || mf.name.toLowerCase().includes(p.replace('_', ' ')))
+      );
     },
   },
   mounted() {
@@ -1775,7 +1915,7 @@ createApp({
       return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     },
     async compareProducts() {
-      if (!this.csvFile) {
+      if (this.vendorNeedsCsv && !this.csvFile) {
         this.error = 'Please select a CSV file.';
         return;
       }
@@ -1788,7 +1928,9 @@ createApp({
       try {
         const formData = new FormData();
         formData.append('vendor', this.selectedVendor);
-        formData.append('csv_file', this.csvFile);
+        if (this.csvFile) {
+          formData.append('csv_file', this.csvFile);
+        }
 
         const response = await fetch('/product-tools/compare/', {
           method: 'POST',
@@ -2046,7 +2188,8 @@ createApp({
         const key = `${v.shopify_product_id}::${color}`;
         if (!seen.has(key)) {
           seen.add(key);
-          this.colorImageUrls[key] = '';
+          // Auto-fill with variant image URL if available (e.g. Deerhunter)
+          this.colorImageUrls[key] = v.variant_image_url || '';
         }
       }
 
@@ -2571,6 +2714,7 @@ createApp({
     getVendorDisplayName(vendorKey) {
       const VENDOR_MAP = {
         'entirem': 'Helikon-Tex',
+        'deerhunter': 'Deerhunter',
       };
       return VENDOR_MAP[vendorKey] || vendorKey;
     },
@@ -2582,12 +2726,18 @@ createApp({
       // Determine the vendor from the selected vendor key
       const VENDOR_BRAND_MAP = {
         'entirem': ['Helikon-Tex', 'Tac Maven'],
+        'deerhunter': ['Deerhunter'],
       };
       const brands = VENDOR_BRAND_MAP[this.selectedVendor] || [];
       const vendor = brands.length > 0 ? brands[0] : this.selectedVendor;
 
       this.cpCurrentGroup = group;
-      this.cpTitle = `${vendor} - ${group.baseName}`;
+      // Avoid double-prefixing when baseName already starts with vendor name
+      if (group.baseName.toLowerCase().startsWith(vendor.toLowerCase() + ' - ')) {
+        this.cpTitle = group.baseName;
+      } else {
+        this.cpTitle = `${vendor} - ${group.baseName}`;
+      }
       this.cpVendor = vendor;
       this.cpDescSource = 'url';
       this.cpDescUrl = '';
@@ -2605,6 +2755,7 @@ createApp({
       this.cpMetafieldValues = {};
       this.cpMetafieldSearches = {};
       this.cpMetafieldOptionMatch = {};
+      this.cpShowAllMetafields = false;
       this.cpDetectedOptions = [];
       this.cpDetectingOptions = false;
       this.cpCreatingOptions = false;
@@ -2614,7 +2765,59 @@ createApp({
       this.cpGroupVariants = [...group.variants];
       this.cpSelectedSkus = group.variants.map(v => v.sku);
       this.cpVariantResult = null;
+
+      // Preserve color_images data so Step 5 can use it even after
+      // cpGroupVariants is trimmed post-variant-creation.
+      this.cpSavedColorImages = {};
+      for (const v of group.variants) {
+        const c = (v.color || '').trim();
+        if (c && v.color_images && v.color_images.length > 0 && !this.cpSavedColorImages[c]) {
+          this.cpSavedColorImages[c] = [...v.color_images];
+        }
+      }
+
       this.showCreateProductModal = true;
+
+      // Auto-generate description for Deerhunter products from imported data
+      if (this.selectedVendor === 'deerhunter' && group.variants.length > 0) {
+        const sample = group.variants[0];
+        if (sample.dh_description || sample.dh_composition) {
+          this.cpDescSource = 'manual';
+          this._autoTranslateProductData(sample);
+        }
+      }
+    },
+
+    async _autoTranslateProductData(variant) {
+      this.cpTranslating = true;
+      this.cpError = null;
+      try {
+        const resp = await fetch('/product-tools/translate-product-data/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            product_fields: {
+              product_name: variant.base_name || variant.name || '',
+              composition_type: variant.dh_composition_type || '',
+              composition: variant.dh_composition || '',
+              description: variant.dh_description || '',
+              keywords: variant.dh_keywords || '',
+              season: variant.dh_season || '',
+            },
+          }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpError = data.error;
+        } else {
+          this.cpDescriptionHtml = data.description_html || '';
+        }
+      } catch (err) {
+        this.cpError = 'Failed to auto-generate description.';
+        console.error(err);
+      } finally {
+        this.cpTranslating = false;
+      }
     },
 
     cancelCreateProduct() {
@@ -2744,7 +2947,7 @@ createApp({
             this.cpMetafieldSearches = {};
             this.cpMetafieldOptionMatch = {};
             for (const mf of this.cpCategoryMetafields) {
-              this.cpMetafieldValues[mf.handle] = '';
+              this.cpMetafieldValues[mf.handle] = mf.is_list ? [] : '';
               this.cpMetafieldSearches[mf.handle] = '';
               this.cpMetafieldOptionMatch[mf.handle] = false;
             }
@@ -2769,6 +2972,29 @@ createApp({
       return val ? val.name : this.cpMetafieldValues[handle];
     },
 
+    cpMetafieldValueLabelById(handle, id) {
+      const mf = this.cpCategoryMetafields.find(m => m.handle === handle);
+      if (!mf || !mf.values) return id;
+      const val = mf.values.find(v => v.id === id);
+      return val ? val.name : id;
+    },
+
+    cpToggleMetafieldListValue(handle, id) {
+      const arr = this.cpMetafieldValues[handle] || [];
+      const idx = arr.indexOf(id);
+      if (idx >= 0) {
+        arr.splice(idx, 1);
+      } else {
+        arr.push(id);
+      }
+      this.cpMetafieldValues[handle] = [...arr];
+    },
+
+    cpRemoveMetafieldListValue(handle, id) {
+      const arr = (this.cpMetafieldValues[handle] || []).filter(v => v !== id);
+      this.cpMetafieldValues[handle] = arr;
+    },
+
     filteredMetafieldValues(handle) {
       const mf = this.cpCategoryMetafields.find(m => m.handle === handle);
       if (!mf || !mf.values) return [];
@@ -2782,7 +3008,14 @@ createApp({
       const metafield_values = [];
       for (const mf of this.cpCategoryMetafields) {
         const value = this.cpMetafieldValues[mf.handle];
-        if (value) {
+        if (mf.is_list && Array.isArray(value) && value.length > 0) {
+          // List-type metafield: send the JSON array of GIDs
+          const valNames = value.map(id => {
+            const v = mf.values ? mf.values.find(o => o.id === id) : null;
+            return v ? v.name : '';
+          });
+          metafield_values.push({ name: mf.name, value: JSON.stringify(value), value_name: valNames.join(', ') });
+        } else if (value && !Array.isArray(value)) {
           const valObj = mf.values ? mf.values.find(v => v.id === value) : null;
           metafield_values.push({ name: mf.name, value: value, value_name: valObj ? valObj.name : '' });
         }
@@ -3080,7 +3313,10 @@ createApp({
         const resp = await fetch('/product-tools/metaobject-type-fields/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ metaobject_type: opt.metaobject_type }),
+          body: JSON.stringify({
+            metaobject_type: opt.metaobject_type,
+            category_id: this.cpCategoryId || undefined,
+          }),
         });
         const data = await resp.json();
         if (data.error) {
@@ -3493,10 +3729,13 @@ createApp({
     },
 
     _goToVariantsStep() {
-      // Initialize color image URL inputs
+      // Initialize color image URL inputs, auto-filling from vendor data when available
       this.cpColorImageUrls = {};
       for (const color of this.cpUniqueColors) {
-        this.cpColorImageUrls[color] = '';
+        const variant = this.cpGroupVariants.find(v =>
+          (v.color || '').trim() === color && v.variant_image_url
+        );
+        this.cpColorImageUrls[color] = variant ? variant.variant_image_url : '';
       }
       this.cpStep = 4;
       this.cpError = null;
@@ -3602,11 +3841,128 @@ createApp({
         });
         const data = await resp.json();
         this.cpImages = data.images || [];
+
+        // Auto-add images from vendor data (skipping URLs already on the product)
+        if (Object.keys(this.cpSavedColorImages).length > 0) {
+          await this._cpAutoAddColorImages();
+        }
       } catch (err) {
         console.error('Failed to fetch images:', err);
         this.cpImgError = 'Failed to load existing images.';
       } finally {
         this.cpImgLoading = false;
+      }
+    },
+
+    async _cpAutoAddColorImages() {
+      // Get color order from detected options (Farve/Color option)
+      let colorOrder = Object.keys(this.cpSavedColorImages).sort();
+      if (this.cpDetectedOptions) {
+        const colorOpt = this.cpDetectedOptions.find(o => o.name === 'Farve');
+        if (colorOpt && colorOpt.values) {
+          colorOrder = colorOpt.values;
+        }
+      }
+
+      // Collect URLs that were already uploaded as variant images (Step 4)
+      // so we skip them (Image1 for each color).
+      const variantImageUrls = new Set(
+        Object.values(this.cpColorImageUrls || {}).filter(u => u && u.trim())
+      );
+
+      const allUrls = [];
+      const allAlts = [];  // parallel array: color name for each URL
+      const seenUrls = new Set();
+
+      for (const color of colorOrder) {
+        const images = this.cpSavedColorImages[color];
+        if (!images || images.length === 0) continue;
+        for (const url of images) {
+          if (!url || seenUrls.has(url)) continue;
+          // Skip URLs already uploaded as variant images in Step 4
+          if (variantImageUrls.has(url)) {
+            seenUrls.add(url);
+            continue;
+          }
+          seenUrls.add(url);
+          allUrls.push(url);
+          allAlts.push(color);
+        }
+      }
+
+      if (allUrls.length === 0) return;
+
+      this.cpImgUploading = true;
+      try {
+        const resp = await fetch('/product-tools/add-product-images/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            product_id: this.cpCreatedProductId,
+            image_urls: allUrls,
+            image_alts: allAlts,
+          }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+          this.cpImgError = data.error;
+        } else {
+          this.cpImages = data.images || [];
+          if (data.errors && data.errors.length > 0) {
+            this.cpImgError = data.errors.join(', ');
+          } else {
+            this.cpImgSuccess = `Auto-added ${allUrls.length} image(s) from vendor data.`;
+          }
+
+          // Reorder images so each color's images are grouped together:
+          // Color A variant-img, Color A secondary-imgs, Color B variant-img, …
+          if (this.cpImages.length > 1) {
+            const reorderedIds = [];
+            const processedIds = new Set();
+
+            for (const color of colorOrder) {
+              // Find all images for this color (variant images have alt=color
+              // from Step 4; secondary images have alt=color from this upload)
+              for (const img of this.cpImages) {
+                if (!processedIds.has(img.id) && img.alt === color) {
+                  reorderedIds.push(img.id);
+                  processedIds.add(img.id);
+                }
+              }
+            }
+            // Append any remaining images (no alt text or other colors)
+            for (const img of this.cpImages) {
+              if (!processedIds.has(img.id)) {
+                reorderedIds.push(img.id);
+                processedIds.add(img.id);
+              }
+            }
+
+            // Only reorder if we actually have all images and a new order
+            if (reorderedIds.length === this.cpImages.length) {
+              try {
+                const reorderResp = await fetch('/product-tools/reorder-product-images/', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    product_id: this.cpCreatedProductId,
+                    media_ids: reorderedIds,
+                  }),
+                });
+                const reorderData = await reorderResp.json();
+                if (reorderData.images) {
+                  this.cpImages = reorderData.images;
+                }
+              } catch (reorderErr) {
+                console.error('Failed to reorder images:', reorderErr);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to auto-add images:', err);
+      } finally {
+        this.cpImgUploading = false;
       }
     },
 

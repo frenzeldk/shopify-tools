@@ -14,6 +14,29 @@ __transport__ = AIOHTTPTransport(url=__SHOPIFY_URL__, headers=__SHOPIFY_HEADER__
 __gql_client__ = Client(transport=__transport__, fetch_schema_from_transport=True)
 
 
+# ── Global color rename map ──────────────────────────────────────
+# Vendor color names that must be normalised before any product /
+# variant creation.  Applied automatically in compare_vendor_products()
+# so it works for every vendor.
+#
+# Format:  "Vendor Color Name" → "Shopify Color Name"
+### TODO: fill in mappings as needed
+COLOR_RENAME_MAP: dict[str, str] = {
+    # "DH Elm Green": "Elm Green",
+}
+
+
+def apply_color_renames(products: list[dict]) -> list[dict]:
+    """Apply COLOR_RENAME_MAP to every item's *color* field in-place and return the list."""
+    if not COLOR_RENAME_MAP:
+        return products
+    for item in products:
+        original = (item.get("color") or "").strip()
+        if original in COLOR_RENAME_MAP:
+            item["color"] = COLOR_RENAME_MAP[original]
+    return products
+
+
 # Query all variants for the vendor, including inventory and incoming stock
 __VARIANTS_QUERY__ = gql("""
 query ($cursor: String, $query: String!) {
@@ -610,6 +633,9 @@ def compare_vendor_products(
                 known_barcodes.add(barcode)
                 barcode_to_product[barcode] = product_ref
 
+    # Apply global color renames before any comparison
+    apply_color_renames(vendor_products)
+
     new_products: list[dict] = []
     new_variants: list[dict] = []
 
@@ -1098,46 +1124,104 @@ def fetch_metaobject_options_for_field(field_validations: list[dict]) -> list[di
     return sorted(options, key=lambda x: x["displayName"].lower())
 
 
-def fetch_taxonomy_attribute_options(attribute_handle: str) -> list[dict]:
+def fetch_taxonomy_attribute_options(
+    attribute_handle: str,
+    category_id: str | None = None,
+) -> list[dict]:
     """
     Fetch all values for a Shopify product taxonomy attribute
-    (e.g. 'color', 'pattern') via the taxonomy API.
+    (e.g. 'color', 'pattern', 'size') via the taxonomy API.
 
-    The ``taxonomy`` query exposes ``categories`` whose ``attributes``
-    connection returns a **union** of ``TaxonomyChoiceListAttribute |
-    TaxonomyMeasurementAttribute | TaxonomyAttribute``.  Only
-    ``TaxonomyChoiceListAttribute`` carries a ``values`` connection.
+    Uses a direct ``node()`` query with the attribute's GID to avoid
+    expensive category-scanning queries that hit the query-cost limit.
 
-    We iterate categories until we find a ``TaxonomyChoiceListAttribute``
-    whose lowercased ``name`` matches *attribute_handle* (Shopify does
-    not expose a ``handle`` field on the attribute union types).
+    Falls back to querying the specific *category_id* (if given) or a
+    lightweight category scan to discover the attribute GID, then queries
+    values separately.
 
-    Returns a sorted list of {"gid": "...", "displayName": "..."}.
+    Returns a sorted list of ``{"gid": "...", "displayName": "..."}``.
     """
     import logging
     log = logging.getLogger(__name__)
 
     log.info("fetch_taxonomy_attribute_options: attribute_handle='%s'", attribute_handle)
 
-    # The attribute_handle from the validation (e.g. "color", "pattern")
-    # maps to the lowercased attribute name.
+    def _fetch_values_by_gid(attr_gid: str) -> list[dict]:
+        """Query taxonomy attribute values directly via node()."""
+        val_query = gql("""
+        query taxonomyAttrValues($id: ID!, $after: String) {
+            node(id: $id) {
+                ... on TaxonomyChoiceListAttribute {
+                    id
+                    name
+                    values(first: 250, after: $after) {
+                        nodes { id name }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+        }
+        """)
+        options: list[dict] = []
+        after: str | None = None
+        while True:
+            result = __gql_client__.execute(
+                val_query, variable_values={"id": attr_gid, "after": after},
+            )
+            node = result.get("node") or {}
+            values_data = node.get("values")
+            if not values_data:
+                break
+            for v in values_data.get("nodes", []):
+                options.append({
+                    "gid": v["id"],
+                    "displayName": (v.get("name") or "").strip(),
+                })
+            pi = values_data.get("pageInfo", {})
+            if not pi.get("hasNextPage"):
+                break
+            after = pi.get("endCursor")
+        return sorted(options, key=lambda x: x["displayName"].lower())
+
+    # ── 1. Try direct node query with constructed GID ──────────────
+    gid = f"gid://shopify/TaxonomyChoiceListAttribute/{attribute_handle}"
+    try:
+        options = _fetch_values_by_gid(gid)
+        if options:
+            log.info(
+                "fetch_taxonomy_attribute_options: found %d values for '%s' "
+                "via direct node query",
+                len(options), attribute_handle,
+            )
+            return options
+    except Exception as exc:
+        log.info(
+            "fetch_taxonomy_attribute_options: direct node query for '%s' "
+            "failed: %s — trying category scan fallback",
+            attribute_handle, exc,
+        )
+
+    # ── 2. Fallback: query the specific product category ───────────
+    #    If a category_id is provided, query its attributes directly.
+    #    This is much more reliable than scanning top-level categories.
     target = attribute_handle.lower()
 
-    try:
-        query = gql("""
-        query taxonomyLookup {
-            taxonomy {
-                categories(first: 10) {
-                    nodes {
-                        name
-                        attributes(first: 50) {
-                            nodes {
+    if category_id:
+        log.info(
+            "fetch_taxonomy_attribute_options: querying category %s for "
+            "attribute '%s'",
+            category_id, attribute_handle,
+        )
+        cat_query = gql("""
+        query categoryAttrs($id: ID!) {
+            node(id: $id) {
+                ... on TaxonomyCategory {
+                    attributes(first: 250) {
+                        edges {
+                            node {
                                 ... on TaxonomyChoiceListAttribute {
                                     id
                                     name
-                                    values(first: 250) {
-                                        nodes { id name }
-                                    }
                                 }
                             }
                         }
@@ -1146,88 +1230,127 @@ def fetch_taxonomy_attribute_options(attribute_handle: str) -> list[dict]:
             }
         }
         """)
-        result = __gql_client__.execute(query)
+        try:
+            cat_result = __gql_client__.execute(
+                cat_query, variable_values={"id": category_id},
+            )
+            cat_node = cat_result.get("node") or {}
+            attr_edges = (cat_node.get("attributes") or {}).get("edges", [])
+            for edge in attr_edges:
+                attr = edge.get("node") or {}
+                attr_name = (attr.get("name") or "").lower()
+                attr_gid_handle = (
+                    (attr.get("id") or "").rsplit("/", 1)[-1].lower()
+                )
+                if (attr_name == target or attr_gid_handle == target) and attr.get("id"):
+                    discovered_gid = attr["id"]
+                    log.info(
+                        "fetch_taxonomy_attribute_options: found attribute "
+                        "'%s' (GID=%s) in category %s",
+                        attr.get("name"), discovered_gid, category_id,
+                    )
+                    try:
+                        options = _fetch_values_by_gid(discovered_gid)
+                        if options:
+                            log.info(
+                                "fetch_taxonomy_attribute_options: found "
+                                "%d values for '%s' via category lookup",
+                                len(options), attribute_handle,
+                            )
+                            return options
+                    except Exception as exc:
+                        log.warning(
+                            "fetch_taxonomy_attribute_options: value "
+                            "fetch for '%s' failed: %s",
+                            discovered_gid, exc,
+                        )
+        except Exception as exc:
+            log.warning(
+                "fetch_taxonomy_attribute_options: category query for %s "
+                "failed: %s", category_id, exc,
+            )
+
+    # ── 3. Fallback: scan top-level categories ─────────────────────
+    log.info(
+        "fetch_taxonomy_attribute_options: scanning categories for "
+        "attribute '%s'", attribute_handle,
+    )
+
+    scan_query = gql("""
+    query taxonomyScan($after: String) {
+        taxonomy {
+            categories(first: 50, after: $after) {
+                nodes {
+                    attributes(first: 100) {
+                        nodes {
+                            ... on TaxonomyChoiceListAttribute {
+                                id
+                                name
+                            }
+                        }
+                    }
+                }
+                pageInfo { hasNextPage endCursor }
+            }
+        }
+    }
+    """)
+
+    scan_after: str | None = None
+    while True:
+        try:
+            result = __gql_client__.execute(
+                scan_query, variable_values={"after": scan_after},
+            )
+        except Exception as exc:
+            log.warning(
+                "fetch_taxonomy_attribute_options: category scan failed: %s",
+                exc,
+            )
+            break
+
         categories = (
             result.get("taxonomy", {})
             .get("categories", {})
             .get("nodes", [])
         )
-
         for cat in categories:
             for attr in cat.get("attributes", {}).get("nodes", []):
                 attr_name = (attr.get("name") or "").lower()
-                if attr_name == target:
-                    options = [
-                        {
-                            "gid": n["id"],
-                            "displayName": (n.get("name") or "").strip(),
-                        }
-                        for n in attr.get("values", {}).get("nodes", [])
-                    ]
+                attr_gid_handle = (
+                    (attr.get("id") or "").rsplit("/", 1)[-1].lower()
+                )
+                if (attr_name == target or attr_gid_handle == target) and attr.get("id"):
+                    discovered_gid = attr["id"]
                     log.info(
-                        "fetch_taxonomy_attribute_options: found %d values "
-                        "for '%s' via category '%s'",
-                        len(options), attribute_handle, cat.get("name", "?"),
+                        "fetch_taxonomy_attribute_options: discovered GID "
+                        "'%s' for attribute '%s' — fetching values",
+                        discovered_gid, attribute_handle,
                     )
-                    return sorted(options, key=lambda x: x["displayName"].lower())
+                    try:
+                        options = _fetch_values_by_gid(discovered_gid)
+                        if options:
+                            log.info(
+                                "fetch_taxonomy_attribute_options: found "
+                                "%d values for '%s' via fallback",
+                                len(options), attribute_handle,
+                            )
+                            return options
+                    except Exception as exc:
+                        log.warning(
+                            "fetch_taxonomy_attribute_options: value "
+                            "fetch for '%s' failed: %s",
+                            discovered_gid, exc,
+                        )
 
-        log.info(
-            "fetch_taxonomy_attribute_options: attribute '%s' not found "
-            "in first 10 categories — trying wider search",
-            attribute_handle,
-        )
-
-        # Widen to 250 categories
-        query_wide = gql("""
-        query taxonomyLookupWide {
-            taxonomy {
-                categories(first: 250) {
-                    nodes {
-                        attributes(first: 50) {
-                            nodes {
-                                ... on TaxonomyChoiceListAttribute {
-                                    id
-                                    name
-                                    values(first: 250) {
-                                        nodes { id name }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        """)
-        result_wide = __gql_client__.execute(query_wide)
-        categories_wide = (
-            result_wide.get("taxonomy", {})
+        pi = (
+            result.get("taxonomy", {})
             .get("categories", {})
-            .get("nodes", [])
+            .get("pageInfo", {})
         )
-
-        for cat in categories_wide:
-            for attr in cat.get("attributes", {}).get("nodes", []):
-                attr_name = (attr.get("name") or "").lower()
-                if attr_name == target:
-                    options = [
-                        {
-                            "gid": n["id"],
-                            "displayName": (n.get("name") or "").strip(),
-                        }
-                        for n in attr.get("values", {}).get("nodes", [])
-                    ]
-                    log.info(
-                        "fetch_taxonomy_attribute_options: found %d values "
-                        "for '%s' (wide search)",
-                        len(options), attribute_handle,
-                    )
-                    return sorted(options, key=lambda x: x["displayName"].lower())
-
-    except Exception as exc:
-        log.warning(
-            "fetch_taxonomy_attribute_options: taxonomy query failed: %s", exc,
-        )
+        if not pi.get("hasNextPage"):
+            break
+        scan_after = pi.get("endCursor")
 
     log.error(
         "fetch_taxonomy_attribute_options: could not find values for '%s'",
@@ -1236,10 +1359,16 @@ def fetch_taxonomy_attribute_options(attribute_handle: str) -> list[dict]:
     return []
 
 
-def fetch_metaobject_type_details(metaobject_type: str) -> dict:
+def fetch_metaobject_type_details(
+    metaobject_type: str,
+    category_id: str | None = None,
+) -> dict:
     """
     Fetch the metaobject definition (fields) and reference-field options
     for a given metaobject type string (e.g. ``"component_colors--farve"``).
+
+    *category_id* is an optional taxonomy category GID used to resolve
+    ``taxonomy_value_reference`` fields (e.g. ``size``).
 
     Returns::
 
@@ -1333,14 +1462,23 @@ def fetch_metaobject_type_details(metaobject_type: str) -> dict:
         elif "taxonomy_value_reference" in ft:
             attr_handle = None
             for v in field.get("validations", []):
-                if v.get("name") == "product_taxonomy_attribute_handle":
+                if v.get("name") in (
+                    "product_taxonomy_attribute_handle",
+                    "taxonomy_attribute_handle",
+                ):
                     attr_handle = v.get("value")
                     break
             if attr_handle:
                 field_options[field["key"]] = fetch_taxonomy_attribute_options(
-                    attr_handle
+                    attr_handle, category_id=category_id,
                 )
             else:
+                log.warning(
+                    "fetch_metaobject_type_details: field '%s' has "
+                    "taxonomy_value_reference type but no recognised "
+                    "attribute handle validation (validations=%s)",
+                    field["key"], field.get("validations", []),
+                )
                 field_options[field["key"]] = []
 
     log.info(
@@ -2522,6 +2660,14 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
             ]}
 
     # ── Build variant inputs ─────────────────────────────────────
+    # Sort variants by size so that Shopify receives them in logical order
+    # (2XS → 5XL, then numeric, then anything else).
+    variants_data = sorted(
+        variants_data,
+        key=lambda v: _size_sort_key(_normalize_size(
+            (v.get("size") or "").split("/", 1)[0].strip()
+        )),
+    )
     variant_inputs = []
     for v in variants_data:
         weight = None
@@ -2531,10 +2677,17 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
             except (ValueError, TypeError):
                 pass
 
+        # Determine whether prices need EUR→DKK conversion.
+        # Deerhunter (and potentially other vendors) supply prices
+        # already in DKK, so we must not convert them again.
+        currency = (v.get("currency") or "").strip().upper()
+        is_dkk = currency == "DKK"
+
         cost = None
         if v.get("price"):
             try:
-                cost = round(float(v["price"]) * EUR_TO_DKK, 2)
+                raw_cost = float(v["price"])
+                cost = raw_cost if is_dkk else round(raw_cost * EUR_TO_DKK, 2)
             except (ValueError, TypeError):
                 pass
 
@@ -2556,12 +2709,22 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
 
         # Set the retail price.
         # If the product already carries a non-zero price (existing variants),
-        # reuse it.  Otherwise derive the retail price from the CSV cost.
+        # reuse it.  Otherwise derive the retail price from the MSRP (if
+        # available), falling back to the wholesale/cost price.
+        # When the currency is already DKK, use the price directly without
+        # EUR→DKK conversion or tiered rounding.
         if existing_price is not None and float(existing_price) > 0:
             variant_input["price"] = existing_price
+        elif v.get("msrp"):
+            try:
+                msrp_val = float(v["msrp"])
+                variant_input["price"] = f"{msrp_val:.2f}" if is_dkk else _eur_to_dkk_retail(msrp_val)
+            except (ValueError, TypeError):
+                pass
         elif v.get("price"):
             try:
-                variant_input["price"] = _eur_to_dkk_retail(float(v["price"]))
+                price_val = float(v["price"])
+                variant_input["price"] = f"{price_val:.2f}" if is_dkk else _eur_to_dkk_retail(price_val)
             except (ValueError, TypeError):
                 pass
 
@@ -3298,9 +3461,17 @@ def fetch_product_images(product_id: str) -> list[dict]:
     return images
 
 
-def add_product_images(product_id: str, image_urls: list[str]) -> dict:
+def add_product_images(
+    product_id: str,
+    image_urls: list[str],
+    image_alts: list[str] | None = None,
+) -> dict:
     """
     Add images to a product by URL.
+
+    *image_alts* is an optional list of alt texts, one per URL.  When
+    provided, each image gets the corresponding alt text; otherwise
+    alt is left empty.
 
     Returns::
         {"images": [{"id": "gid://...", "url": "...", "alt": ""}], "errors": [...]}
@@ -3331,31 +3502,50 @@ def add_product_images(product_id: str, image_urls: list[str]) -> dict:
     }
     """)
 
-    media_inputs = [
-        {"originalSource": url, "alt": "", "mediaContentType": "IMAGE"}
-        for url in image_urls
-    ]
+    media_inputs = []
+    for i, url in enumerate(image_urls):
+        alt = image_alts[i] if image_alts and i < len(image_alts) else ""
+        media_inputs.append(
+            {"originalSource": url, "alt": alt, "mediaContentType": "IMAGE"}
+        )
+
+    # Shopify's productCreateMedia limits the number of items per call
+    # (typically 10).  Upload in batches to avoid silently dropping images.
+    BATCH_SIZE = 10
+    all_errors: list[str] = []
+    total_created = 0
 
     try:
-        result = __gql_client__.execute(mutation, variable_values={
-            "productId": product_id,
-            "media": media_inputs,
-        })
+        for batch_start in range(0, len(media_inputs), BATCH_SIZE):
+            batch = media_inputs[batch_start:batch_start + BATCH_SIZE]
+            _log.info(
+                "add_product_images: uploading batch %d-%d of %d",
+                batch_start + 1, batch_start + len(batch), len(media_inputs),
+            )
 
-        errors_list = result.get("productCreateMedia", {}).get("mediaUserErrors", [])
-        errors = [e.get("message", "Unknown error") for e in errors_list]
-        if errors:
-            _log.warning("add_product_images: errors: %s", errors)
+            result = __gql_client__.execute(mutation, variable_values={
+                "productId": product_id,
+                "media": batch,
+            })
 
-        created = result.get("productCreateMedia", {}).get("media", [])
+            errors_list = result.get("productCreateMedia", {}).get("mediaUserErrors", [])
+            batch_errors = [e.get("message", "Unknown error") for e in errors_list]
+            if batch_errors:
+                _log.warning("add_product_images: batch errors: %s", batch_errors)
+                all_errors.extend(batch_errors)
 
-        # Wait briefly for processing, then re-fetch to get final URLs
-        if created:
-            time.sleep(2)
+            created = result.get("productCreateMedia", {}).get("media", [])
+            total_created += len(created)
+
+            # Brief pause between batches to let Shopify process
+            if created:
+                time.sleep(2)
+
+        _log.info("add_product_images: total created=%d errors=%d", total_created, len(all_errors))
 
         return {
             "images": fetch_product_images(product_id),
-            "errors": errors,
+            "errors": all_errors,
         }
     except Exception as exc:
         _log.exception("add_product_images: failed")
@@ -3662,7 +3852,7 @@ def fetch_category_metafields(category_id: str) -> list[dict]:
         return []
 
     attr_edges = (cat_data.get("attributes") or {}).get("edges", [])
-    metafields = []
+    all_metafields = []
     for edge in attr_edges:
         attr = edge["node"]
         # Skip empty nodes (TaxonomyAttribute only has id, no name)
@@ -3672,7 +3862,7 @@ def fetch_category_metafields(category_id: str) -> list[dict]:
         for val_edge in (attr.get("values") or {}).get("edges", []):
             node = val_edge["node"]
             values.append({"id": node["id"], "name": node["name"]})
-        metafields.append({
+        all_metafields.append({
             "id": attr.get("id", ""),
             "name": attr.get("name", ""),
             "handle": attr.get("id", "").rsplit("/", 1)[-1] if attr.get("id") else "",
@@ -3680,9 +3870,105 @@ def fetch_category_metafields(category_id: str) -> list[dict]:
             "values": values,
         })
 
+    # ── Filter to only include attributes that have a *pinned* PRODUCT
+    #    metafield definition in the shop.  Shopify auto-creates standard
+    #    definitions for every taxonomy attribute, so matching by name
+    #    alone keeps everything.  Only *pinned* definitions (those the
+    #    Shopify admin shows for the product's category) should appear.
+    defs_query = gql("""
+    query metafieldDefs($ownerType: MetafieldOwnerType!, $pinnedStatus: MetafieldDefinitionPinnedStatus!, $after: String) {
+        metafieldDefinitions(ownerType: $ownerType, pinnedStatus: $pinnedStatus, first: 250, after: $after) {
+            edges {
+                node {
+                    name
+                    key
+                    namespace
+                    type { name }
+                }
+            }
+            pageInfo { hasNextPage endCursor }
+        }
+    }
+    """)
+
+    pinned_names: set[str] = set()
+    pinned_keys: set[str] = set()
+    pinned_types: dict[str, str] = {}   # key OR name → type name (e.g. "list.taxonomy_value_reference")
+    after = None
+    while True:
+        defs_result = __gql_client__.execute(
+            defs_query,
+            variable_values={
+                "ownerType": "PRODUCT",
+                "pinnedStatus": "PINNED",
+                "after": after,
+            },
+        )
+        for edge in defs_result.get("metafieldDefinitions", {}).get("edges", []):
+            node = edge["node"]
+            pinned_names.add(node["name"])
+            key = node.get("key", "")
+            pinned_keys.add(key)
+            type_name = (node.get("type") or {}).get("name", "")
+            # When multiple definitions share the same name/key, prefer the
+            # list type — that's the one Shopify uses for multi-value
+            # taxonomy attributes like Target Gender or Age Group.
+            if key:
+                existing = pinned_types.get(key, "")
+                if not existing or type_name.startswith("list."):
+                    pinned_types[key] = type_name
+            name = node["name"]
+            existing = pinned_types.get(name, "")
+            if not existing or type_name.startswith("list."):
+                pinned_types[name] = type_name
+        page_info = defs_result.get("metafieldDefinitions", {}).get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+        after = page_info.get("endCursor")
+
     _log.info(
-        "fetch_category_metafields: found %d attributes for %s",
-        len(metafields), category_id,
+        "fetch_category_metafields: pinned_types=%s",
+        pinned_types,
+    )
+
+    if pinned_names:
+        metafields = [
+            mf for mf in all_metafields
+            if mf["name"] in pinned_names or mf["handle"] in pinned_keys
+        ]
+        if not metafields and all_metafields:
+            # Matching failed (likely locale mismatch between taxonomy
+            # attribute names and metafield definition names/keys).
+            # Show all taxonomy attributes rather than nothing.
+            _log.warning(
+                "fetch_category_metafields: filtering produced 0 matches "
+                "(attr names=%s, pinned names=%s, pinned keys=%s) "
+                "— falling back to all %d attributes",
+                [mf['name'] for mf in all_metafields],
+                pinned_names, pinned_keys, len(all_metafields),
+            )
+            metafields = all_metafields
+    else:
+        # Fallback: if no pinned definitions found, show all attributes
+        _log.warning(
+            "fetch_category_metafields: no pinned PRODUCT definitions found, "
+            "showing all %d taxonomy attributes", len(all_metafields),
+        )
+        metafields = all_metafields
+
+    # Attach is_list flag based on pinned definition type
+    for mf in metafields:
+        type_name = pinned_types.get(mf["handle"], "") or pinned_types.get(mf["name"], "")
+        mf["is_list"] = type_name.startswith("list.")
+        _log.info(
+            "fetch_category_metafields: attr name=%s handle=%s → type=%s is_list=%s",
+            mf["name"], mf["handle"], type_name, mf["is_list"],
+        )
+
+    _log.info(
+        "fetch_category_metafields: found %d attributes for %s "
+        "(%d after filtering against %d pinned PRODUCT definitions)",
+        len(all_metafields), category_id, len(metafields), len(pinned_names),
     )
     return metafields
 
@@ -3848,6 +4134,15 @@ def set_product_category_metafields(
         # taxonomy_value_reference definition over metaobject_reference.
         is_taxonomy_value = "TaxonomyValue" in value
 
+        # Detect whether the value is a JSON array — if so, we must
+        # pick the list-type definition.
+        is_array = False
+        try:
+            parsed = json.loads(value)
+            is_array = isinstance(parsed, list)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         def _score(d: dict) -> int:
             t = (d.get("type", {}).get("name", "") or "").lower()
             ns = d.get("namespace", "")
@@ -3860,6 +4155,12 @@ def set_product_category_metafields(
                 score -= 20
             if ns.startswith("shopify"):
                 score -= 10
+            # When the value is a JSON array (multi-select), strongly
+            # prefer the list.* variant of the definition.
+            if is_array and t.startswith("list."):
+                score -= 50
+            elif not is_array and not t.startswith("list."):
+                score -= 50
             return score
 
         return min(candidates, key=_score)
@@ -3985,6 +4286,41 @@ def set_product_category_metafields(
 
 # ── Product Options ────────────────────────────────────────────────
 
+# Canonical size ordering from smallest to largest.
+# Numeric, "One Size" and unknown sizes are sorted after all known text sizes.
+_SIZE_ORDER = [
+    "2XS", "XS", "S", "S/M", "M", "M/L", "L", "L/XL", "XL", "XL/2XL",
+    "2XL", "3XL", "4XL", "5XL",
+]
+
+
+def _size_sort_key(size: str) -> tuple[int, str]:
+    """Return a sort key that orders sizes logically (2XS → 5XL).
+
+    Known text sizes get their position from ``_SIZE_ORDER``.
+    Purely numeric sizes sort after those, with natural numeric ordering.
+    Anything else sorts last, alphabetically.
+    """
+    upper = size.upper()
+    try:
+        idx = _SIZE_ORDER.index(upper)
+        return (0, f"{idx:04d}")
+    except ValueError:
+        pass
+    # Try numeric (e.g. shoe/pant sizes: 28, 30, 32 …)
+    try:
+        num = float(size)
+        return (1, f"{num:010.2f}")
+    except (ValueError, TypeError):
+        pass
+    return (2, upper)
+
+
+def _sort_sizes(sizes: list[str]) -> list[str]:
+    """Sort a list of size strings in logical order."""
+    return sorted(sizes, key=_size_sort_key)
+
+
 # SKU length-letter → human-readable name (shared with add_variants)
 _LENGTH_NAMES = {
     "A": "Short",
@@ -4096,6 +4432,11 @@ def detect_product_options(
         ref = ref_options.get("Farve", {})
         linked_mf = ref.get("linked_metafield")
         mo_type = ref.get("metaobject_type")
+        # Default: always link Farve to shopify.color-pattern when not
+        # already linked (even when a reference product was found)
+        if not linked_mf:
+            linked_mf = {"namespace": "shopify", "key": "color-pattern"}
+            mo_type = mo_type or "shopify--color-pattern"
 
         resolved: dict[str, str] = {}
         missing: list[str] = []
@@ -4116,14 +4457,31 @@ def detect_product_options(
         })
 
     if sizes:
+        sizes = _sort_sizes(sizes)
         ref = ref_options.get("Størrelse", {})
+        linked_mf_size = ref.get("linked_metafield")
+        mo_type_size = ref.get("metaobject_type")
+        # Default: always link Størrelse to shopify.size when not
+        # already linked, or when linked to the wrong key
+        # (e.g. accessory-size from a reference product).
+        if not linked_mf_size or linked_mf_size.get("key") == "accessory-size":
+            linked_mf_size = {"namespace": "shopify", "key": "size"}
+            mo_type_size = "shopify--size"
+
+        resolved_size: dict[str, str] = {}
+        missing_size: list[str] = []
+        if mo_type_size:
+            resolution = _resolve_metaobject_values(mo_type_size, sizes)
+            resolved_size = resolution["resolved"]
+            missing_size = resolution["missing"]
+
         result_options.append({
             "name": "Størrelse",
             "values": sizes,
-            "linked_metafield": ref.get("linked_metafield"),
-            "metaobject_type": None,
-            "resolved_values": {},
-            "missing_values": [],
+            "linked_metafield": linked_mf_size,
+            "metaobject_type": mo_type_size,
+            "resolved_values": resolved_size,
+            "missing_values": missing_size,
         })
 
     if lengths:

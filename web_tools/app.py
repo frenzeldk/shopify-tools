@@ -53,7 +53,8 @@ from shopify import (
     reorder_product_images,
     delete_product_image,
 )
-from chatgpt import fetch_and_translate_vendor_page
+from chatgpt import fetch_and_translate_vendor_page, translate_product_data
+from deerhunter import dh_fetch_all_products, dh_products_to_vendor_format
 from shipmondo import (
     fetch_all_shipmondo_items,
     clear_bin_location,
@@ -966,14 +967,17 @@ def create_app() -> Flask:
     # Vendor → list of Shopify vendor names to compare against
     VENDOR_SHOPIFY_BRANDS: dict[str, list[str]] = {
         "entirem": ["Helikon-Tex", "Tac Maven"],
+        "deerhunter": ["Deerhunter"],
     }
+
+    # Vendors that require a CSV file upload (others fetch data automatically)
+    VENDORS_REQUIRING_CSV: set[str] = {"entirem"}
 
     @application.post("/product-tools/compare/")
     async def product_tools_compare() -> Any:
-        """Compare an uploaded vendor CSV against Shopify."""
+        """Compare vendor products against Shopify."""
         try:
             vendor = (request.form.get("vendor") or "").strip()
-            csv_file = request.files.get("csv_file")
 
             if not vendor:
                 return jsonify({"error": "Vendor is required."}), 400
@@ -981,18 +985,26 @@ def create_app() -> Flask:
             if vendor not in VENDOR_SHOPIFY_BRANDS:
                 return jsonify({"error": f"Unsupported vendor: {vendor}"}), 400
 
-            if not csv_file or csv_file.filename == "":
-                return jsonify({"error": "A CSV file is required."}), 400
+            # Get vendor products based on source type
+            if vendor == "deerhunter":
+                dh_products = await asyncio.to_thread(dh_fetch_all_products)
+                vendor_products = dh_products_to_vendor_format(dh_products)
+                current_app.logger.info(
+                    f"Fetched {len(vendor_products)} rows from Deerhunter FTP"
+                )
+            else:
+                csv_file = request.files.get("csv_file")
+                if not csv_file or csv_file.filename == "":
+                    return jsonify({"error": "A CSV file is required."}), 400
 
-            # Read and parse CSV
-            csv_content = csv_file.read().decode("utf-8-sig")  # handle BOM
-            vendor_products = parse_vendor_csv(csv_content)
-            current_app.logger.info(
-                f"Parsed {len(vendor_products)} rows from uploaded CSV"
-            )
+                csv_content = csv_file.read().decode("utf-8-sig")
+                vendor_products = parse_vendor_csv(csv_content)
+                current_app.logger.info(
+                    f"Parsed {len(vendor_products)} rows from uploaded CSV"
+                )
 
             if not vendor_products:
-                return jsonify({"error": "No valid rows found in CSV. Check the file format."}), 400
+                return jsonify({"error": "No valid product rows found. Check the data source."}), 400
 
             # Fetch matching Shopify products for the vendor's brands
             brands = VENDOR_SHOPIFY_BRANDS[vendor]
@@ -1385,6 +1397,31 @@ def create_app() -> Flask:
             )
             return jsonify({"error": "Failed to translate description."}), 500
 
+    @application.post("/product-tools/translate-product-data/")
+    async def product_tools_translate_product_data() -> Any:
+        """Generate a Danish product description from raw vendor product data."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_fields = payload.get("product_fields", {})
+
+            if not product_fields or not product_fields.get("product_name"):
+                return jsonify({"error": "product_fields with product_name is required."}), 400
+
+            result = await asyncio.to_thread(
+                translate_product_data, product_fields
+            )
+
+            if result.get("error"):
+                return jsonify(result), 500
+
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to translate product data", exc_info=exc
+            )
+            return jsonify({"error": "Failed to translate product data."}), 500
+
     @application.post("/product-tools/create-product/")
     async def product_tools_create_product() -> Any:
         """Create a new Shopify product (draft, published to all channels)."""
@@ -1490,11 +1527,14 @@ def create_app() -> Flask:
         try:
             payload = request.get_json(silent=True) or {}
             metaobject_type = payload.get("metaobject_type", "").strip()
+            category_id = payload.get("category_id", "").strip() or None
 
             if not metaobject_type:
                 return jsonify({"error": "metaobject_type is required."}), 400
 
-            result = fetch_metaobject_type_details(metaobject_type)
+            result = fetch_metaobject_type_details(
+                metaobject_type, category_id=category_id,
+            )
             return jsonify(result)
 
         except Exception as exc:
@@ -1524,11 +1564,14 @@ def create_app() -> Flask:
             payload = request.get_json(silent=True) or {}
             product_id = payload.get("product_id", "").strip()
             image_urls = payload.get("image_urls", [])
+            image_alts = payload.get("image_alts", None)
             if not product_id:
                 return jsonify({"error": "product_id is required."}), 400
             if not image_urls:
                 return jsonify({"error": "image_urls is required."}), 400
-            result = await asyncio.to_thread(add_product_images, product_id, image_urls)
+            result = await asyncio.to_thread(
+                add_product_images, product_id, image_urls, image_alts
+            )
             return jsonify(result)
         except Exception as exc:
             current_app.logger.exception("Failed to add product images", exc_info=exc)
