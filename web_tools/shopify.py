@@ -92,9 +92,18 @@ def _execute(document, *, variable_values=None):
 # so it works for every vendor.
 #
 # Format:  "Vendor Color Name" → "Shopify Color Name"
-### TODO: fill in mappings as needed
 COLOR_RENAME_MAP: dict[str, str] = {
-    # "DH Elm Green": "Elm Green",
+    "Black": "Sort",
+    "White": "Hvid",
+    "Navy": "Marineblå",
+    "Navy Blue": "Marineblå",
+    "Olive": "Oliven",
+    "Olive Green": "Oliven",
+    "Grey": "Grå",
+    "Anthracite Grey": "Antracit",
+    "Anthracite": "Antracit",
+    "Dark Blue": "Mørkeblå",
+    "Green": "Grøn",
 }
 
 
