@@ -66,7 +66,7 @@ def _group_products(rows: List[Dict]) -> Dict:
                 "EAN": row["EAN"],
                 "SKU": "-".join([prod_num, colour_num, size]),
                 "Retail_Price": str(int(float(row["Retail_Price"].replace(",", ".")))) if row["Retail_Price"].strip() else "",
-                "Wholesale_Price": str(int(float(row["Wholesale_Price"].replace(",", ".")))) if row["Wholesale_Price"].strip() else "",
+                "Wholesale_Price": str(int(float(row["Price_Before_VAT"].replace(",", "."))*0.60)) if row["Price_Before_VAT"].strip() else "",
                 "Currency": row["Currency"],
                 "Country_of_origin": row["Country_of_origin"],
                 "Tariff": row["Tariff"][:6],
