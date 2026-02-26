@@ -1162,6 +1162,19 @@ button:active:not(:disabled) {
   flex: 1;
 }
 
+.translate-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.4rem;
+}
+
+.translate-hint {
+  color: #6c757d;
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
 /* Category metafields */
 .cp-metafields-list {
   display: flex;

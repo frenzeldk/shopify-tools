@@ -740,43 +740,35 @@
 
           <div class="field-group">
             <label class="field-label">Product Description</label>
-            <div class="description-source-toggle">
-              <button
-                @click="cpDescSource = 'url'"
-                :class="['btn-toggle', { active: cpDescSource === 'url' }]"
-                type="button">
-                Translate from URL
-              </button>
-              <button
-                @click="cpDescSource = 'manual'"
-                :class="['btn-toggle', { active: cpDescSource === 'manual' }]"
-                type="button">
-                Manual
-              </button>
-            </div>
 
-            <div v-if="cpDescSource === 'url'" class="url-translate-row">
+            <div class="url-translate-row">
               <input
                 type="url"
                 v-model="cpDescUrl"
                 placeholder="https://vendor-site.com/product-page"
                 class="cp-input"
               >
-              <button
-                @click="translateDescription"
-                :disabled="cpTranslating || !cpDescUrl"
-                class="btn-sm btn-action">
-                <span v-if="!cpTranslating">🌐 Translate</span>
-                <span v-else>Translating…</span>
-              </button>
             </div>
 
             <textarea
               v-model="cpDescriptionHtml"
               rows="8"
               class="cp-textarea"
-              placeholder="Product description (HTML supported)…"
+              placeholder="Enter product description text for translation, or write your description directly (HTML supported)…"
             ></textarea>
+
+            <div class="translate-actions">
+              <button
+                @click="translateDescription"
+                :disabled="cpTranslating || (!cpDescUrl && !cpDescriptionHtml)"
+                class="btn-sm btn-action">
+                <span v-if="!cpTranslating">🌐 [[ cpDescriptionHtml ? 'Translate Text' : 'Translate from URL' ]]</span>
+                <span v-else>Translating…</span>
+              </button>
+              <small v-if="cpDescUrl && cpDescriptionHtml" class="translate-hint">
+                Text content will be used (takes priority over URL)
+              </small>
+            </div>
           </div>
         </div>
 
@@ -2873,18 +2865,35 @@ createApp({
     },
 
     async translateDescription() {
-      if (!this.cpDescUrl) return;
+      const hasText = (this.cpDescriptionHtml || '').trim().length > 0;
+      const hasUrl = (this.cpDescUrl || '').trim().length > 0;
+      if (!hasText && !hasUrl) return;
+
       this.cpTranslating = true;
       this.cpError = null;
       try {
-        const resp = await fetch('/product-tools/translate-description/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: this.cpDescUrl,
-            product_name: this.cpTitle,
-          }),
-        });
+        let resp;
+        if (hasText) {
+          // Plain text / existing content takes priority
+          resp = await fetch('/product-tools/translate-plain-text/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: this.cpDescriptionHtml,
+              product_name: this.cpTitle,
+            }),
+          });
+        } else {
+          // Fall back to URL translation
+          resp = await fetch('/product-tools/translate-description/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              url: this.cpDescUrl,
+              product_name: this.cpTitle,
+            }),
+          });
+        }
         const data = await resp.json();
         if (data.error) {
           this.cpError = data.error;

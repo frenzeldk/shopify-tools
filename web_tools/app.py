@@ -57,7 +57,7 @@ from shopify import (
     reorder_product_images,
     delete_product_image,
 )
-from chatgpt import fetch_and_translate_vendor_page, translate_product_data
+from chatgpt import fetch_and_translate_vendor_page, translate_product_data, translate_plain_text
 from deerhunter import dh_fetch_all_products, dh_products_to_vendor_format
 from shipmondo import (
     fetch_all_shipmondo_items,
@@ -1431,6 +1431,32 @@ def create_app() -> Flask:
                 "Failed to translate product data", exc_info=exc
             )
             return jsonify({"error": "Failed to translate product data."}), 500
+
+    @application.post("/product-tools/translate-plain-text/")
+    async def product_tools_translate_plain_text() -> Any:
+        """Translate and rephrase plain text product description to Danish HTML."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            text = payload.get("text", "").strip()
+            product_name = payload.get("product_name", "").strip()
+
+            if not text:
+                return jsonify({"error": "text is required."}), 400
+
+            result = await asyncio.to_thread(
+                translate_plain_text, text, product_name
+            )
+
+            if result.get("error"):
+                return jsonify(result), 500
+
+            return jsonify(result)
+
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to translate plain text", exc_info=exc
+            )
+            return jsonify({"error": "Failed to translate plain text."}), 500
 
     @application.post("/product-tools/create-product/")
     async def product_tools_create_product() -> Any:

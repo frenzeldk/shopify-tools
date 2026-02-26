@@ -119,6 +119,62 @@ def fetch_and_translate_vendor_page(url: str, product_name: str = "") -> dict:
         return {"description_html": "", "error": str(exc)}
 
 
+def translate_plain_text(text: str, product_name: str = "") -> dict:
+    """
+    Translate and rephrase plain-text product description into Danish HTML.
+
+    The caller provides raw product description text (in any language). The
+    function sends it to ChatGPT for translation to Danish and rephrasing
+    from a manufacturer perspective to a retailer perspective.
+
+    Args:
+        text: Raw product description text to translate.
+        product_name: Optional product name for context.
+
+    Returns:
+        {"description_html": "...", "error": None} on success.
+    """
+    if not os.environ.get("OPENAI_API_KEY"):
+        return {"description_html": "", "error": "OPENAI_API_KEY is not configured."}
+
+    if not text or not text.strip():
+        return {"description_html": "", "error": "No text provided."}
+
+    user_message = (
+        f"Translate and rephrase the following product description into Danish HTML.\n"
+    )
+    if product_name:
+        user_message += f"Product name: {product_name}\n\n"
+    user_message += text.strip()
+
+    try:
+        response = _get_client().responses.create(
+            model=_OPENAI_MODEL,
+            instructions=_SYSTEM_PROMPT,
+            input=user_message,
+            temperature=0.3,
+            max_output_tokens=10000,
+            store=False,
+            timeout=90,
+        )
+
+        translated = _strip_markdown_fences((response.output_text or "").strip())
+        logger.info(
+            "translate_plain_text: received %d chars of translated description",
+            len(translated),
+        )
+
+        return {"description_html": translated, "error": None}
+
+    except APITimeoutError:
+        return {"description_html": "", "error": "OpenAI API request timed out."}
+    except APIError as exc:
+        return {"description_html": "", "error": f"OpenAI API error ({exc.status_code}): {exc.message}"}
+    except Exception as exc:
+        logger.exception("translate_plain_text: unexpected error")
+        return {"description_html": "", "error": str(exc)}
+
+
 def translate_product_data(product_fields: dict) -> dict:
     """
     Generate a Danish product description from raw vendor product data.
