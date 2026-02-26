@@ -1,8 +1,12 @@
 import asyncio
+import time
 import json
 import os
 import logging
 import threading
+import io
+import requests
+from PIL import Image, ImageDraw
 from gql import Client, gql
 from gql.transport.aiohttp import AIOHTTPTransport
 
@@ -2103,9 +2107,6 @@ def generate_diagonal_swatch(
 
     Returns the PNG image as raw ``bytes``.
     """
-    import io
-    import requests as _requests
-    from PIL import Image, ImageDraw
 
     def _fill(spec: dict) -> Image.Image:
         """Return a *size*×*size* image for one half."""
@@ -2118,7 +2119,7 @@ def generate_diagonal_swatch(
                 img = img.resize((size, size), Image.LANCZOS)
                 return img
             if val.startswith("http"):
-                resp = _requests.get(val, timeout=15)
+                resp = requests.get(val, timeout=15)
                 resp.raise_for_status()
                 img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
                 img = img.resize((size, size), Image.LANCZOS)
@@ -2162,8 +2163,6 @@ def upload_swatch_bytes_to_shopify(
 
     Returns the file GID (e.g. ``gid://shopify/MediaImage/…``).
     """
-    import time
-    import requests as _requests
 
     _log.info("upload_swatch_bytes_to_shopify: %d bytes, filename=%s", len(png_bytes), filename)
 
@@ -2185,7 +2184,7 @@ def upload_swatch_bytes_to_shopify(
     files_payload = {
         "file": (filename, png_bytes, "image/png"),
     }
-    resp = _requests.post(upload_url, data=params, files=files_payload, timeout=30)
+    resp = requests.post(upload_url, data=params, files=files_payload, timeout=30)
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(f"Staged upload POST failed: {resp.status_code} {resp.text[:200]}")
     _log.info("upload_swatch_bytes_to_shopify: staged upload complete, resourceUrl=%s", resource_url)
