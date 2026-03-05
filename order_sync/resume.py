@@ -2,6 +2,7 @@
 
 """Checks actual available quantities and activates orders as possible."""
 import os
+import requests
 from gql import Client, gql
 from gql.transport.aiohttp import AIOHTTPTransport
 from gql.transport.exceptions import TransportQueryError
@@ -102,6 +103,7 @@ def _resume_orders(orders: list[dict]) -> None:
         }
         """
     )
+    failed_orders = []
     for order in orders:
         _update_inventory_cache(order["lineItems"]["edges"])
         if _can_fulfill_order(order["lineItems"]["edges"])\
@@ -116,12 +118,18 @@ def _resume_orders(orders: list[dict]) -> None:
                 )
                 user_errors = result["tagsRemove"]["userErrors"]
                 if user_errors:
+                    failed_orders.append(order["name"])
                     print(f"Failed to remove tags from order {order['name']}: {user_errors}")
                 else:
                     print(f"Removed tags from order {order['name']}")
             except TransportQueryError as e:
+                failed_orders.append(order["name"])
                 print(f"Error removing tags from order {order['name']}: {e}")
                 raise RuntimeError(f"Failed to remove tags from order {order['name']}: {e}") from e
+    requests.post("https://hassio.frenzel.dk/api/webhook/-GAqW4T8Gju-HPs-PSV3JCSme",
+                    json={"orders": "\n".join(failed_orders)},
+                    timeout=10
+                    )
 
 def get_orders() -> list[dict]:
     """Fetch all unfulfilled orders.
