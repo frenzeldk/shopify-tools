@@ -6,6 +6,10 @@ Type=simple
 User=shopify
 WorkingDirectory=/opt/shopify-tools/web_tools
 ExecStart=/opt/shopify-tools/web_tools/app.py
+# Send SIGTERM on stop/restart – the app translates this to SystemExit
+# so atexit handlers (GQL session cleanup) run before the process exits.
+KillSignal=SIGTERM
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
