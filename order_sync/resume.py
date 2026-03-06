@@ -126,10 +126,11 @@ def _resume_orders(orders: list[dict]) -> None:
                 failed_orders.append(order["name"])
                 print(f"Error removing tags from order {order['name']}: {e}")
                 raise RuntimeError(f"Failed to remove tags from order {order['name']}: {e}") from e
-    requests.post("https://hassio.frenzel.dk/api/webhook/-GAqW4T8Gju-HPs-PSV3JCSme",
-                    json={"orders": "\n".join(failed_orders)},
-                    timeout=10
-                    )
+    if failed_orders:
+        requests.post("https://hassio.frenzel.dk/api/webhook/-GAqW4T8Gju-HPs-PSV3JCSme",
+                        json={"orders": "\n".join(failed_orders)},
+                        timeout=10
+                        )
 
 def get_orders() -> list[dict]:
     """Fetch all unfulfilled orders.
