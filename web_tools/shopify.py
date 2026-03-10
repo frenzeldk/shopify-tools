@@ -2350,7 +2350,7 @@ def upload_file_to_shopify(source_url: str, alt: str = "") -> str:
     return file_gid
 
 
-def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], color_image_urls: dict[str, str] | None = None) -> dict:
+def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], color_image_urls: dict[str, str] | None = None, basic_auth: dict | None = None) -> dict:
     """
     Add new variants to an existing Shopify product using
     productVariantsBulkCreate.
@@ -2991,7 +2991,8 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
         # Still handle images for updated variants
         if color_image_urls and all_created:
             image_errors = _attach_color_images(
-                product_id, all_created, variants_data, color_image_urls, log
+                product_id, all_created, variants_data, color_image_urls, log,
+                basic_auth=basic_auth,
             )
             all_errors.extend(image_errors)
         if all_created:
@@ -3067,7 +3068,8 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
         # ── Attach color images to new variants ──────────────────
         if color_image_urls and all_created:
             image_errors = _attach_color_images(
-                product_id, all_created, variants_data, color_image_urls, log
+                product_id, all_created, variants_data, color_image_urls, log,
+                basic_auth=basic_auth,
             )
             all_errors.extend(image_errors)
 
@@ -3255,6 +3257,7 @@ def _attach_color_images(
     variants_data: list[dict],
     color_image_urls: dict[str, str],
     log,
+    basic_auth: dict | None = None,
 ) -> list[str]:
     """
     Upload images by URL to a Shopify product and assign them to the
@@ -3295,6 +3298,29 @@ def _attach_color_images(
         len(color_to_variant_ids), product_id,
         {c: len(ids) for c, ids in color_to_variant_ids.items()},
     )
+
+    # If basic auth is provided, download images and stage them first
+    if basic_auth and basic_auth.get("username") and basic_auth.get("password"):
+        urls_to_download = []
+        colors_to_download = []
+        for color, url in color_image_urls.items():
+            if color in color_to_variant_ids:
+                urls_to_download.append(url)
+                colors_to_download.append(color)
+        if urls_to_download:
+            staged_urls = download_and_stage_images(urls_to_download, basic_auth)
+            color_image_urls = dict(color_image_urls)  # copy to avoid mutating caller
+            for i, color in enumerate(colors_to_download):
+                if staged_urls[i] is not None:
+                    color_image_urls[color] = staged_urls[i]
+                else:
+                    log.warning(
+                        "_attach_color_images: failed to download/stage image for color '%s'",
+                        color,
+                    )
+                    errors.append(f"Failed to download image for {color}")
+                    # Remove from the mapping so we don't try to upload the original URL
+                    color_image_urls.pop(color, None)
 
     # Step 1: Upload all images to the product using productCreateMedia
     create_media_mutation = gql("""
@@ -3422,6 +3448,145 @@ def _attach_color_images(
 
 # ── Product Images ─────────────────────────────────────────────────
 
+
+def download_and_stage_images(
+    image_urls: list[str],
+    basic_auth: dict,
+) -> list[str]:
+    """
+    Download images from URLs using HTTP Basic Auth, upload them to
+    Shopify via staged uploads, and return Shopify-hosted resource URLs.
+
+    *basic_auth* must contain ``username`` and ``password``.
+
+    Returns a list of Shopify resource URLs (same length/order as
+    *image_urls*).  If an individual image fails, the corresponding
+    entry is ``None``.
+    """
+    import mimetypes
+    from urllib.parse import urlparse
+
+    username = basic_auth.get("username", "")
+    password = basic_auth.get("password", "")
+
+    _log.info(
+        "download_and_stage_images: downloading %d image(s) with basic auth (user=%s)",
+        len(image_urls), username,
+    )
+
+    # Step 1: Download all images
+    downloaded: list[dict | None] = []
+    for url in image_urls:
+        try:
+            resp = requests.get(url, auth=(username, password), timeout=30)
+            resp.raise_for_status()
+
+            content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            # Derive filename from URL path
+            parsed = urlparse(url)
+            filename = parsed.path.split("/")[-1] or "image.jpg"
+            # Ensure the filename has an extension
+            if "." not in filename:
+                ext = mimetypes.guess_extension(content_type) or ".jpg"
+                filename += ext
+
+            downloaded.append({
+                "data": resp.content,
+                "filename": filename,
+                "mimeType": content_type,
+                "fileSize": len(resp.content),
+            })
+            _log.info(
+                "download_and_stage_images: downloaded %s (%d bytes, %s)",
+                filename, len(resp.content), content_type,
+            )
+        except Exception as exc:
+            _log.warning(
+                "download_and_stage_images: failed to download %s: %s", url, exc,
+            )
+            downloaded.append(None)
+
+    # Step 2: Create staged upload targets for successfully downloaded images
+    files_to_stage = [d for d in downloaded if d is not None]
+    if not files_to_stage:
+        _log.warning("download_and_stage_images: no images were downloaded successfully")
+        return [None] * len(image_urls)
+
+    stage_inputs = [
+        {
+            "filename": f["filename"],
+            "mimeType": f["mimeType"],
+            "fileSize": f["fileSize"],
+        }
+        for f in files_to_stage
+    ]
+
+    try:
+        targets = create_staged_uploads(stage_inputs)
+    except Exception as exc:
+        _log.exception("download_and_stage_images: failed to create staged uploads")
+        return [None] * len(image_urls)
+
+    if len(targets) != len(files_to_stage):
+        _log.warning(
+            "download_and_stage_images: expected %d targets, got %d",
+            len(files_to_stage), len(targets),
+        )
+
+    # Step 3: Upload each downloaded image to its staged target
+    resource_urls: list[str | None] = []
+    target_idx = 0
+    for d in downloaded:
+        if d is None:
+            resource_urls.append(None)
+            continue
+
+        if target_idx >= len(targets):
+            resource_urls.append(None)
+            target_idx += 1
+            continue
+
+        target = targets[target_idx]
+        target_idx += 1
+
+        try:
+            # Build multipart form data matching Shopify's staged upload spec
+            form_fields = []
+            for param in target["parameters"]:
+                form_fields.append((param["name"], (None, param["value"])))
+            form_fields.append(("file", (d["filename"], d["data"], d["mimeType"])))
+
+            upload_resp = requests.post(
+                target["url"],
+                files=form_fields,
+                timeout=60,
+            )
+            if upload_resp.ok:
+                resource_urls.append(target["resourceUrl"])
+                _log.info(
+                    "download_and_stage_images: staged upload OK for %s → %s",
+                    d["filename"], target["resourceUrl"],
+                )
+            else:
+                _log.warning(
+                    "download_and_stage_images: staged upload failed for %s: %s %s",
+                    d["filename"], upload_resp.status_code, upload_resp.text[:200],
+                )
+                resource_urls.append(None)
+        except Exception as exc:
+            _log.warning(
+                "download_and_stage_images: upload exception for %s: %s",
+                d["filename"], exc,
+            )
+            resource_urls.append(None)
+
+    _log.info(
+        "download_and_stage_images: %d/%d images staged successfully",
+        sum(1 for u in resource_urls if u is not None), len(image_urls),
+    )
+    return resource_urls
+
+
 def create_staged_uploads(files: list[dict]) -> list[dict]:
     """
     Create staged upload targets for file-based image uploads.
@@ -3545,6 +3710,7 @@ def add_product_images(
     product_id: str,
     image_urls: list[str],
     image_alts: list[str] | None = None,
+    basic_auth: dict | None = None,
 ) -> dict:
     """
     Add images to a product by URL.
@@ -3562,6 +3728,27 @@ def add_product_images(
         return {"images": [], "errors": []}
 
     _log.info("add_product_images: product=%s urls=%d", product_id, len(image_urls))
+
+    # If basic auth is provided, download images and upload via staged uploads
+    if basic_auth and basic_auth.get("username") and basic_auth.get("password"):
+        staged_urls = download_and_stage_images(image_urls, basic_auth)
+        # Replace original URLs with staged Shopify URLs; skip failed downloads
+        resolved_urls = []
+        resolved_alts = []
+        for i, staged_url in enumerate(staged_urls):
+            if staged_url is not None:
+                resolved_urls.append(staged_url)
+                alt = image_alts[i] if image_alts and i < len(image_alts) else ""
+                resolved_alts.append(alt)
+            else:
+                _log.warning(
+                    "add_product_images: skipping image %d (download/stage failed): %s",
+                    i, image_urls[i],
+                )
+        if not resolved_urls:
+            return {"images": [], "errors": ["All image downloads failed."]}
+        image_urls = resolved_urls
+        image_alts = resolved_alts
 
     mutation = gql("""
     mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
