@@ -1,8 +1,8 @@
 [Unit]
-Description="Run entirem.service everyday at noon UTC."
+Description="Run entirem.service every two hours."
 
 [Timer]
-OnCalendar=*-*-* 10:00:00
+OnCalendar=00/2:10
 Unit=entirem.service
 
 [Install]

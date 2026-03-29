@@ -2,8 +2,8 @@
 Description="Run order-resume.service every 30 minutes."
 
 [Timer]
-OnCalendar=*-*-* 08..22:00/30
-OnCalendar=*-*-* 23:00
+OnCalendar=06..22:00/30
+OnCalendar=23:00
 Unit=order-resume.service
 
 [Install]

@@ -1,8 +1,8 @@
 [Unit]
-Description="Run mtac.service everyday at noon UTC."
+Description="Run mtac.service every two hours."
 
 [Timer]
-OnCalendar=*-*-* 10:10:00
+OnCalendar=00/2:20
 Unit=mtac.service
 
 [Install]

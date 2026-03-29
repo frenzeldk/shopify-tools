@@ -1,8 +1,8 @@
 [Unit]
-Description="Run frankonia.service everyday at noon UTC."
+Description="Run frankonia.service everyday at 10:15 local time."
 
 [Timer]
-OnCalendar=*-*-* 10:05:00
+OnCalendar=10:15
 Unit=frankonia.service
 
 [Install]

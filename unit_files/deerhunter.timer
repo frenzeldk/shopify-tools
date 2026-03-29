@@ -1,0 +1,9 @@
+[Unit]
+Description="Run deerhunter.service every two hours."
+
+[Timer]
+OnCalendar=00/2:05
+Unit=deerhunter.service
+
+[Install]
+WantedBy=multi-user.target

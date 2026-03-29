@@ -1,8 +1,8 @@
 [Unit]
-Description="Run pentagon.service everyday at noon UTC."
+Description="Run pentagon.service every two hours."
 
 [Timer]
-OnCalendar=*-*-* 10:15:00
+OnCalendar=00/2:25
 Unit=pentagon.service
 
 [Install]
