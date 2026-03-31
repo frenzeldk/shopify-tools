@@ -41,7 +41,7 @@ def get_vendors_and_product_variants():
 
     # Parse the CSV feed into a dictionary for quick lookup
     csv_reader = csv.DictReader(csv_data, delimiter=';')
-    csv_variants = {row["EAN"]: row["Stock"].lower() for row in csv_reader}
+    csv_variants = {row["EAN"]: {"stock": row["Stock"].lower(), "lifecycle": row["Lifecycle"].lower()} for row in csv_reader}
 
     print(f"Loaded {len(csv_variants)} variants from CSV.")
 
@@ -98,7 +98,7 @@ def get_vendors_and_product_variants():
 
                         # Check if the variant exists in the CSV
                         if variant_ean in csv_variants:
-                            expected_policy = "CONTINUE" if csv_variants[variant_ean] == "på lager" else "DENY"
+                            expected_policy = "CONTINUE" if csv_variants[variant_ean]["stock"] == "på lager" and csv_variants[variant_ean]["lifecycle"] == "aktiv" else "DENY"
                         else:
                             expected_policy = "DENY"  # Default to "DENY" if not in CSV
 
