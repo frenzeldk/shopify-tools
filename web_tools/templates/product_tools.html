@@ -51,6 +51,22 @@
         <span class="summary-label">New Variants</span>
       </div>
     </div>
+
+    <!-- Basic Auth for vendor images -->
+    <div class="input-row" style="margin-top: 1rem;">
+      <div class="input-group" style="flex: 0 0 auto;">
+        <label>Image Auth:</label>
+      </div>
+      <div class="input-group" style="flex: 1; min-width: 150px;">
+        <input type="text" v-model="basicAuthUser" placeholder="Username" class="filter-input" autocomplete="off">
+      </div>
+      <div class="input-group" style="flex: 1; min-width: 150px;">
+        <input type="password" v-model="basicAuthPass" placeholder="Password" class="filter-input" autocomplete="off">
+      </div>
+      <div class="input-group" style="flex: 0 0 auto; align-self: center;">
+        <small class="tool-description" style="margin: 0;">Optional. Provide if vendor image URLs require HTTP Basic Auth.</small>
+      </div>
+    </div>
   </div>
 
   <!-- New Products Section -->
@@ -1596,6 +1612,10 @@ createApp({
       optionMappingForms: [],      // [{ optionName, value, action: 'replace'|'create', replacement: '', search: '', creating: false, created: false }]
       optionMappingError: null,
       optionMappingBusy: false,
+
+      // Basic auth for vendor image URLs
+      basicAuthUser: '',
+      basicAuthPass: '',
 
       // Cross-modal state
       colorsOnProductCache: [],      // color names already on the product's variants
@@ -3795,6 +3815,15 @@ createApp({
         colorImages[this.cpCreatedProductId][color] = url.trim();
       }
 
+      // Include basic auth credentials if provided
+      const payload = {
+        variants: selected,
+        color_image_urls: colorImages,
+      };
+      if (this.basicAuthUser && this.basicAuthPass) {
+        payload.basic_auth = { username: this.basicAuthUser, password: this.basicAuthPass };
+      }
+
       this.addingVariants = true;
       this.cpError = null;
       this.cpVariantResult = null;
@@ -3803,10 +3832,7 @@ createApp({
         const response = await fetch('/product-tools/add-variants/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            variants: selected,
-            color_image_urls: colorImages,
-          }),
+          body: JSON.stringify(payload),
         });
         const data = await response.json();
 
@@ -3903,14 +3929,18 @@ createApp({
 
       this.cpImgUploading = true;
       try {
+        const addPayload = {
+          product_id: this.cpCreatedProductId,
+          image_urls: allUrls,
+          image_alts: allAlts,
+        };
+        if (this.basicAuthUser && this.basicAuthPass) {
+          addPayload.basic_auth = { username: this.basicAuthUser, password: this.basicAuthPass };
+        }
         const resp = await fetch('/product-tools/add-product-images/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            product_id: this.cpCreatedProductId,
-            image_urls: allUrls,
-            image_alts: allAlts,
-          }),
+          body: JSON.stringify(addPayload),
         });
         const data = await resp.json();
         if (data.error) {
@@ -3982,10 +4012,14 @@ createApp({
       this.cpImgError = null;
       this.cpImgSuccess = null;
       try {
+        const addPayload = { product_id: this.cpCreatedProductId, image_urls: urls };
+        if (this.basicAuthUser && this.basicAuthPass) {
+          addPayload.basic_auth = { username: this.basicAuthUser, password: this.basicAuthPass };
+        }
         const resp = await fetch('/product-tools/add-product-images/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ product_id: this.cpCreatedProductId, image_urls: urls }),
+          body: JSON.stringify(addPayload),
         });
         const data = await resp.json();
         if (data.error) {

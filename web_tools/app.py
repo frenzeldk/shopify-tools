@@ -1042,6 +1042,7 @@ def create_app() -> Flask:
             payload = request.get_json(silent=True) or {}
             variants = payload.get("variants", [])
             color_image_urls = payload.get("color_image_urls", {})
+            basic_auth = payload.get("basic_auth", None)
 
             current_app.logger.info(
                 "add-variants: received %d variant(s) in payload, %d product(s) with images",
@@ -1077,7 +1078,8 @@ def create_app() -> Flask:
                 )
                 product_images = color_image_urls.get(product_id, {})
                 result = await asyncio.to_thread(
-                    add_variants_to_shopify_product, product_id, product_variants, product_images
+                    add_variants_to_shopify_product, product_id, product_variants, product_images,
+                    basic_auth=basic_auth,
                 )
                 current_app.logger.info(
                     "add-variants: result for %s — created=%d errors=%d",
@@ -1601,12 +1603,14 @@ def create_app() -> Flask:
             product_id = payload.get("product_id", "").strip()
             image_urls = payload.get("image_urls", [])
             image_alts = payload.get("image_alts", None)
+            basic_auth = payload.get("basic_auth", None)
             if not product_id:
                 return jsonify({"error": "product_id is required."}), 400
             if not image_urls:
                 return jsonify({"error": "image_urls is required."}), 400
             result = await asyncio.to_thread(
-                add_product_images, product_id, image_urls, image_alts
+                add_product_images, product_id, image_urls, image_alts,
+                basic_auth=basic_auth,
             )
             return jsonify(result)
         except Exception as exc:
