@@ -5,13 +5,14 @@ from flask import render_template
 
 logger = logging.getLogger(__name__)
 
-credentials = (os.getenv('O365_CLIENT_ID'), os.getenv('O365_CLIENT_SECRET'))
-account = Account(credentials, auth_flow_type='credentials', tenant_id=os.getenv('O365_TENANT_ID'))
+_credentials = (os.getenv('O365_CLIENT_ID'), os.getenv('O365_CLIENT_SECRET'))
+_tenant_id = os.getenv('O365_TENANT_ID')
 
-if not account.is_authenticated:
+
+def _get_mailbox():
+    account = Account(_credentials, auth_flow_type='credentials', tenant_id=_tenant_id)
     account.authenticate()
-
-mailbox = account.mailbox('info@xtragrej.dk')
+    return account.mailbox('info@xtragrej.dk')
 
 
 def send_missed_pickup_email(first_name: str, email: str, order_number: str) -> tuple[bool, str]:
@@ -33,7 +34,7 @@ def send_missed_pickup_email(first_name: str, email: str, order_number: str) -> 
             order_number=order_number,
         )
 
-        msg = mailbox.new_message()
+        msg = _get_mailbox().new_message()
         msg.to.add(email)
         msg.subject = f"Vedr. din ordre {order_number}"
         msg.body = html_body
