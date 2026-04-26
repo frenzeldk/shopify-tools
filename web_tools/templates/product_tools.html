@@ -3441,6 +3441,16 @@ createApp({
       } finally {
         this.cpDetectingOptions = false;
       }
+
+      // Auto-advance to variants if all option values are resolved
+      if (!this.cpError) {
+        const hasMissing = this.cpDetectedOptions.some(
+          opt => opt.linked_metafield && opt.missing_values && opt.missing_values.length > 0
+        );
+        if (!hasMissing) {
+          await this.createProductOptions();
+        }
+      }
     },
 
     cpOptionLinkKey(optIdx) {
@@ -3997,7 +4007,7 @@ createApp({
     async createProductOptions() {
       // If no options detected, skip directly to variants
       if (this.cpDetectedOptions.length === 0) {
-        this._goToVariantsStep();
+        await this._goToVariantsStep();
         return;
       }
 
@@ -4029,7 +4039,7 @@ createApp({
 
       if (optionsPayload.length === 0) {
         this.cpCreatingOptions = false;
-        this._goToVariantsStep();
+        await this._goToVariantsStep();
         return;
       }
 
@@ -4048,7 +4058,7 @@ createApp({
         } else if (data.errors && data.errors.length > 0) {
           this.cpError = 'Option errors: ' + data.errors.join(', ');
         } else {
-          this._goToVariantsStep();
+          await this._goToVariantsStep();
         }
       } catch (err) {
         console.error('Failed to create product options:', err);
@@ -4058,7 +4068,7 @@ createApp({
       }
     },
 
-    _goToVariantsStep() {
+    async _goToVariantsStep() {
       // Initialize color image URL inputs, auto-filling from vendor data when available
       this.cpColorImageUrls = {};
       this.cpColorImageFiles = {};
@@ -4071,9 +4081,14 @@ createApp({
       this.cpStep = 4;
       this.cpError = null;
 
-      // For Helikon-Tex: fetch and auto-match images from partner portal
+      // For Helikon-Tex: await image fetch so auto-matched images are ready before adding variants
       if (this.cpIsHelikon && this.cpCurrentGroup) {
-        this._fetchHelikonImages(this.cpCurrentGroup.code);
+        await this._fetchHelikonImages(this.cpCurrentGroup.code);
+      }
+
+      // Auto-add all pre-selected variants (no missing information at this step)
+      if (this.cpSelectedSkus.length > 0) {
+        await this.cpAddVariants();
       }
     },
 
