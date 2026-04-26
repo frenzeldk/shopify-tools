@@ -2146,6 +2146,109 @@ def generate_diagonal_swatch(
     return buf.getvalue()
 
 
+def _resize_image(
+    filename: str, image_bytes: bytes, max_dim: int
+) -> tuple[str, bytes, str]:
+    """
+    Resize *image_bytes* to fit within *max_dim*×*max_dim* (aspect ratio preserved).
+
+    Returns *(filename, resized_bytes, mime_type)*.  PNG stays PNG; everything
+    else is re-encoded as JPEG at quality 90.
+    """
+    img = Image.open(io.BytesIO(image_bytes))
+    fmt = (img.format or "JPEG").upper()
+    img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+    buf = io.BytesIO()
+    if fmt == "PNG":
+        img.save(buf, format="PNG")
+        return filename, buf.getvalue(), "image/png"
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    img.save(buf, format="JPEG", quality=90)
+    base = filename.rsplit(".", 1)[0] if "." in filename else filename
+    new_filename = filename if fmt in ("JPEG", "JPG") else f"{base}.jpg"
+    return new_filename, buf.getvalue(), "image/jpeg"
+
+
+def _do_staged_upload(filename: str, image_bytes: bytes, mime_type: str) -> str:
+    """
+    Create a staged-upload target and POST *image_bytes* to it.
+
+    Returns the Shopify ``resourceUrl`` on success.
+    Raises ``RuntimeError`` on any failure.
+    """
+    targets = create_staged_uploads([{
+        "filename": filename,
+        "mimeType": mime_type,
+        "fileSize": len(image_bytes),
+    }])
+    if not targets:
+        raise RuntimeError("No staged upload targets returned")
+    target = targets[0]
+    params = {p["name"]: p["value"] for p in target["parameters"]}
+    resp = requests.post(
+        target["url"],
+        data=params,
+        files={"file": (filename, image_bytes, mime_type)},
+        timeout=60,
+    )
+    if not resp.ok:
+        raise RuntimeError(
+            f"Staged upload POST failed: {resp.status_code} {resp.text[:300]}"
+        )
+    return target["resourceUrl"]
+
+
+def staged_upload_with_fallback(
+    filename: str, image_bytes: bytes, mime_type: str
+) -> str:
+    """
+    Upload image bytes via a staged upload, automatically downscaling on failure.
+
+    Attempt order:
+      1. Original bytes as-is.
+      2. Image resized to 2000×2000 (if attempt 1 fails).
+      3. Image resized to 1500×1500 (if attempt 2 fails).
+
+    Returns the Shopify ``resourceUrl``.
+    Raises ``RuntimeError`` if all attempts fail.
+    """
+    last_exc: Exception | None = None
+    current_filename, current_bytes, current_mime = filename, image_bytes, mime_type
+
+    for max_dim in (None, 2000, 1500):
+        if max_dim is not None:
+            _log.info(
+                "staged_upload_with_fallback: scaling %s to %d×%d after failure",
+                filename, max_dim, max_dim,
+            )
+            try:
+                current_filename, current_bytes, current_mime = _resize_image(
+                    filename, image_bytes, max_dim
+                )
+            except Exception as exc:
+                _log.exception("staged_upload_with_fallback: resize to %d failed", max_dim)
+                raise RuntimeError(f"Image resize to {max_dim}px failed: {exc}") from exc
+        try:
+            resource_url = _do_staged_upload(current_filename, current_bytes, current_mime)
+            if max_dim is not None:
+                _log.info(
+                    "staged_upload_with_fallback: succeeded at %d×%d for %s",
+                    max_dim, max_dim, filename,
+                )
+            return resource_url
+        except Exception as exc:
+            _log.warning(
+                "staged_upload_with_fallback: upload attempt failed (max_dim=%s) for %s: %s",
+                max_dim, filename, exc,
+            )
+            last_exc = exc
+
+    raise RuntimeError(
+        f"staged_upload_with_fallback: all attempts failed for {filename}"
+    ) from last_exc
+
+
 def upload_swatch_bytes_to_shopify(
     png_bytes: bytes,
     filename: str = "swatch.png",
@@ -2166,30 +2269,11 @@ def upload_swatch_bytes_to_shopify(
 
     _log.info("upload_swatch_bytes_to_shopify: %d bytes, filename=%s", len(png_bytes), filename)
 
-    # 1. Staged upload target
-    targets = create_staged_uploads([{
-        "filename": filename,
-        "mimeType": "image/png",
-        "fileSize": len(png_bytes),
-    }])
-    if not targets:
-        raise RuntimeError("No staged upload targets returned")
-
-    target = targets[0]
-    upload_url = target["url"]
-    resource_url = target["resourceUrl"]
-    params = {p["name"]: p["value"] for p in target["parameters"]}
-
-    # 2. Multipart POST to the staged URL
-    files_payload = {
-        "file": (filename, png_bytes, "image/png"),
-    }
-    resp = requests.post(upload_url, data=params, files=files_payload, timeout=30)
-    if resp.status_code not in (200, 201, 204):
-        raise RuntimeError(f"Staged upload POST failed: {resp.status_code} {resp.text[:200]}")
+    # 1. Stage-upload with automatic downscale fallback on size failure
+    resource_url = staged_upload_with_fallback(filename, png_bytes, "image/png")
     _log.info("upload_swatch_bytes_to_shopify: staged upload complete, resourceUrl=%s", resource_url)
 
-    # 3. fileCreate with the resourceUrl
+    # 2. fileCreate with the resourceUrl
     create_mutation = gql("""
     mutation fileCreate($files: [FileCreateInput!]!) {
         fileCreate(files: $files) {

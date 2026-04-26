@@ -50,6 +50,7 @@ from shopify import (
     detect_product_options,
     create_product_options,
     create_staged_uploads,
+    staged_upload_with_fallback,
     fetch_metaobject_type_details,
     fetch_metaobjects_for_definition,
     fetch_product_images,
@@ -168,32 +169,23 @@ def _classify_helikon_images(product_code: str, all_files: list[str]) -> dict:
 def _helikon_stage_images(filenames: list[str]) -> dict[str, str | None]:
     """Download Helikon images with basic auth and stage-upload them to Shopify.
 
+    Each file is uploaded individually so that a per-file size failure can be
+    retried with a downscaled copy (2000×2000, then 1500×1500).
+
     Returns a mapping of filename → Shopify resourceUrl (None if upload failed).
     """
-
-    downloaded: list[dict] = []
+    result: dict[str, str | None] = {}
     for fname in filenames:
         url = _HELIKON_BASE_URL + fname
-        resp = _requests.get(url, auth=_HELIKON_AUTH, timeout=30)
-        resp.raise_for_status()
-        mime = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-        downloaded.append({"filename": fname, "content": resp.content, "mimeType": mime})
-
-    files_meta = [
-        {"filename": d["filename"], "mimeType": d["mimeType"], "fileSize": len(d["content"])}
-        for d in downloaded
-    ]
-    targets = create_staged_uploads(files_meta)
-
-    result: dict[str, str | None] = {}
-    for i, target in enumerate(targets):
-        fname = filenames[i]
-        data = downloaded[i]
-        form_data = {p["name"]: p["value"] for p in target["parameters"]}
-        files = {"file": (fname, data["content"], data["mimeType"])}
-        upload_resp = _requests.post(target["url"], data=form_data, files=files, timeout=60)
-        result[fname] = target["resourceUrl"] if upload_resp.ok else None
-
+        try:
+            resp = _requests.get(url, auth=_HELIKON_AUTH, timeout=30)
+            resp.raise_for_status()
+            mime = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            resource_url = staged_upload_with_fallback(fname, resp.content, mime)
+            result[fname] = resource_url
+        except Exception as exc:
+            logger.warning("_helikon_stage_images: failed to upload %s: %s", fname, exc)
+            result[fname] = None
     return result
 # ─────────────────────────────────────────────────────────────────────────────
 
