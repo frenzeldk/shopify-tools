@@ -3113,7 +3113,7 @@ createApp({
         if (data.error) {
           this.cpError = data.error;
         } else {
-          this.cpDescriptionHtml = data.description_html || '';
+          this.cpDescriptionHtml = this._downgradeHeaders(data.description_html || '');
         }
       } catch (err) {
         this.cpError = 'Failed to auto-generate description.';
@@ -3175,6 +3175,16 @@ createApp({
       return def ? `${def.name} (${def.namespace}.${def.key})` : key;
     },
 
+    _downgradeHeaders(html) {
+      if (!html || !/<h1[\s>]/i.test(html)) return html;
+      // Downgrade bottom-up (h4→h5 first) to avoid double-downgrading
+      return html
+        .replace(/<(\/?)h4(\s|>)/gi, '<$1h5$2')
+        .replace(/<(\/?)h3(\s|>)/gi, '<$1h4$2')
+        .replace(/<(\/?)h2(\s|>)/gi, '<$1h3$2')
+        .replace(/<(\/?)h1(\s|>)/gi, '<$1h2$2');
+    },
+
     async translateDescription() {
       const hasText = (this.cpDescriptionHtml || '').trim().length > 0;
       const hasUrl = (this.cpDescUrl || '').trim().length > 0;
@@ -3209,7 +3219,7 @@ createApp({
         if (data.error) {
           this.cpError = data.error;
         } else {
-          this.cpDescriptionHtml = data.description_html || '';
+          this.cpDescriptionHtml = this._downgradeHeaders(data.description_html || '');
         }
       } catch (err) {
         this.cpError = 'Failed to translate description.';
@@ -4257,7 +4267,6 @@ createApp({
         if (!response.ok) {
           this.cpVariantResult = { errors: [data.error || 'Failed to add variants.'], created: [] };
         } else {
-          this.cpVariantResult = data;
           // Remove successfully added SKUs from the list
           if (data.created && data.created.length > 0) {
             const createdSkus = new Set(data.created.map(c => c.sku));
@@ -4267,6 +4276,12 @@ createApp({
             if (this.result && this.result.new_products) {
               this.result.new_products = this.result.new_products.filter(p => !createdSkus.has(p.sku));
             }
+          }
+          // Skip status screen and go directly to images if no errors
+          if (data.created && data.created.length > 0 && (!data.errors || data.errors.length === 0)) {
+            await this.cpGoToImagesStep();
+          } else {
+            this.cpVariantResult = data;
           }
         }
       } catch (err) {
