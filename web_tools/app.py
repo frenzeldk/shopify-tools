@@ -135,7 +135,11 @@ def _get_helikon_listing() -> list[str]:
 def _classify_helikon_images(product_code: str, all_files: list[str]) -> dict:
     """Split Helikon image filenames for a product code into variant and additional groups.
 
-    Additional: 4th dash-separated field starts with 'a', 'back', or 'detail'.
+    Additional categories (with ``category`` field):
+      - "front"  : filename suffix contains the word "front"
+      - "back"   : 4th dash-separated field starts with "back"
+      - "detail" : 4th field starts with "detail"
+      - "a"      : 4th field starts with "a"
     Variant: everything else (field 4 is the color code).
     """
     prefix = product_code.lower() + "-"
@@ -147,8 +151,15 @@ def _classify_helikon_images(product_code: str, all_files: list[str]) -> dict:
         stem = fname.rsplit(".", 1)[0]
         parts = stem.split("-")
         field4 = parts[3].lower() if len(parts) > 3 else ""
-        if field4.startswith("a") or field4.startswith("back") or field4.startswith("detail"):
-            additional_images.append({"filename": fname})
+        suffix_lower = fname[len(prefix):].lower()
+        if "front" in suffix_lower:
+            additional_images.append({"filename": fname, "category": "front"})
+        elif field4.startswith("back"):
+            additional_images.append({"filename": fname, "category": "back"})
+        elif field4.startswith("detail"):
+            additional_images.append({"filename": fname, "category": "detail"})
+        elif field4.startswith("a"):
+            additional_images.append({"filename": fname, "category": "a"})
         else:
             variant_images.append({"filename": fname, "color_code": parts[3] if len(parts) > 3 else ""})
     return {"variant_images": variant_images, "additional_images": additional_images}

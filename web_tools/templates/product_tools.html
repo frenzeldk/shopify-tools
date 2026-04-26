@@ -4082,9 +4082,12 @@ createApp({
     },
 
     async _cpHelikonAutoAddImages() {
-      // Collect filenames to auto-add to the product gallery:
-      //   - images classified as additional (back/detail/a*)
-      //   - variant images not selected for any color
+      // Record which image IDs are already on the product (= variant images from step 4)
+      const variantImageIds = new Set(this.cpImages.map(img => img.id));
+
+      // Collect filenames to upload as additional gallery images:
+      //   - classified additional images (front/back/detail/a)
+      //   - variant image files not selected for any color
       const selectedFilenames = new Set(Object.values(this.cpHelikonColorSel).filter(f => f));
       const toAdd = [
         ...this.cpHelikonImages.additional_images.map(img => img.filename),
@@ -4093,32 +4096,104 @@ createApp({
           .map(img => img.filename),
       ];
       const uniqueFiles = [...new Set(toAdd)];
-      if (uniqueFiles.length === 0) return;
 
       this.cpImgUploading = true;
       try {
-        const stageResp = await fetch('/product-tools/helikon-stage-images/', {
+        if (uniqueFiles.length > 0) {
+          const stageResp = await fetch('/product-tools/helikon-stage-images/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames: uniqueFiles }),
+          });
+          const stageData = await stageResp.json();
+          if (stageData.error) { this.cpImgError = stageData.error; return; }
+
+          const imageUrls = uniqueFiles.map(f => stageData[f]).filter(u => u);
+          const imageAlts = uniqueFiles.filter(f => stageData[f]);  // filename = alt text
+
+          if (imageUrls.length > 0) {
+            const addResp = await fetch('/product-tools/add-product-images/', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                product_id: this.cpCreatedProductId,
+                image_urls: imageUrls,
+                image_alts: imageAlts,
+              }),
+            });
+            const addData = await addResp.json();
+            if (addData.error) { this.cpImgError = addData.error; return; }
+            this.cpImages = addData.images || this.cpImages;
+            this.cpImgSuccess = `Auto-added ${imageUrls.length} image(s) from Helikon-Tex.`;
+          }
+        }
+
+        // ── Sort all product images ────────────────────────────────────────
+        // Variant images (already existed) have alt = color name.
+        // Additional images we just uploaded have alt = filename.
+        const allImages = this.cpImages;
+        if (allImages.length < 2) return;
+
+        const frontImgs = [], backImgs = [], detailImgs = [], aImgs = [], variantImgs = [];
+
+        for (const img of allImages) {
+          if (variantImageIds.has(img.id)) {
+            variantImgs.push(img);
+          } else {
+            const fname = (img.alt || '').toLowerCase();
+            if (fname.includes('front'))          frontImgs.push(img);
+            else if (fname.includes('back'))      backImgs.push(img);
+            else if (fname.includes('detail'))    detailImgs.push(img);
+            else {
+              // Check 4th dash-segment for "a"
+              const stem = fname.replace(/\.[^.]+$/, '');
+              const seg4 = stem.split('-')[3] || '';
+              if (seg4.startsWith('a'))            aImgs.push(img);
+              else                                 backImgs.push(img); // fallback bucket
+            }
+          }
+        }
+
+        const byAlt = (a, b) => (a.alt || '').localeCompare(b.alt || '');
+        frontImgs.sort(byAlt);
+        backImgs.sort(byAlt);
+        detailImgs.sort(byAlt);
+        aImgs.sort(byAlt);
+
+        // Sort variant images by detected color option order
+        const colorOrder = (() => {
+          if (this.cpDetectedOptions) {
+            const opt = this.cpDetectedOptions.find(o => o.name === 'Farve');
+            if (opt && opt.values) return opt.values;
+          }
+          return this.cpUniqueColors;
+        })();
+        variantImgs.sort((a, b) => {
+          const ia = colorOrder.indexOf(a.alt || '');
+          const ib = colorOrder.indexOf(b.alt || '');
+          return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+        });
+
+        let sorted = [...frontImgs, ...backImgs, ...detailImgs, ...aImgs, ...variantImgs];
+
+        // If no front images: promote the first variant image to position 0
+        if (frontImgs.length === 0 && variantImgs.length > 0) {
+          const first = variantImgs[0];
+          sorted = [first, ...sorted.filter(img => img.id !== first.id)];
+        }
+
+        const reorderResp = await fetch('/product-tools/reorder-product-images/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filenames: uniqueFiles }),
+          body: JSON.stringify({
+            product_id: this.cpCreatedProductId,
+            media_ids: sorted.map(img => img.id),
+          }),
         });
-        const stageData = await stageResp.json();
-        if (stageData.error) { this.cpImgError = stageData.error; return; }
-
-        const imageUrls = uniqueFiles.map(f => stageData[f]).filter(u => u);
-        if (imageUrls.length === 0) return;
-
-        const addResp = await fetch('/product-tools/add-product-images/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ product_id: this.cpCreatedProductId, image_urls: imageUrls }),
-        });
-        const addData = await addResp.json();
-        if (addData.error) {
-          this.cpImgError = addData.error;
-        } else {
-          this.cpImages = addData.images || this.cpImages;
-          this.cpImgSuccess = `Auto-added ${imageUrls.length} image(s) from Helikon-Tex.`;
+        const reorderData = await reorderResp.json();
+        if (reorderData.images) this.cpImages = reorderData.images;
+        if (reorderData.errors && reorderData.errors.length > 0) {
+          this.cpImgError = 'Image sort had errors: ' + reorderData.errors.join(', ');
         }
       } finally {
         this.cpImgUploading = false;
