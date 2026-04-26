@@ -44,6 +44,8 @@ from shopify import (
     create_option_value_metaobject,
     fetch_shopify_taxonomy,
     fetch_all_product_tags,
+    fetch_all_products_lightweight,
+    update_product,
     fetch_category_metafields,
     create_shopify_product,
     set_product_category_metafields,
@@ -110,6 +112,14 @@ tags_cache = {
     "is_refreshing": False
 }
 tags_lock = threading.Lock()
+
+# Global lightweight products cache (id, title, vendor, tags, category_id)
+products_cache = {
+    "products": [],
+    "last_updated": None,
+    "is_refreshing": False
+}
+products_lock = threading.Lock()
 
 # ── Helikon-Tex image cache ──────────────────
 _HELIKON_BASE_URL = os.environ.get("HELIKON_BASE_URL")
@@ -266,6 +276,29 @@ def fetch_and_cache_product_tags():
         tags_cache["is_refreshing"] = False
 
 
+def fetch_and_cache_all_products():
+    """Fetch all products (lightweight) and update the global products cache."""
+    if products_cache["is_refreshing"]:
+        logger.info("Products cache refresh already in progress, skipping")
+        return
+
+    try:
+        products_cache["is_refreshing"] = True
+        logger.info(f"Starting products fetch at {datetime.now()}")
+        products = fetch_all_products_lightweight()
+        logger.info(f"Fetched {len(products)} products")
+
+        with products_lock:
+            products_cache["products"] = products
+            products_cache["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        logger.info(f"Successfully cached {len(products)} products")
+    except Exception as e:
+        logger.error(f"Error fetching products: {e}", exc_info=True)
+    finally:
+        products_cache["is_refreshing"] = False
+
+
 def refresh_all_shopify_caches():
     """Run all Shopify-dependent cache refreshes sequentially.
 
@@ -276,6 +309,7 @@ def refresh_all_shopify_caches():
     logger.info("refresh_all_shopify_caches: starting sequential refresh")
     fetch_and_cache_taxonomy()
     fetch_and_cache_product_tags()
+    fetch_and_cache_all_products()
     logger.info("refresh_all_shopify_caches: all Shopify caches refreshed")
 
 
@@ -1792,6 +1826,93 @@ def create_app() -> Flask:
         except Exception as exc:
             current_app.logger.exception("Failed to stage Helikon images", exc_info=exc)
             return jsonify({"error": "Failed to stage Helikon images."}), 500
+
+    @application.get("/product-tools/all-products/")
+    def product_tools_all_products() -> Any:
+        """Return the cached list of all products (id, title, vendor, tags, category_id)."""
+        with products_lock:
+            return jsonify({
+                "products": products_cache["products"],
+                "last_updated": products_cache["last_updated"],
+            })
+
+    @application.post("/product-tools/remap-products/apply/")
+    async def product_tools_remap_apply() -> Any:
+        """Apply tag/category/metafield remapping to a set of products."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_ids = payload.get("product_ids", [])
+            tags_to_add = payload.get("tags_to_add", [])
+            tags_to_remove = payload.get("tags_to_remove", [])
+            new_category_id = payload.get("category_id") or None
+            metafield_values = payload.get("metafield_values", [])
+
+            if not product_ids:
+                return jsonify({"error": "product_ids is required."}), 400
+            if not tags_to_add and not tags_to_remove and not new_category_id and not metafield_values:
+                return jsonify({"error": "At least one of tags_to_add, tags_to_remove, category_id, or metafield_values must be provided."}), 400
+
+            updated = 0
+            errors = []
+            tag_updates: dict[str, list[str]] = {}
+            succeeded_ids: list[str] = []
+
+            for product_id in product_ids:
+                with products_lock:
+                    cached = next((p for p in products_cache["products"] if p["id"] == product_id), None)
+                current_tags: list[str] = list(cached["tags"]) if cached else []
+
+                new_tags = list(current_tags)
+                for tag in tags_to_add:
+                    if tag not in new_tags:
+                        new_tags.append(tag)
+                new_tags = [t for t in new_tags if t not in tags_to_remove]
+
+                tags_changed = set(new_tags) != set(current_tags)
+                product_updated = False
+
+                if tags_changed or new_category_id:
+                    result = await asyncio.to_thread(
+                        update_product,
+                        product_id,
+                        new_tags if tags_changed else None,
+                        new_category_id,
+                    )
+                    if result.get("errors"):
+                        errors.extend([f"{product_id}: {e}" for e in result["errors"]])
+                    else:
+                        product_updated = True
+                        tag_updates[product_id] = new_tags
+                        with products_lock:
+                            if cached:
+                                cached["tags"] = new_tags
+                                if new_category_id:
+                                    cached["category_id"] = new_category_id
+
+                if metafield_values:
+                    mf_result = await asyncio.to_thread(
+                        set_product_category_metafields, product_id, metafield_values
+                    )
+                    if mf_result.get("errors"):
+                        errors.extend([f"{product_id} metafields: {e}" for e in mf_result["errors"]])
+                    else:
+                        product_updated = True
+
+                if product_updated:
+                    updated += 1
+                    succeeded_ids.append(product_id)
+
+            return jsonify({
+                "updated": updated,
+                "total": len(product_ids),
+                "errors": errors,
+                "tag_updates": tag_updates,
+                "succeeded_ids": succeeded_ids,
+            })
+
+        except Exception as exc:
+            current_app.logger.exception("Failed to apply product remapping", exc_info=exc)
+            return jsonify({"error": "Failed to apply remapping."}), 500
 
     @application.route("/mail-tools/")
     @oidc.require_login

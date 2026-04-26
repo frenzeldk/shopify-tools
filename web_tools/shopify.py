@@ -5450,3 +5450,88 @@ def create_shopify_product(
     except Exception as exc:
         _log.exception("create_shopify_product: exception during product creation")
         return {"product_id": None, "errors": [str(exc)]}
+
+
+def fetch_all_products_lightweight() -> list[dict]:
+    """Fetch all products with id, title, vendor, tags, and category for the remapping cache."""
+    _log.info("fetch_all_products_lightweight: starting")
+
+    query = gql("""
+    query allProducts($cursor: String) {
+        products(first: 250, after: $cursor) {
+            edges {
+                node {
+                    id
+                    title
+                    vendor
+                    tags
+                    productCategory {
+                        productTaxonomyNode {
+                            id
+                            fullName
+                        }
+                    }
+                }
+            }
+            pageInfo { hasNextPage endCursor }
+        }
+    }
+    """)
+
+    products: list[dict] = []
+    cursor: str | None = None
+    while True:
+        result = _execute(query, variable_values={"cursor": cursor})
+        for edge in result.get("products", {}).get("edges", []):
+            node = edge["node"]
+            taxonomy = ((node.get("productCategory") or {}).get("productTaxonomyNode") or {})
+            products.append({
+                "id": node["id"],
+                "title": node.get("title", ""),
+                "vendor": node.get("vendor", ""),
+                "tags": node.get("tags", []),
+                "category_id": taxonomy.get("id", "") or "",
+                "category_name": taxonomy.get("fullName", "") or "",
+            })
+        pi = result.get("products", {}).get("pageInfo", {})
+        if not pi.get("hasNextPage"):
+            break
+        cursor = pi.get("endCursor")
+
+    _log.info("fetch_all_products_lightweight: fetched %d products", len(products))
+    return products
+
+
+def update_product(
+    product_id: str,
+    tags: list[str] | None = None,
+    category_id: str | None = None,
+) -> dict:
+    """Update tags and/or category on an existing product.
+
+    Returns ``{"updated": bool, "errors": [str]}``.
+    """
+    _log.info(
+        "update_product: product=%s tags=%s category=%s",
+        product_id, tags, category_id,
+    )
+
+    input_data: dict = {"id": product_id}
+    if tags is not None:
+        input_data["tags"] = tags
+    if category_id is not None:
+        input_data["category"] = category_id
+
+    mutation = gql("""
+    mutation productUpdate($input: ProductInput!) {
+        productUpdate(input: $input) {
+            product { id tags }
+            userErrors { field message }
+        }
+    }
+    """)
+
+    result = _execute(mutation, variable_values={"input": input_data})
+    user_errors = result.get("productUpdate", {}).get("userErrors", [])
+    errors = [f"{e.get('field', '?')}: {e['message']}" for e in user_errors] if user_errors else []
+    return {"updated": len(errors) == 0, "errors": errors}

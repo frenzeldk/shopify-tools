@@ -1682,6 +1682,425 @@
     </div>
   </div>
 
+  <!-- Product Remapping Section -->
+  <div class="tool-section">
+    <h2 class="collapsible-header" @click="toggleRemapSection">
+      <span class="collapse-chevron" :class="{ collapsed: remapCollapsed }">▼</span>
+      Product Remapping
+    </h2>
+    <div v-show="!remapCollapsed" class="collapsible-body">
+      <p class="tool-description">
+        Find products by tag and/or taxonomy category, then apply new tags and taxonomy metafields to all matching products.
+        Product data is loaded from cache for fast filtering.
+      </p>
+
+      <div v-if="remapLoading" class="tool-description" style="margin: 1rem 0;">Loading product data…</div>
+
+      <div v-if="!remapLoading" class="cp-form" style="max-width: none;">
+
+        <!-- Match Criteria -->
+        <fieldset style="border: 1px solid var(--border); border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
+          <legend style="padding: 0 0.5rem; font-weight: 600; color: var(--text);">Match Criteria</legend>
+
+          <div class="input-row" style="flex-wrap: wrap; gap: 1rem;">
+
+            <div class="field-group" style="flex: 1; min-width: 220px;">
+              <label class="field-label">Tags (all must match)</label>
+              <div class="searchable-select">
+                <div class="select-input-wrapper" @click="openDropdown('remapMatchTags', 0)">
+                  <div class="select-pills">
+                    <span v-for="tag in remapMatchTags" :key="tag" class="select-pill">
+                      [[ tag ]]
+                      <span class="pill-remove" @click.stop="remapMatchTags = remapMatchTags.filter(t => t !== tag)">&times;</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="remapMatchTagSearch"
+                      @input="openDropdown('remapMatchTags', 0)"
+                      @focus="openDropdown('remapMatchTags', 0)"
+                      :placeholder="remapMatchTags.length ? '' : 'Search tags…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === 'remapMatchTags_0'" class="select-dropdown">
+                  <div
+                    v-for="tag in remapFilteredMatchTags"
+                    :key="tag"
+                    @mousedown.prevent="remapToggleMatchTag(tag)"
+                    :class="['select-option', { selected: remapMatchTags.includes(tag) }]">
+                    <span class="option-check">[[ remapMatchTags.includes(tag) ? '✓' : '' ]]</span>
+                    [[ tag ]]
+                  </div>
+                  <div v-if="remapFilteredMatchTags.length === 0 && !remapMatchTagSearch.trim()" class="select-option disabled">No tags available</div>
+                  <div v-if="remapFilteredMatchTags.length === 0 && remapMatchTagSearch.trim()" class="select-option disabled">No matching tags</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="field-group" style="flex: 1; min-width: 220px;">
+              <label class="field-label">Category</label>
+              <div class="searchable-select">
+                <div class="select-input-wrapper" @click="openDropdown('remapMatchCat', 0)">
+                  <div class="select-pills">
+                    <span v-if="remapMatchCategoryId" class="select-pill">
+                      [[ remapMatchCategoryName ]]
+                      <span class="pill-remove" @click.stop="remapMatchCategoryId = ''; remapMatchCategoryName = ''">×</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="remapMatchCategorySearch"
+                      @input="openDropdown('remapMatchCat', 0)"
+                      @focus="openDropdown('remapMatchCat', 0)"
+                      :placeholder="remapMatchCategoryId ? '' : 'Search categories…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === 'remapMatchCat_0'" class="select-dropdown">
+                  <div
+                    v-for="cat in remapFilteredMatchCategories"
+                    :key="cat.id"
+                    @mousedown.prevent="selectRemapMatchCategory(cat)"
+                    :class="['select-option', { selected: remapMatchCategoryId === cat.id }]">
+                    <span class="option-check">[[ remapMatchCategoryId === cat.id ? '✓' : '' ]]</span>
+                    [[ cat.fullName ]]
+                  </div>
+                  <div v-if="remapFilteredMatchCategories.length === 0" class="select-option disabled">No matching categories</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="field-group" style="flex: 1; min-width: 180px;">
+              <label class="field-label">Vendor (optional filter)</label>
+              <input type="text" v-model="remapMatchVendor" class="cp-input" placeholder="e.g. Helikon-Tex">
+            </div>
+
+          </div>
+        </fieldset>
+
+        <!-- Preview of matched products -->
+        <div v-if="remapMatchTags.length > 0 || remapMatchCategoryId || remapMatchVendor.trim()">
+          <div class="table-controls" style="margin-bottom: 0.4rem;">
+            <span style="font-weight: 600;">
+              Matched: [[ remapMatchedProducts.length ]]
+              <span v-if="remapEffectiveSelection.length > 0" style="color: #666; font-weight: normal; margin-left: 0.4rem;">([[ remapEffectiveSelection.length ]] selected)</span>
+            </span>
+            <div class="select-controls">
+              <button @click="remapSelectedIds = remapMatchedProducts.map(p => p.id)" class="btn-sm btn-outline" :disabled="remapMatchedProducts.length === 0">Select All</button>
+              <button @click="remapSelectedIds = []" class="btn-sm btn-outline" :disabled="remapEffectiveSelection.length === 0">Deselect All</button>
+            </div>
+          </div>
+          <div v-if="remapMatchedProducts.length > 0" class="data-table-wrapper scrollable-table" style="max-height: 260px;">
+            <table class="data-table" style="font-size: 0.8rem;">
+              <thead>
+                <tr>
+                  <th class="check-col"><span class="custom-checkbox" :class="{ checked: remapAllSelected }" @click="remapAllSelected ? remapSelectedIds = [] : remapSelectedIds = remapMatchedProducts.map(p => p.id)"></span></th>
+                  <th>Title</th>
+                  <th>Vendor</th>
+                  <th>Category</th>
+                  <th>Tags</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="p in remapMatchedProducts" :key="p.id" :class="{ 'row-selected': remapSelectedIds.includes(p.id) }" style="cursor: pointer;" @click="remapSelectedIds.includes(p.id) ? remapSelectedIds = remapSelectedIds.filter(id => id !== p.id) : remapSelectedIds.push(p.id)">
+                  <td class="check-col">
+                    <span class="custom-checkbox" :class="{ checked: remapSelectedIds.includes(p.id) }"></span>
+                  </td>
+                  <td>[[ p.title ]]</td>
+                  <td>[[ p.vendor ]]</td>
+                  <td>[[ p.category_name || '—' ]]</td>
+                  <td style="max-width: 280px; white-space: normal;">
+                    <span v-for="t in p.tags" :key="t" class="color-badge" style="margin: 1px; font-size: 0.72rem;">[[ t ]]</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else class="tool-description" style="color: #888; margin: 0.5rem 0;">No products match the current criteria.</div>
+        </div>
+
+        <!-- Set New Values (shown once there is a selection) -->
+        <fieldset v-if="remapEffectiveSelection.length > 0" style="border: 1px solid var(--border); border-radius: 6px; padding: 1rem; margin-top: 1rem;">
+          <legend style="padding: 0 0.5rem; font-weight: 600; color: var(--text);">Set New Values</legend>
+
+          <div class="input-row" style="flex-wrap: wrap; gap: 1rem;">
+
+            <div class="field-group" style="flex: 1; min-width: 220px;">
+              <label class="field-label">Add Tags</label>
+              <div class="searchable-select">
+                <div class="select-input-wrapper" @click="openDropdown('remapSetTags', 0)">
+                  <div class="select-pills">
+                    <span v-for="tag in remapSetTags" :key="tag" class="select-pill">
+                      [[ tag ]]
+                      <span class="pill-remove" @click.stop="remapSetTags = remapSetTags.filter(t => t !== tag)">&times;</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="remapSetTagSearch"
+                      @input="openDropdown('remapSetTags', 0)"
+                      @focus="openDropdown('remapSetTags', 0)"
+                      @keydown.enter.prevent="remapAddCustomSetTag"
+                      :placeholder="remapSetTags.length ? '' : 'Search or add tags…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === 'remapSetTags_0'" class="select-dropdown">
+                  <div
+                    v-for="tag in remapFilteredSetTags"
+                    :key="tag"
+                    @mousedown.prevent="remapToggleSetTag(tag)"
+                    :class="['select-option', { selected: remapSetTags.includes(tag) }]">
+                    <span class="option-check">[[ remapSetTags.includes(tag) ? '✓' : '' ]]</span>
+                    [[ tag ]]
+                  </div>
+                  <div
+                    v-if="remapSetTagSearch.trim() && !allProductTags.includes(remapSetTagSearch.trim()) && !remapSetTags.includes(remapSetTagSearch.trim())"
+                    @mousedown.prevent="remapAddCustomSetTag"
+                    class="select-option" style="font-style: italic;">
+                    + Add "[[ remapSetTagSearch.trim() ]]"
+                  </div>
+                  <div v-if="remapFilteredSetTags.length === 0 && !remapSetTagSearch.trim()" class="select-option disabled">No tags available</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="field-group" style="flex: 1; min-width: 220px;">
+              <label class="field-label">Remove Tags</label>
+              <div class="searchable-select">
+                <div class="select-input-wrapper" @click="openDropdown('remapRemoveTags', 0)">
+                  <div class="select-pills">
+                    <span v-for="tag in remapRemoveTags" :key="tag" class="select-pill">
+                      [[ tag ]]
+                      <span class="pill-remove" @click.stop="remapRemoveTags = remapRemoveTags.filter(t => t !== tag)">&times;</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="remapRemoveTagSearch"
+                      @input="openDropdown('remapRemoveTags', 0)"
+                      @focus="openDropdown('remapRemoveTags', 0)"
+                      :placeholder="remapRemoveTags.length ? '' : 'Search tags on matched products…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === 'remapRemoveTags_0'" class="select-dropdown">
+                  <div
+                    v-for="tag in remapFilteredRemoveTags"
+                    :key="tag"
+                    @mousedown.prevent="remapToggleRemoveTag(tag)"
+                    :class="['select-option', { selected: remapRemoveTags.includes(tag) }]">
+                    <span class="option-check">[[ remapRemoveTags.includes(tag) ? '✓' : '' ]]</span>
+                    [[ tag ]]
+                  </div>
+                  <div v-if="remapFilteredRemoveTags.length === 0" class="select-option disabled">No tags on matched products</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="field-group" style="flex: 1; min-width: 220px;">
+              <label class="field-label">Set Category</label>
+              <div class="searchable-select">
+                <div class="select-input-wrapper" @click="openDropdown('remapSetCat', 0)">
+                  <div class="select-pills">
+                    <span v-if="remapSetCategoryId" class="select-pill">
+                      [[ remapSetCategoryName ]]
+                      <span class="pill-remove" @click.stop="remapSetCategoryId = ''; remapSetCategoryName = ''; remapCategoryMetafields = []">×</span>
+                    </span>
+                    <input
+                      type="text"
+                      v-model="remapSetCategorySearch"
+                      @input="openDropdown('remapSetCat', 0)"
+                      @focus="openDropdown('remapSetCat', 0)"
+                      :placeholder="remapSetCategoryId ? '' : 'Search categories…'"
+                      class="pill-search-input"
+                    >
+                  </div>
+                </div>
+                <div v-if="activeDropdown === 'remapSetCat_0'" class="select-dropdown">
+                  <div
+                    v-for="cat in remapFilteredSetCategories"
+                    :key="cat.id"
+                    @mousedown.prevent="selectRemapSetCategory(cat)"
+                    :class="['select-option', { selected: remapSetCategoryId === cat.id }]">
+                    <span class="option-check">[[ remapSetCategoryId === cat.id ? '✓' : '' ]]</span>
+                    [[ cat.fullName ]]
+                  </div>
+                  <div v-if="remapFilteredSetCategories.length === 0" class="select-option disabled">No matching categories</div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Taxonomy Metafields (appear when a set-category is selected) -->
+          <div v-if="remapCategoryMetafields.length > 0" style="margin-top: 1rem;">
+            <label class="field-label" style="margin-bottom: 0.5rem; display: block;">Category Metafields</label>
+            <div class="cp-metafields-list">
+              <div v-for="mf in remapPriorityMetafields" :key="mf.handle" class="color-creation-card">
+                <div class="color-creation-header">
+                  <span class="color-badge color-badge-lg">[[ mf.name ]]</span>
+                </div>
+                <div class="color-creation-fields">
+                  <div class="field-group" v-if="mf.values && mf.values.length > 0 && mf.is_list">
+                    <div class="searchable-select">
+                      <div class="select-input-wrapper" @click="openDropdown('remapMf_' + mf.handle, 0)">
+                        <div class="select-pills">
+                          <span v-for="selId in (remapMetafieldValues[mf.handle] || [])" :key="selId" class="select-pill">
+                            [[ remapMetafieldValueLabelById(mf.handle, selId) ]]
+                            <span class="pill-remove" @click.stop="remapRemoveMetafieldListValue(mf.handle, selId)">×</span>
+                          </span>
+                          <input type="text" v-model="remapMetafieldSearches[mf.handle]"
+                            @input="openDropdown('remapMf_' + mf.handle, 0)" @focus="openDropdown('remapMf_' + mf.handle, 0)"
+                            :placeholder="(remapMetafieldValues[mf.handle] || []).length > 0 ? '' : 'Search ' + mf.name + '…'"
+                            class="pill-search-input">
+                        </div>
+                      </div>
+                      <div v-if="activeDropdown === 'remapMf_' + mf.handle + '_0'" class="select-dropdown">
+                        <div v-for="val in remapFilteredMetafieldValues(mf.handle)" :key="val.id"
+                          @mousedown.prevent="remapToggleMetafieldListValue(mf.handle, val.id)"
+                          :class="['select-option', { selected: (remapMetafieldValues[mf.handle] || []).includes(val.id) }]">
+                          <span class="option-check">[[ (remapMetafieldValues[mf.handle] || []).includes(val.id) ? '✓' : '' ]]</span>
+                          [[ val.name ]]
+                        </div>
+                        <div v-if="remapFilteredMetafieldValues(mf.handle).length === 0" class="select-option disabled">No matching values</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="field-group" v-else-if="mf.values && mf.values.length > 0">
+                    <div class="searchable-select">
+                      <div class="select-input-wrapper" @click="openDropdown('remapMf_' + mf.handle, 0)">
+                        <div class="select-pills">
+                          <span v-if="remapMetafieldValues[mf.handle]" class="select-pill">
+                            [[ remapMetafieldValueLabel(mf.handle) ]]
+                            <span class="pill-remove" @click.stop="remapMetafieldValues[mf.handle] = ''">×</span>
+                          </span>
+                          <input type="text" v-model="remapMetafieldSearches[mf.handle]"
+                            @input="openDropdown('remapMf_' + mf.handle, 0)" @focus="openDropdown('remapMf_' + mf.handle, 0)"
+                            :placeholder="remapMetafieldValues[mf.handle] ? '' : 'Search ' + mf.name + '…'"
+                            class="pill-search-input">
+                        </div>
+                      </div>
+                      <div v-if="activeDropdown === 'remapMf_' + mf.handle + '_0'" class="select-dropdown">
+                        <div v-for="val in remapFilteredMetafieldValues(mf.handle)" :key="val.id"
+                          @mousedown.prevent="remapMetafieldValues[mf.handle] = val.id; activeDropdown = null"
+                          :class="['select-option', { selected: remapMetafieldValues[mf.handle] === val.id }]">
+                          <span class="option-check">[[ remapMetafieldValues[mf.handle] === val.id ? '✓' : '' ]]</span>
+                          [[ val.name ]]
+                        </div>
+                        <div v-if="remapFilteredMetafieldValues(mf.handle).length === 0" class="select-option disabled">No matching values</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="field-group">
+                    <input type="text" v-model="remapMetafieldValues[mf.handle]" class="cp-input" :placeholder="mf.name + '…'">
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="remapOtherMetafields.length > 0" style="margin: 0.75rem 0;">
+                <button @click="remapShowAllMetafields = !remapShowAllMetafields" class="btn-sm btn-outline" type="button" style="font-size: 0.85rem;">
+                  <span v-if="!remapShowAllMetafields">Show [[ remapOtherMetafields.length ]] more metafield(s) ▼</span>
+                  <span v-else>Hide extra metafields ▲</span>
+                </button>
+              </div>
+
+              <div v-for="mf in remapOtherMetafields" v-show="remapShowAllMetafields" :key="mf.handle" class="color-creation-card">
+                <div class="color-creation-header">
+                  <span class="color-badge color-badge-lg">[[ mf.name ]]</span>
+                </div>
+                <div class="color-creation-fields">
+                  <div class="field-group" v-if="mf.values && mf.values.length > 0 && mf.is_list">
+                    <div class="searchable-select">
+                      <div class="select-input-wrapper" @click="openDropdown('remapMf_' + mf.handle, 0)">
+                        <div class="select-pills">
+                          <span v-for="selId in (remapMetafieldValues[mf.handle] || [])" :key="selId" class="select-pill">
+                            [[ remapMetafieldValueLabelById(mf.handle, selId) ]]
+                            <span class="pill-remove" @click.stop="remapRemoveMetafieldListValue(mf.handle, selId)">×</span>
+                          </span>
+                          <input type="text" v-model="remapMetafieldSearches[mf.handle]"
+                            @input="openDropdown('remapMf_' + mf.handle, 0)" @focus="openDropdown('remapMf_' + mf.handle, 0)"
+                            :placeholder="(remapMetafieldValues[mf.handle] || []).length > 0 ? '' : 'Search ' + mf.name + '…'"
+                            class="pill-search-input">
+                        </div>
+                      </div>
+                      <div v-if="activeDropdown === 'remapMf_' + mf.handle + '_0'" class="select-dropdown">
+                        <div v-for="val in remapFilteredMetafieldValues(mf.handle)" :key="val.id"
+                          @mousedown.prevent="remapToggleMetafieldListValue(mf.handle, val.id)"
+                          :class="['select-option', { selected: (remapMetafieldValues[mf.handle] || []).includes(val.id) }]">
+                          <span class="option-check">[[ (remapMetafieldValues[mf.handle] || []).includes(val.id) ? '✓' : '' ]]</span>
+                          [[ val.name ]]
+                        </div>
+                        <div v-if="remapFilteredMetafieldValues(mf.handle).length === 0" class="select-option disabled">No matching values</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="field-group" v-else-if="mf.values && mf.values.length > 0">
+                    <div class="searchable-select">
+                      <div class="select-input-wrapper" @click="openDropdown('remapMf_' + mf.handle, 0)">
+                        <div class="select-pills">
+                          <span v-if="remapMetafieldValues[mf.handle]" class="select-pill">
+                            [[ remapMetafieldValueLabel(mf.handle) ]]
+                            <span class="pill-remove" @click.stop="remapMetafieldValues[mf.handle] = ''">×</span>
+                          </span>
+                          <input type="text" v-model="remapMetafieldSearches[mf.handle]"
+                            @input="openDropdown('remapMf_' + mf.handle, 0)" @focus="openDropdown('remapMf_' + mf.handle, 0)"
+                            :placeholder="remapMetafieldValues[mf.handle] ? '' : 'Search ' + mf.name + '…'"
+                            class="pill-search-input">
+                        </div>
+                      </div>
+                      <div v-if="activeDropdown === 'remapMf_' + mf.handle + '_0'" class="select-dropdown">
+                        <div v-for="val in remapFilteredMetafieldValues(mf.handle)" :key="val.id"
+                          @mousedown.prevent="remapMetafieldValues[mf.handle] = val.id; activeDropdown = null"
+                          :class="['select-option', { selected: remapMetafieldValues[mf.handle] === val.id }]">
+                          <span class="option-check">[[ remapMetafieldValues[mf.handle] === val.id ? '✓' : '' ]]</span>
+                          [[ val.name ]]
+                        </div>
+                        <div v-if="remapFilteredMetafieldValues(mf.handle).length === 0" class="select-option disabled">No matching values</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="field-group">
+                    <input type="text" v-model="remapMetafieldValues[mf.handle]" class="cp-input" :placeholder="mf.name + '…'">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Apply button -->
+          <div style="margin-top: 1rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+            <button
+              @click="applyRemapping"
+              :disabled="remapApplying || remapEffectiveSelection.length === 0 || (remapSetTags.length === 0 && remapRemoveTags.length === 0 && !remapSetCategoryId && Object.values(remapMetafieldValues).every(v => !v || (Array.isArray(v) && v.length === 0)))"
+              class="btn-sm btn-apply">
+              <span v-if="!remapApplying">Apply to [[ remapEffectiveSelection.length ]] product[[ remapEffectiveSelection.length !== 1 ? 's' : '' ]] →</span>
+              <span v-else>Applying… ([[ remapApplyProgress ]]/[[ remapEffectiveSelection.length ]])</span>
+            </button>
+            <div v-if="remapError" class="error-message" style="margin: 0;">[[ remapError ]]</div>
+          </div>
+
+          <!-- Apply result -->
+          <div v-if="remapApplyResult" style="margin-top: 0.75rem;">
+            <div v-if="remapApplyResult.errors && remapApplyResult.errors.length > 0" class="error-message">
+              <strong>Errors ([[ remapApplyResult.errors.length ]]):</strong>
+              <ul style="margin: 0.25rem 0 0; padding-left: 1.25rem;">
+                <li v-for="e in remapApplyResult.errors.slice(0, 10)" :key="e">[[ e ]]</li>
+                <li v-if="remapApplyResult.errors.length > 10" style="color: #666;">… and [[ remapApplyResult.errors.length - 10 ]] more</li>
+              </ul>
+            </div>
+            <div v-if="remapApplyResult.updated > 0" class="success-message">
+              Successfully updated [[ remapApplyResult.updated ]] of [[ remapApplyResult.total ]] product[[ remapApplyResult.total !== 1 ? 's' : '' ]].
+            </div>
+          </div>
+
+        </fieldset>
+
+      </div>
+    </div>
+  </div>
+
 {% endblock %}
 
 {% block extra_js %}
@@ -1842,6 +2261,42 @@ createApp({
       cpImgSuccess: null,
       cpDragIdx: null,
       cpDragOverIdx: null,
+
+      // ── Product Remapping ──────────────────────────────────
+      remapCollapsed: true,
+      remapProductsLoaded: false,
+      remapAllProducts: [],
+      remapLoading: false,
+
+      // Match criteria
+      remapMatchTags: [],
+      remapMatchTagSearch: '',
+      remapMatchCategoryId: '',
+      remapMatchCategoryName: '',
+      remapMatchCategorySearch: '',
+      remapMatchVendor: '',
+
+      // Set new values
+      remapSetTags: [],
+      remapSetTagSearch: '',
+      remapRemoveTags: [],
+      remapRemoveTagSearch: '',
+      remapSetCategoryId: '',
+      remapSetCategoryName: '',
+      remapSetCategorySearch: '',
+      remapCategoryMetafields: [],
+      remapMetafieldValues: {},
+      remapMetafieldSearches: {},
+      remapShowAllMetafields: false,
+
+      // Selection
+      remapSelectedIds: [],
+
+      // Apply state
+      remapApplying: false,
+      remapApplyProgress: 0,
+      remapApplyResult: null,
+      remapError: null,
     };
   },
   computed: {
@@ -2029,6 +2484,80 @@ createApp({
       return this.cpCategoryMetafields.filter(mf =>
         !priority.some(p => mf.handle.toLowerCase().includes(p) || mf.name.toLowerCase().includes(p.replace('_', ' ')))
       );
+    },
+
+    // ── Remapping computed ──────────────────────────────────
+    remapMatchedProducts() {
+      let products = this.remapAllProducts;
+      if (this.remapMatchTags.length > 0) {
+        products = products.filter(p =>
+          this.remapMatchTags.every(tag => p.tags.includes(tag))
+        );
+      }
+      if (this.remapMatchCategoryId) {
+        products = products.filter(p => p.category_id === this.remapMatchCategoryId);
+      }
+      if (this.remapMatchVendor.trim()) {
+        const v = this.remapMatchVendor.trim().toLowerCase();
+        products = products.filter(p => p.vendor.toLowerCase().includes(v));
+      }
+      return products;
+    },
+    remapFilteredMatchTags() {
+      const q = (this.remapMatchTagSearch || '').toLowerCase().trim();
+      const tags = this.allProductTags.filter(t => !this.remapMatchTags.includes(t));
+      if (!q) return tags.slice(0, 50);
+      return tags.filter(t => t.toLowerCase().includes(q)).slice(0, 50);
+    },
+    remapFilteredSetTags() {
+      const q = (this.remapSetTagSearch || '').toLowerCase().trim();
+      const tags = this.allProductTags.filter(t => !this.remapSetTags.includes(t));
+      if (!q) return tags.slice(0, 50);
+      return tags.filter(t => t.toLowerCase().includes(q)).slice(0, 50);
+    },
+    remapFilteredRemoveTags() {
+      const q = (this.remapRemoveTagSearch || '').toLowerCase().trim();
+      const tagsOnMatched = new Set();
+      for (const p of this.remapMatchedProducts) {
+        for (const t of p.tags) tagsOnMatched.add(t);
+      }
+      const sorted = [...tagsOnMatched].filter(t => !this.remapRemoveTags.includes(t)).sort();
+      if (!q) return sorted.slice(0, 50);
+      return sorted.filter(t => t.toLowerCase().includes(q)).slice(0, 50);
+    },
+    remapFilteredMatchCategories() {
+      const q = (this.remapMatchCategorySearch || '').toLowerCase().trim();
+      if (!q) return this.taxonomyCategories.slice(0, 50);
+      return this.taxonomyCategories
+        .filter(c => c.fullName.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+        .slice(0, 50);
+    },
+    remapFilteredSetCategories() {
+      const q = (this.remapSetCategorySearch || '').toLowerCase().trim();
+      if (!q) return this.taxonomyCategories.slice(0, 50);
+      return this.taxonomyCategories
+        .filter(c => c.fullName.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+        .slice(0, 50);
+    },
+    remapPriorityMetafields() {
+      const priority = ['age_group', 'target_gender'];
+      return this.remapCategoryMetafields.filter(mf =>
+        priority.some(p => mf.handle.toLowerCase().includes(p) || mf.name.toLowerCase().includes(p.replace('_', ' ')))
+      );
+    },
+    remapOtherMetafields() {
+      const priority = ['age_group', 'target_gender'];
+      return this.remapCategoryMetafields.filter(mf =>
+        !priority.some(p => mf.handle.toLowerCase().includes(p) || mf.name.toLowerCase().includes(p.replace('_', ' ')))
+      );
+    },
+    remapEffectiveSelection() {
+      const matchedIds = new Set(this.remapMatchedProducts.map(p => p.id));
+      return this.remapSelectedIds.filter(id => matchedIds.has(id));
+    },
+    remapAllSelected() {
+      return this.remapMatchedProducts.length > 0 &&
+        this.remapMatchedProducts.every(p => this.remapSelectedIds.includes(p.id));
     },
   },
   mounted() {
@@ -4750,6 +5279,227 @@ createApp({
         this.cpImgError = 'Failed to delete image.';
       } finally {
         this.cpImgUploading = false;
+      }
+    },
+    // ── Product Remapping methods ──────────────────────────────
+    async toggleRemapSection() {
+      this.remapCollapsed = !this.remapCollapsed;
+      if (!this.remapCollapsed) {
+        await this.loadTaxonomy();
+        await this.loadProductTags();
+        await this.loadAllProducts();
+      }
+    },
+
+    async loadAllProducts() {
+      if (this.remapProductsLoaded) return;
+      this.remapLoading = true;
+      try {
+        const resp = await fetch('/product-tools/all-products/');
+        const data = await resp.json();
+        this.remapAllProducts = data.products || [];
+        this.remapProductsLoaded = true;
+      } catch (err) {
+        console.error('Failed to load products:', err);
+      } finally {
+        this.remapLoading = false;
+      }
+    },
+
+    remapToggleMatchTag(tag) {
+      if (this.remapMatchTags.includes(tag)) {
+        this.remapMatchTags = this.remapMatchTags.filter(t => t !== tag);
+      } else {
+        this.remapMatchTags.push(tag);
+      }
+      this.remapMatchTagSearch = '';
+    },
+
+    remapToggleSetTag(tag) {
+      if (this.remapSetTags.includes(tag)) {
+        this.remapSetTags = this.remapSetTags.filter(t => t !== tag);
+      } else {
+        this.remapSetTags.push(tag);
+      }
+      this.remapSetTagSearch = '';
+    },
+
+    remapAddCustomSetTag() {
+      const tag = (this.remapSetTagSearch || '').trim();
+      if (tag && !this.remapSetTags.includes(tag)) {
+        this.remapSetTags.push(tag);
+      }
+      this.remapSetTagSearch = '';
+    },
+
+    remapToggleRemoveTag(tag) {
+      if (this.remapRemoveTags.includes(tag)) {
+        this.remapRemoveTags = this.remapRemoveTags.filter(t => t !== tag);
+      } else {
+        this.remapRemoveTags.push(tag);
+      }
+      this.remapRemoveTagSearch = '';
+    },
+
+    selectRemapMatchCategory(cat) {
+      this.remapMatchCategoryId = cat.id;
+      this.remapMatchCategoryName = cat.fullName;
+      this.remapMatchCategorySearch = '';
+      this.activeDropdown = null;
+    },
+
+    selectRemapSetCategory(cat) {
+      this.remapSetCategoryId = cat.id;
+      this.remapSetCategoryName = cat.fullName;
+      this.remapSetCategorySearch = '';
+      this.activeDropdown = null;
+      this.remapMetafieldValues = {};
+      this.remapMetafieldSearches = {};
+      this.remapCategoryMetafields = [];
+      this._loadRemapCategoryMetafields(cat.id);
+    },
+
+    async _loadRemapCategoryMetafields(categoryId) {
+      try {
+        const resp = await fetch('/product-tools/category-metafields/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ category_id: categoryId }),
+        });
+        const data = await resp.json();
+        this.remapCategoryMetafields = data.metafields || [];
+        for (const mf of this.remapCategoryMetafields) {
+          if (!(mf.handle in this.remapMetafieldValues)) {
+            this.remapMetafieldValues[mf.handle] = mf.is_list ? [] : '';
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load category metafields:', err);
+      }
+    },
+
+    remapToggleMetafieldListValue(handle, id) {
+      const arr = this.remapMetafieldValues[handle] || [];
+      const idx = arr.indexOf(id);
+      if (idx >= 0) arr.splice(idx, 1);
+      else arr.push(id);
+      this.remapMetafieldValues[handle] = [...arr];
+    },
+
+    remapRemoveMetafieldListValue(handle, id) {
+      this.remapMetafieldValues[handle] = (this.remapMetafieldValues[handle] || []).filter(v => v !== id);
+    },
+
+    remapMetafieldValueLabel(handle) {
+      const mf = this.remapCategoryMetafields.find(m => m.handle === handle);
+      if (!mf || !mf.values) return this.remapMetafieldValues[handle];
+      const val = mf.values.find(v => v.id === this.remapMetafieldValues[handle]);
+      return val ? val.name : this.remapMetafieldValues[handle];
+    },
+
+    remapMetafieldValueLabelById(handle, id) {
+      const mf = this.remapCategoryMetafields.find(m => m.handle === handle);
+      if (!mf || !mf.values) return id;
+      const val = mf.values.find(v => v.id === id);
+      return val ? val.name : id;
+    },
+
+    remapFilteredMetafieldValues(handle) {
+      const mf = this.remapCategoryMetafields.find(m => m.handle === handle);
+      if (!mf || !mf.values) return [];
+      const q = (this.remapMetafieldSearches[handle] || '').toLowerCase();
+      if (!q) return mf.values.slice(0, 50);
+      return mf.values.filter(v => v.name.toLowerCase().includes(q)).slice(0, 50);
+    },
+
+    async applyRemapping() {
+      if (this.remapMatchedProducts.length === 0) return;
+
+      const metafield_values = [];
+      for (const mf of this.remapCategoryMetafields) {
+        const value = this.remapMetafieldValues[mf.handle];
+        if (mf.is_list && Array.isArray(value) && value.length > 0) {
+          const valNames = value.map(id => {
+            const v = mf.values ? mf.values.find(o => o.id === id) : null;
+            return v ? v.name : '';
+          });
+          metafield_values.push({ name: mf.name, value: JSON.stringify(value), value_name: valNames.join(', ') });
+        } else if (value && !Array.isArray(value)) {
+          const valObj = mf.values ? mf.values.find(v => v.id === value) : null;
+          metafield_values.push({ name: mf.name, value: value, value_name: valObj ? valObj.name : '' });
+        }
+      }
+
+      const allProductIds = this.remapEffectiveSelection;
+      const BATCH_SIZE = 10;
+
+      this.remapApplying = true;
+      this.remapApplyProgress = 0;
+      this.remapError = null;
+      this.remapApplyResult = null;
+
+      let totalUpdated = 0;
+      let totalErrors = [];
+
+      try {
+        for (let i = 0; i < allProductIds.length; i += BATCH_SIZE) {
+          const batch = allProductIds.slice(i, i + BATCH_SIZE);
+
+          let data;
+          try {
+            const resp = await fetch('/product-tools/remap-products/apply/', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                product_ids: batch,
+                tags_to_add: this.remapSetTags,
+                tags_to_remove: this.remapRemoveTags,
+                category_id: this.remapSetCategoryId || null,
+                metafield_values,
+              }),
+            });
+            data = await resp.json();
+          } catch (err) {
+            totalErrors.push(`Batch ${Math.floor(i / BATCH_SIZE) + 1} request failed: ${err}`);
+            this.remapApplyProgress = i + batch.length;
+            continue;
+          }
+
+          if (data.error) {
+            totalErrors.push(data.error);
+          } else {
+            totalUpdated += data.updated || 0;
+            totalErrors.push(...(data.errors || []));
+
+            // Update local cache for every succeeded product
+            const succeededIds = new Set(data.succeeded_ids || []);
+            for (const productId of batch) {
+              if (!succeededIds.has(productId)) continue;
+              const product = this.remapAllProducts.find(p => p.id === productId);
+              if (!product) continue;
+              if (data.tag_updates && data.tag_updates[productId]) {
+                product.tags = data.tag_updates[productId];
+              }
+              if (this.remapSetCategoryId) {
+                product.category_id = this.remapSetCategoryId;
+                product.category_name = this.remapSetCategoryName;
+              }
+            }
+          }
+
+          this.remapApplyProgress = i + batch.length;
+        }
+
+        this.remapApplyResult = {
+          updated: totalUpdated,
+          total: allProductIds.length,
+          errors: totalErrors,
+        };
+      } catch (err) {
+        this.remapError = 'Unexpected error during remapping.';
+        console.error(err);
+      } finally {
+        this.remapApplying = false;
       }
     },
   },
