@@ -1143,19 +1143,30 @@
         <div v-if="cpUniqueColors.length > 0" style="margin-bottom: 1rem;">
           <h4 style="margin-bottom: 0.5rem;">Color Images</h4>
           <p class="tool-description" style="margin-top: 0;">
-            Provide an image URL for each color. Leave blank to skip.
+            Upload a local image or provide a URL for each color. Leave blank to skip.
           </p>
           <div class="image-url-list">
             <div v-for="color in cpUniqueColors" :key="color" class="image-url-row">
               <div class="image-url-label">
                 <span class="color-badge">[[ color ]]</span>
               </div>
-              <input
-                type="url"
-                v-model="cpColorImageUrls[color]"
-                placeholder="https://… image URL"
-                class="image-url-input"
-              >
+              <div class="image-input-area">
+                <label class="file-upload-btn">
+                  <input type="file" accept="image/*" @change="cpOnColorImageFileChange(color, $event)" style="display:none">
+                  [[ cpColorImageFiles[color] ? 'Change file…' : 'Upload image…' ]]
+                </label>
+                <template v-if="cpColorImageFiles[color]">
+                  <div class="image-file-info">
+                    <img :src="cpColorImageFiles[color].preview" class="image-thumb" alt="preview">
+                    <span class="image-file-name">[[ cpColorImageFiles[color].fileName ]]</span>
+                    <button type="button" class="image-clear-btn" @click="cpClearColorImageFile(color)" title="Remove">✕</button>
+                  </div>
+                </template>
+                <template v-else>
+                  <span class="image-input-or">or</span>
+                  <input type="text" v-model="cpColorImageUrls[color]" placeholder="https://… image URL" class="image-url-input">
+                </template>
+              </div>
             </div>
           </div>
         </div>
@@ -1664,6 +1675,7 @@ createApp({
       cpVariantResult: null,
       cpCurrentGroup: null,
       cpColorImageUrls: {},
+      cpColorImageFiles: {},         // color → { file, fileName, preview }
       cpSavedColorImages: {},        // color → [url, …] preserved for Step 5 image upload
 
       // Step 5: Images
@@ -3740,6 +3752,7 @@ createApp({
     _goToVariantsStep() {
       // Initialize color image URL inputs, auto-filling from vendor data when available
       this.cpColorImageUrls = {};
+      this.cpColorImageFiles = {};
       for (const color of this.cpUniqueColors) {
         const variant = this.cpGroupVariants.find(v =>
           (v.color || '').trim() === color && v.variant_image_url
@@ -3748,6 +3761,26 @@ createApp({
       }
       this.cpStep = 4;
       this.cpError = null;
+    },
+
+    cpOnColorImageFileChange(color, event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        this.cpColorImageFiles = {
+          ...this.cpColorImageFiles,
+          [color]: { file, fileName: file.name, preview: e.target.result },
+        };
+        this.cpColorImageUrls[color] = '';
+      };
+      reader.readAsDataURL(file);
+    },
+
+    cpClearColorImageFile(color) {
+      const updated = { ...this.cpColorImageFiles };
+      delete updated[color];
+      this.cpColorImageFiles = updated;
     },
 
     cpSelectAllVariants() {
@@ -3787,19 +3820,59 @@ createApp({
         v.shopify_product_title = this.cpTitle;
       }
 
-      // Build color_image_urls mapping: { product_id: { color: url } }
-      const colorImages = {};
-      for (const [color, url] of Object.entries(this.cpColorImageUrls)) {
-        if (!url || !url.trim()) continue;
-        if (!colorImages[this.cpCreatedProductId]) colorImages[this.cpCreatedProductId] = {};
-        colorImages[this.cpCreatedProductId][color] = url.trim();
-      }
-
       this.addingVariants = true;
       this.cpError = null;
       this.cpVariantResult = null;
 
       try {
+        // Stage-upload any local files first, then resolve their resourceUrls into cpColorImageUrls
+        const fileColors = Object.entries(this.cpColorImageFiles)
+          .filter(([, f]) => f && f.file);
+
+        if (fileColors.length > 0) {
+          const stageResp = await fetch('/product-tools/stage-image-uploads/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              files: fileColors.map(([, f]) => ({
+                filename: f.fileName,
+                mimeType: f.file.type || 'image/jpeg',
+                fileSize: f.file.size,
+              })),
+            }),
+          });
+          const stageData = await stageResp.json();
+          if (stageData.error) {
+            this.cpVariantResult = { errors: [stageData.error], created: [] };
+            return;
+          }
+
+          const targets = stageData.targets || [];
+          for (let i = 0; i < targets.length; i++) {
+            const [color, f] = fileColors[i];
+            const target = targets[i];
+            const formData = new FormData();
+            for (const param of target.parameters) {
+              formData.append(param.name, param.value);
+            }
+            formData.append('file', f.file);
+            const uploadResp = await fetch(target.url, { method: 'POST', body: formData });
+            if (uploadResp.ok) {
+              this.cpColorImageUrls[color] = target.resourceUrl;
+            } else {
+              console.error('Staged upload failed for color', color);
+            }
+          }
+        }
+
+        // Build color_image_urls mapping: { product_id: { color: url } }
+        const colorImages = {};
+        for (const [color, url] of Object.entries(this.cpColorImageUrls)) {
+          if (!url || !url.trim()) continue;
+          if (!colorImages[this.cpCreatedProductId]) colorImages[this.cpCreatedProductId] = {};
+          colorImages[this.cpCreatedProductId][color] = url.trim();
+        }
+
         const response = await fetch('/product-tools/add-variants/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
