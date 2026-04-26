@@ -1139,8 +1139,62 @@
           </div>
         </div>
 
-        <!-- Color Image URLs -->
-        <div v-if="cpUniqueColors.length > 0" style="margin-bottom: 1rem;">
+        <!-- Helikon-Tex: auto-fetched images from partner portal -->
+        <div v-if="cpIsHelikon && cpUniqueColors.length > 0" style="margin-bottom: 1rem;">
+          <h4 style="margin-bottom: 0.5rem;">Color Images</h4>
+          <div v-if="cpHelikonLoading" class="tool-description">Fetching images from Helikon-Tex…</div>
+          <div v-else-if="cpHelikonError" class="error-message">[[ cpHelikonError ]]</div>
+          <div v-else-if="cpHelikonImages">
+            <p class="tool-description" style="margin-top: 0;">
+              Images fetched from the Helikon-Tex partner portal. Auto-matched by color code where possible.
+            </p>
+
+            <!-- Per-color image selector -->
+            <div class="image-url-list">
+              <div v-for="color in cpUniqueColors" :key="color" class="image-url-row">
+                <div class="image-url-label">
+                  <span class="color-badge">[[ color ]]</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                  <img v-if="cpHelikonColorSel[color]"
+                    :src="'/product-tools/helikon-image-proxy?filename=' + encodeURIComponent(cpHelikonColorSel[color])"
+                    class="image-thumb" alt="preview" style="height: 48px; border-radius: 3px;">
+                  <select v-model="cpHelikonColorSel[color]" class="cp-input" style="max-width: 340px; font-size: 0.85rem;">
+                    <option value="">— No variant image —</option>
+                    <option v-for="img in cpHelikonImages.variant_images" :key="img.filename" :value="img.filename">
+                      [[ img.filename ]]
+                    </option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- Additional images preview -->
+            <div v-if="cpHelikonImages.additional_images.length > 0 || cpHelikonImages.variant_images.length > Object.values(cpHelikonColorSel).filter(f=>f).length"
+              style="margin-top: 1rem;">
+              <h5 style="margin-bottom: 0.25rem; font-size: 0.85rem; color: #555;">Additional images (auto-added to product gallery)</h5>
+              <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.25rem;">
+                <div v-for="img in cpHelikonImages.additional_images" :key="img.filename"
+                  style="display: flex; flex-direction: column; align-items: center; font-size: 0.7rem; max-width: 72px;">
+                  <img :src="'/product-tools/helikon-image-proxy?filename=' + encodeURIComponent(img.filename)"
+                    style="height: 40px; border-radius: 3px; margin-bottom: 2px;" alt="">
+                  <span style="text-align: center; word-break: break-all; color: #666;">[[ img.filename ]]</span>
+                </div>
+                <div v-for="img in cpHelikonImages.variant_images.filter(i => !Object.values(cpHelikonColorSel).includes(i.filename))"
+                  :key="'unsel-' + img.filename"
+                  style="display: flex; flex-direction: column; align-items: center; font-size: 0.7rem; max-width: 72px;">
+                  <img :src="'/product-tools/helikon-image-proxy?filename=' + encodeURIComponent(img.filename)"
+                    style="height: 40px; border-radius: 3px; margin-bottom: 2px; opacity: 0.7;" alt="">
+                  <span style="text-align: center; word-break: break-all; color: #888;">[[ img.filename ]]</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-else class="tool-description">No images found for this product code.</div>
+        </div>
+
+        <!-- Standard color image input (non-Helikon vendors) -->
+        <div v-if="!cpIsHelikon && cpUniqueColors.length > 0" style="margin-bottom: 1rem;">
           <h4 style="margin-bottom: 0.5rem;">Color Images</h4>
           <p class="tool-description" style="margin-top: 0;">
             Upload a local image or provide a URL for each color. Leave blank to skip.
@@ -1678,6 +1732,13 @@ createApp({
       cpColorImageFiles: {},         // color → { file, fileName, preview }
       cpSavedColorImages: {},        // color → [url, …] preserved for Step 5 image upload
 
+      // Step 4: Helikon-Tex image matching
+      cpHelikonImages: null,         // { variant_images: [...], additional_images: [...] }
+      cpHelikonLoading: false,
+      cpHelikonError: null,
+      cpHelikonColorSel: {},         // color → selected filename ('' = none)
+      cpHelikonStaging: false,
+
       // Step 5: Images
       cpImages: [],
       cpImgUrlInput: '',
@@ -1852,6 +1913,9 @@ createApp({
       const tags = this.allProductTags.filter(t => !this.cpTags.includes(t));
       if (!q) return tags.slice(0, 50);
       return tags.filter(t => t.toLowerCase().includes(q)).slice(0, 50);
+    },
+    cpIsHelikon() {
+      return this.cpVendor === 'Helikon-Tex';
     },
     cpAllVariantsSelected() {
       if (this.cpGroupVariants.length === 0) return false;
@@ -2779,6 +2843,13 @@ createApp({
           this.cpSavedColorImages[c] = [...v.color_images];
         }
       }
+
+      // Reset Helikon image state
+      this.cpHelikonImages = null;
+      this.cpHelikonLoading = false;
+      this.cpHelikonError = null;
+      this.cpHelikonColorSel = {};
+      this.cpHelikonStaging = false;
 
       this.showCreateProductModal = true;
 
@@ -3761,6 +3832,53 @@ createApp({
       }
       this.cpStep = 4;
       this.cpError = null;
+
+      // For Helikon-Tex: fetch and auto-match images from partner portal
+      if (this.cpIsHelikon && this.cpCurrentGroup) {
+        this._fetchHelikonImages(this.cpCurrentGroup.code);
+      }
+    },
+
+    async _fetchHelikonImages(productCode) {
+      this.cpHelikonLoading = true;
+      this.cpHelikonError = null;
+      this.cpHelikonImages = null;
+      this.cpHelikonColorSel = {};
+      try {
+        const resp = await fetch('/product-tools/helikon-images/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ product_code: productCode }),
+        });
+        const data = await resp.json();
+        if (data.error) { this.cpHelikonError = data.error; return; }
+        this.cpHelikonImages = data;
+
+        // Auto-match each color to a variant image by color code from SKU
+        const sel = {};
+        for (const color of this.cpUniqueColors) {
+          const colorCode = this._getHelikonColorCode(color);
+          const match = colorCode
+            ? data.variant_images.find(img => img.color_code.toLowerCase() === colorCode.toLowerCase())
+            : null;
+          sel[color] = match ? match.filename : '';
+        }
+        this.cpHelikonColorSel = sel;
+      } catch (err) {
+        this.cpHelikonError = 'Failed to fetch Helikon-Tex images.';
+        console.error(err);
+      } finally {
+        this.cpHelikonLoading = false;
+      }
+    },
+
+    _getHelikonColorCode(color) {
+      // Extract color code from SKU: everything after productCode + '-', first segment only
+      const variant = this.cpGroupVariants.find(v => (v.color || '').trim() === color);
+      if (!variant || !variant.sku || !variant.product_code) return null;
+      const prefix = variant.product_code + '-';
+      if (!variant.sku.startsWith(prefix)) return null;
+      return variant.sku.slice(prefix.length).split('-')[0] || null;
     },
 
     cpOnColorImageFileChange(color, event) {
@@ -3825,6 +3943,31 @@ createApp({
       this.cpVariantResult = null;
 
       try {
+        // Helikon-Tex: stage-upload selected variant images server-side first
+        if (this.cpIsHelikon && this.cpHelikonImages) {
+          const helikonPairs = Object.entries(this.cpHelikonColorSel).filter(([, f]) => f);
+          if (helikonPairs.length > 0) {
+            this.cpHelikonStaging = true;
+            try {
+              const stageResp = await fetch('/product-tools/helikon-stage-images/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filenames: helikonPairs.map(([, f]) => f) }),
+              });
+              const stageData = await stageResp.json();
+              if (stageData.error) {
+                this.cpVariantResult = { errors: [stageData.error], created: [] };
+                return;
+              }
+              for (const [color, filename] of helikonPairs) {
+                if (stageData[filename]) this.cpColorImageUrls[color] = stageData[filename];
+              }
+            } finally {
+              this.cpHelikonStaging = false;
+            }
+          }
+        }
+
         // Stage-upload any local files first, then resolve their resourceUrls into cpColorImageUrls
         const fileColors = Object.entries(this.cpColorImageFiles)
           .filter(([, f]) => f && f.file);
@@ -3924,8 +4067,10 @@ createApp({
         const data = await resp.json();
         this.cpImages = data.images || [];
 
-        // Auto-add images from vendor data (skipping URLs already on the product)
-        if (Object.keys(this.cpSavedColorImages).length > 0) {
+        // Auto-add additional images
+        if (this.cpIsHelikon && this.cpHelikonImages) {
+          await this._cpHelikonAutoAddImages();
+        } else if (Object.keys(this.cpSavedColorImages).length > 0) {
           await this._cpAutoAddColorImages();
         }
       } catch (err) {
@@ -3933,6 +4078,50 @@ createApp({
         this.cpImgError = 'Failed to load existing images.';
       } finally {
         this.cpImgLoading = false;
+      }
+    },
+
+    async _cpHelikonAutoAddImages() {
+      // Collect filenames to auto-add to the product gallery:
+      //   - images classified as additional (back/detail/a*)
+      //   - variant images not selected for any color
+      const selectedFilenames = new Set(Object.values(this.cpHelikonColorSel).filter(f => f));
+      const toAdd = [
+        ...this.cpHelikonImages.additional_images.map(img => img.filename),
+        ...this.cpHelikonImages.variant_images
+          .filter(img => !selectedFilenames.has(img.filename))
+          .map(img => img.filename),
+      ];
+      const uniqueFiles = [...new Set(toAdd)];
+      if (uniqueFiles.length === 0) return;
+
+      this.cpImgUploading = true;
+      try {
+        const stageResp = await fetch('/product-tools/helikon-stage-images/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filenames: uniqueFiles }),
+        });
+        const stageData = await stageResp.json();
+        if (stageData.error) { this.cpImgError = stageData.error; return; }
+
+        const imageUrls = uniqueFiles.map(f => stageData[f]).filter(u => u);
+        if (imageUrls.length === 0) return;
+
+        const addResp = await fetch('/product-tools/add-product-images/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ product_id: this.cpCreatedProductId, image_urls: imageUrls }),
+        });
+        const addData = await addResp.json();
+        if (addData.error) {
+          this.cpImgError = addData.error;
+        } else {
+          this.cpImages = addData.images || this.cpImages;
+          this.cpImgSuccess = `Auto-added ${imageUrls.length} image(s) from Helikon-Tex.`;
+        }
+      } finally {
+        this.cpImgUploading = false;
       }
     },
 

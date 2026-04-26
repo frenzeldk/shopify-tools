@@ -18,12 +18,11 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime, timedelta, timezone
 from waitress import serve
-from flask import Flask, current_app, g, jsonify, render_template, request, redirect, url_for, session
+from flask import Flask, Response, current_app, g, jsonify, render_template, request, redirect, url_for, session
 from flask_oidc import OpenIDConnect
 from flask_session import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-
 from shopify import (
     init_session as init_gql_session,
     shutdown_session as shutdown_gql_session,
@@ -50,6 +49,7 @@ from shopify import (
     set_product_category_metafields,
     detect_product_options,
     create_product_options,
+    create_staged_uploads,
     fetch_metaobject_type_details,
     fetch_metaobjects_for_definition,
     fetch_product_images,
@@ -67,6 +67,8 @@ from shipmondo import (
     update_barcode
 )
 from microsoft365 import send_missed_pickup_email
+import re
+import requests as _requests
 import shopify as shopify_module
 import threading
 
@@ -107,6 +109,82 @@ tags_cache = {
     "is_refreshing": False
 }
 tags_lock = threading.Lock()
+
+# ── Helikon-Tex image cache ──────────────────
+_HELIKON_BASE_URL = os.environ.get("HELIKON_BASE_URL")
+_HELIKON_AUTH = (os.environ.get("HELIKON_USER"), os.environ.get("HELIKON_PASSWORD"))
+_helikon_listing_cache: list[str] | None = None
+
+
+def _get_helikon_listing() -> list[str]:
+    """Fetch and in-process-cache the Apache directory listing of Helikon-Tex images."""
+    global _helikon_listing_cache
+    if _helikon_listing_cache is not None:
+        return _helikon_listing_cache
+    resp = _requests.get(_HELIKON_BASE_URL, auth=_HELIKON_AUTH, timeout=30)
+    resp.raise_for_status()
+    filenames = re.findall(
+        r'href="([^"?/][^"]*\.(?:jpg|jpeg|png|webp))"',
+        resp.text,
+        re.IGNORECASE,
+    )
+    _helikon_listing_cache = filenames
+    return filenames
+
+
+def _classify_helikon_images(product_code: str, all_files: list[str]) -> dict:
+    """Split Helikon image filenames for a product code into variant and additional groups.
+
+    Additional: 4th dash-separated field starts with 'a', 'back', or 'detail'.
+    Variant: everything else (field 4 is the color code).
+    """
+    prefix = product_code.lower() + "-"
+    variant_images: list[dict] = []
+    additional_images: list[dict] = []
+    for fname in all_files:
+        if not fname.lower().startswith(prefix):
+            continue
+        stem = fname.rsplit(".", 1)[0]
+        parts = stem.split("-")
+        field4 = parts[3].lower() if len(parts) > 3 else ""
+        if field4.startswith("a") or field4.startswith("back") or field4.startswith("detail"):
+            additional_images.append({"filename": fname})
+        else:
+            variant_images.append({"filename": fname, "color_code": parts[3] if len(parts) > 3 else ""})
+    return {"variant_images": variant_images, "additional_images": additional_images}
+
+
+def _helikon_stage_images(filenames: list[str]) -> dict[str, str | None]:
+    """Download Helikon images with basic auth and stage-upload them to Shopify.
+
+    Returns a mapping of filename → Shopify resourceUrl (None if upload failed).
+    """
+
+    downloaded: list[dict] = []
+    for fname in filenames:
+        url = _HELIKON_BASE_URL + fname
+        resp = _requests.get(url, auth=_HELIKON_AUTH, timeout=30)
+        resp.raise_for_status()
+        mime = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+        downloaded.append({"filename": fname, "content": resp.content, "mimeType": mime})
+
+    files_meta = [
+        {"filename": d["filename"], "mimeType": d["mimeType"], "fileSize": len(d["content"])}
+        for d in downloaded
+    ]
+    targets = create_staged_uploads(files_meta)
+
+    result: dict[str, str | None] = {}
+    for i, target in enumerate(targets):
+        fname = filenames[i]
+        data = downloaded[i]
+        form_data = {p["name"]: p["value"] for p in target["parameters"]}
+        files = {"file": (fname, data["content"], data["mimeType"])}
+        upload_resp = _requests.post(target["url"], data=form_data, files=files, timeout=60)
+        result[fname] = target["resourceUrl"] if upload_resp.ok else None
+
+    return result
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def fetch_and_cache_shipmondo_items():
@@ -1661,6 +1739,56 @@ def create_app() -> Flask:
         except Exception as exc:
             current_app.logger.exception("Failed to create staged uploads", exc_info=exc)
             return jsonify({"error": "Failed to create staged uploads."}), 500
+
+    @application.post("/product-tools/helikon-images/")
+    async def product_tools_helikon_images() -> Any:
+        """Return classified Helikon-Tex images for a product code (fetched from partner portal)."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            product_code = payload.get("product_code", "").strip()
+            if not product_code:
+                return jsonify({"error": "product_code is required."}), 400
+            all_files = await asyncio.to_thread(_get_helikon_listing)
+            result = _classify_helikon_images(product_code, all_files)
+            return jsonify(result)
+        except Exception as exc:
+            current_app.logger.exception("Failed to fetch Helikon images", exc_info=exc)
+            return jsonify({"error": "Failed to fetch Helikon images."}), 500
+
+    @application.get("/product-tools/helikon-image-proxy")
+    async def product_tools_helikon_image_proxy() -> Any:
+        """Proxy a single Helikon image so the browser can display it without basic-auth."""
+        filename = request.args.get("filename", "")
+        if not filename or "/" in filename or ".." in filename:
+            return jsonify({"error": "Invalid filename."}), 400
+        try:
+            url = _HELIKON_BASE_URL + filename
+            resp = await asyncio.to_thread(
+                _requests.get, url, auth=_HELIKON_AUTH, timeout=15
+            )
+            resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            return Response(resp.content, content_type=content_type)
+        except Exception as exc:
+            current_app.logger.exception("Failed to proxy Helikon image", exc_info=exc)
+            return jsonify({"error": "Failed to fetch image."}), 500
+
+    @application.post("/product-tools/helikon-stage-images/")
+    async def product_tools_helikon_stage_images() -> Any:
+        """Download Helikon images server-side and stage-upload them to Shopify.
+
+        Returns a JSON object mapping filename → Shopify resourceUrl.
+        """
+        try:
+            payload = request.get_json(silent=True) or {}
+            filenames = payload.get("filenames", [])
+            if not filenames:
+                return jsonify({"error": "filenames is required."}), 400
+            result = await asyncio.to_thread(_helikon_stage_images, filenames)
+            return jsonify(result)
+        except Exception as exc:
+            current_app.logger.exception("Failed to stage Helikon images", exc_info=exc)
+            return jsonify({"error": "Failed to stage Helikon images."}), 500
 
     @application.route("/mail-tools/")
     @oidc.require_login
