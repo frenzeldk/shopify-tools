@@ -214,22 +214,89 @@
   <div v-if="showImageModal" class="modal-overlay" @click.self="showImageModal = false">
     <div class="modal-dialog">
       <h3>Add Variant Images</h3>
-      <p class="tool-description">
-        Provide an image URL for each new color variant. Leave blank to skip.
+      <div v-if="helikonModalLoading" class="tool-description" style="margin-bottom: 0.75rem;">
+        Fetching images from Helikon-Tex…
+      </div>
+      <div v-else-if="helikonModalError" class="error-message" style="margin-bottom: 0.75rem;">
+        [[ helikonModalError ]]
+      </div>
+      <p v-else class="tool-description">
+        <template v-if="selectedVendor === 'entirem'">
+          Images are fetched from Helikon-Tex. Auto-matched by color code where possible.
+          For unmatched colors, select from the list or upload an image.
+        </template>
+        <template v-else>
+          Provide an image URL or upload a file for each new color. Leave blank to skip.
+        </template>
       </p>
       <div class="image-url-list">
-        <div v-for="entry in colorImageEntries" :key="entry.key" class="image-url-row">
+        <div v-for="entry in colorImageEntries" :key="entry.key" class="image-url-row" style="flex-wrap: wrap; gap: 0.5rem;">
           <div class="image-url-label">
             <strong>[[ entry.productTitle ]]</strong>
             <span class="color-badge">[[ entry.color ]]</span>
             <small class="variant-count">([[ entry.skus.length ]] variant[[ entry.skus.length > 1 ? 's' : '' ]])</small>
           </div>
-          <input
-            type="url"
-            v-model="colorImageUrls[entry.key]"
-            placeholder="https://… image URL"
-            class="image-url-input"
-          >
+
+          <!-- Helikon-Tex: image selector -->
+          <template v-if="selectedVendor === 'entirem' && helikonModalImages[entry.productId]">
+            <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; width: 100%;">
+              <img v-if="helikonModalColorSel[entry.key]"
+                :src="'/product-tools/helikon-image-proxy?filename=' + encodeURIComponent(helikonModalColorSel[entry.key])"
+                class="image-thumb" style="height: 40px; border-radius: 3px;" alt="">
+              <select v-model="helikonModalColorSel[entry.key]" class="cp-input" style="max-width: 300px; font-size: 0.85rem;">
+                <option value="">— No variant image —</option>
+                <option v-for="img in helikonModalImages[entry.productId].variant_images"
+                  :key="img.filename" :value="img.filename">
+                  [[ img.filename ]]
+                </option>
+              </select>
+            </div>
+            <!-- Fallback inputs when no image is selected from Helikon -->
+            <template v-if="!helikonModalColorSel[entry.key]">
+              <div class="image-input-area" style="width: 100%; margin-top: 0.25rem;">
+                <label class="file-upload-btn">
+                  <input type="file" accept="image/*"
+                    @change="onModalFileChange(entry.key, $event)" style="display:none">
+                  [[ colorImageFiles[entry.key] ? 'Change file…' : 'Upload image…' ]]
+                </label>
+                <template v-if="colorImageFiles[entry.key]">
+                  <div class="image-file-info">
+                    <img :src="colorImageFiles[entry.key].preview" class="image-thumb" alt="preview">
+                    <span class="image-file-name">[[ colorImageFiles[entry.key].fileName ]]</span>
+                    <button type="button" class="image-clear-btn" @click="clearModalFile(entry.key)" title="Remove">✕</button>
+                  </div>
+                </template>
+                <template v-else>
+                  <span class="image-input-or">or</span>
+                  <input type="text" v-model="colorImageUrls[entry.key]"
+                    placeholder="https://… image URL" class="image-url-input">
+                </template>
+              </div>
+            </template>
+          </template>
+
+          <!-- Standard: file upload + URL input -->
+          <template v-else>
+            <div class="image-input-area">
+              <label class="file-upload-btn">
+                <input type="file" accept="image/*"
+                  @change="onModalFileChange(entry.key, $event)" style="display:none">
+                [[ colorImageFiles[entry.key] ? 'Change file…' : 'Upload image…' ]]
+              </label>
+              <template v-if="colorImageFiles[entry.key]">
+                <div class="image-file-info">
+                  <img :src="colorImageFiles[entry.key].preview" class="image-thumb" alt="preview">
+                  <span class="image-file-name">[[ colorImageFiles[entry.key].fileName ]]</span>
+                  <button type="button" class="image-clear-btn" @click="clearModalFile(entry.key)" title="Remove">✕</button>
+                </div>
+              </template>
+              <template v-else>
+                <span class="image-input-or">or</span>
+                <input type="url" v-model="colorImageUrls[entry.key]"
+                  placeholder="https://… image URL" class="image-url-input">
+              </template>
+            </div>
+          </template>
         </div>
       </div>
       <div class="modal-actions">
@@ -1151,7 +1218,7 @@
 
             <!-- Per-color image selector -->
             <div class="image-url-list">
-              <div v-for="color in cpUniqueColors" :key="color" class="image-url-row">
+              <div v-for="color in cpUniqueColors" :key="color" class="image-url-row" style="flex-wrap: wrap;">
                 <div class="image-url-label">
                   <span class="color-badge">[[ color ]]</span>
                 </div>
@@ -1166,6 +1233,26 @@
                     </option>
                   </select>
                 </div>
+                <!-- Fallback when no Helikon image is selected -->
+                <template v-if="!cpHelikonColorSel[color]">
+                  <div class="image-input-area" style="width: 100%; margin-top: 0.25rem;">
+                    <label class="file-upload-btn">
+                      <input type="file" accept="image/*" @change="cpOnColorImageFileChange(color, $event)" style="display:none">
+                      [[ cpColorImageFiles[color] ? 'Change file…' : 'Upload image…' ]]
+                    </label>
+                    <template v-if="cpColorImageFiles[color]">
+                      <div class="image-file-info">
+                        <img :src="cpColorImageFiles[color].preview" class="image-thumb" alt="preview">
+                        <span class="image-file-name">[[ cpColorImageFiles[color].fileName ]]</span>
+                        <button type="button" class="image-clear-btn" @click="cpClearColorImageFile(color)" title="Remove">✕</button>
+                      </div>
+                    </template>
+                    <template v-else>
+                      <span class="image-input-or">or</span>
+                      <input type="text" v-model="cpColorImageUrls[color]" placeholder="https://… image URL" class="image-url-input">
+                    </template>
+                  </div>
+                </template>
               </div>
             </div>
 
@@ -1638,10 +1725,17 @@ createApp({
       addingVariants: false,
       addVariantResult: (saved && saved.addVariantResult) || null,
 
-      // Image URL modal
+      // Image URL modal (existing-product variant creation)
       showImageModal: false,
       pendingVariants: [],
       colorImageUrls: {},
+      colorImageFiles: {},           // key (productId::color) → { file, fileName, preview }
+
+      // Helikon image modal state (mirrors cpHelikon* but for existing-product flow)
+      helikonModalImages: {},        // productId → { variant_images, additional_images }
+      helikonModalLoading: false,
+      helikonModalError: null,
+      helikonModalColorSel: {},      // productId::color → selected filename or ''
 
       // Color creation modal
       showColorModal: false,
@@ -2247,26 +2341,109 @@ createApp({
       const colorsOnProduct = new Set(this.colorsOnProductCache || []);
 
       this.colorImageUrls = {};
+      this.colorImageFiles = {};
+      this.helikonModalImages = {};
+      this.helikonModalColorSel = {};
+      this.helikonModalLoading = false;
+      this.helikonModalError = null;
+
       const seen = new Set();
       for (const v of selected) {
         const color = (v.color || '').trim();
         if (!color) continue;
-        // Skip colors that already have variants on the product
         if (colorsOnProduct.has(color)) continue;
         const key = `${v.shopify_product_id}::${color}`;
         if (!seen.has(key)) {
           seen.add(key);
-          // Auto-fill with variant image URL if available (e.g. Deerhunter)
           this.colorImageUrls[key] = v.variant_image_url || '';
         }
       }
 
-      // If all colors already exist on the product, skip the modal
       if (seen.size === 0) {
         this.submitVariantsWithImages();
         return;
       }
+
+      // Open modal immediately; Helikon images load in background
       this.showImageModal = true;
+
+      // For Helikon-Tex: fetch and auto-match images asynchronously
+      if (this.selectedVendor === 'entirem') {
+        this._fetchHelikonModalImages(selected);
+      }
+    },
+
+    async _fetchHelikonModalImages(selected) {
+      this.helikonModalLoading = true;
+      const productCodeById = {};
+      for (const v of selected) {
+        if (v.shopify_product_id && v.product_code) {
+          productCodeById[v.shopify_product_id] = v.product_code;
+        }
+      }
+      const uniquePids = [...new Set(selected.map(v => v.shopify_product_id).filter(Boolean))];
+      try {
+        await Promise.all(uniquePids.map(async (pid) => {
+          const productCode = productCodeById[pid];
+          if (!productCode) return;
+          const resp = await fetch('/product-tools/helikon-images/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ product_code: productCode }),
+          });
+          const data = await resp.json();
+          if (data.error) return;
+          this.helikonModalImages = { ...this.helikonModalImages, [pid]: data };
+          // Auto-match colors for this product
+          const newSel = { ...this.helikonModalColorSel };
+          for (const v of selected) {
+            if (v.shopify_product_id !== pid) continue;
+            const color = (v.color || '').trim();
+            if (!color) continue;
+            const key = `${pid}::${color}`;
+            if (!(key in this.colorImageUrls)) continue;
+            if (newSel[key] !== undefined) continue;
+            const colorCode = this._getHelikonColorCodeFromSku(v.sku, v.product_code);
+            const match = colorCode
+              ? data.variant_images.find(img => img.color_code.toLowerCase() === colorCode.toLowerCase())
+              : null;
+            newSel[key] = match ? match.filename : '';
+          }
+          this.helikonModalColorSel = newSel;
+        }));
+      } catch (err) {
+        this.helikonModalError = 'Failed to fetch Helikon-Tex images.';
+        console.error(err);
+      } finally {
+        this.helikonModalLoading = false;
+      }
+    },
+
+    _getHelikonColorCodeFromSku(sku, productCode) {
+      if (!sku || !productCode) return null;
+      const prefix = productCode + '-';
+      if (!sku.startsWith(prefix)) return null;
+      return sku.slice(prefix.length).split('-')[0] || null;
+    },
+
+    onModalFileChange(key, event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        this.colorImageFiles = {
+          ...this.colorImageFiles,
+          [key]: { file, fileName: file.name, preview: e.target.result },
+        };
+        this.colorImageUrls[key] = '';
+      };
+      reader.readAsDataURL(file);
+    },
+
+    clearModalFile(key) {
+      const updated = { ...this.colorImageFiles };
+      delete updated[key];
+      this.colorImageFiles = updated;
     },
 
     // ── Color creation modal helpers ──────────────────────────
@@ -2714,16 +2891,67 @@ createApp({
       this.addVariantResult = null;
       this.showImageModal = false;
 
-      // Build a color_image_urls mapping: { product_id: { color: url } }
-      const colorImages = {};
-      for (const [key, url] of Object.entries(this.colorImageUrls)) {
-        if (!url || !url.trim()) continue;
-        const [productId, color] = key.split('::');
-        if (!colorImages[productId]) colorImages[productId] = {};
-        colorImages[productId][color] = url.trim();
-      }
-
       try {
+        // ── Helikon: stage server-side images ────────────────────────────
+        if (this.selectedVendor === 'entirem') {
+          const helikonPairs = Object.entries(this.helikonModalColorSel).filter(([, f]) => f);
+          if (helikonPairs.length > 0) {
+            const stageResp = await fetch('/product-tools/helikon-stage-images/', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filenames: helikonPairs.map(([, f]) => f) }),
+            });
+            const stageData = await stageResp.json();
+            if (stageData.error) {
+              this.addVariantResult = { errors: [stageData.error], created: [] };
+              return;
+            }
+            for (const [key, filename] of helikonPairs) {
+              if (stageData[filename]) this.colorImageUrls[key] = stageData[filename];
+            }
+          }
+        }
+
+        // ── Stage any local file uploads ─────────────────────────────────
+        const filePairs = Object.entries(this.colorImageFiles).filter(([, f]) => f && f.file);
+        if (filePairs.length > 0) {
+          const stageResp = await fetch('/product-tools/stage-image-uploads/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              files: filePairs.map(([, f]) => ({
+                filename: f.fileName,
+                mimeType: f.file.type || 'image/jpeg',
+                fileSize: f.file.size,
+              })),
+            }),
+          });
+          const stageData = await stageResp.json();
+          if (stageData.error) {
+            this.addVariantResult = { errors: [stageData.error], created: [] };
+            return;
+          }
+          const targets = stageData.targets || [];
+          for (let i = 0; i < targets.length; i++) {
+            const [key, f] = filePairs[i];
+            const target = targets[i];
+            const formData = new FormData();
+            for (const param of target.parameters) formData.append(param.name, param.value);
+            formData.append('file', f.file);
+            const uploadResp = await fetch(target.url, { method: 'POST', body: formData });
+            if (uploadResp.ok) this.colorImageUrls[key] = target.resourceUrl;
+          }
+        }
+
+        // ── Build color_image_urls: { product_id: { color: url } } ───────
+        const colorImages = {};
+        for (const [key, url] of Object.entries(this.colorImageUrls)) {
+          if (!url || !url.trim()) continue;
+          const [productId, color] = key.split('::');
+          if (!colorImages[productId]) colorImages[productId] = {};
+          colorImages[productId][color] = url.trim();
+        }
+
         const response = await fetch('/product-tools/add-variants/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
