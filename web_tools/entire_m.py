@@ -194,6 +194,25 @@ def _get_token(force_refresh: bool = False) -> str:
         return _cached_token
 
 
+# Path → required scope mapping (from sandbox.yaml tag descriptions).
+_PATH_SCOPES: list[tuple[str, str]] = [
+    ("/api/v1/customer", "api:customer-information:read"),
+    ("/api/v1/stocks", "api:stocks:read"),
+    ("/api/v1/prices", "api:prices:read"),
+    ("/api/v1/products", "api:products:read"),
+    ("/api/v1/offer", "api:offer:read"),
+    ("/api/v1/documents", "api:documents:read"),
+    ("/api/v1/orders", "api:orders:read or api:orders:write"),
+]
+
+
+def _required_scope(path: str) -> str | None:
+    for prefix, scope in _PATH_SCOPES:
+        if path.startswith(prefix):
+            return scope
+    return None
+
+
 def _request(method: str, path: str, *, json_body: dict | None = None, params: dict | None = None) -> dict:
     """Authenticated request with one automatic re-login on 401."""
     url = f"{_API_BASE_URL}{path}"
@@ -204,6 +223,17 @@ def _request(method: str, path: str, *, json_body: dict | None = None, params: d
         if resp.status_code == 401 and attempt == 1:
             continue
         break
+
+    if resp.status_code == 403:
+        scope = _required_scope(path)
+        scope_hint = f" (requires scope `{scope}`)" if scope else ""
+        raise EntireMAPIError(
+            f"Entire-M {method} {path}: access denied (HTTP 403). The configured "
+            f"client credentials do not have permission for this endpoint{scope_hint}. "
+            "Ask the Entire-M API administrator to grant the required scope to your "
+            "ClientId, then retry.",
+            status=403,
+        )
 
     text = resp.text
     try:

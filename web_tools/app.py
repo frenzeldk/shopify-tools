@@ -650,7 +650,8 @@ def create_app() -> Flask:
             try:
                 addresses = await asyncio.to_thread(entire_m.get_addresses)
             except entire_m.EntireMAPIError as exc:
-                return jsonify({"error": str(exc), "details": exc.errors}), 502
+                status_code = exc.status if exc.status in (401, 403, 423) else 502
+                return jsonify({"error": str(exc), "details": exc.errors}), status_code
 
             if not addresses:
                 return jsonify({"error": "No delivery addresses available from Entire-M."}), 502
@@ -661,7 +662,8 @@ def create_app() -> Flask:
                     entire_m.split_orderable_items, requested
                 )
             except entire_m.EntireMAPIError as exc:
-                return jsonify({"error": str(exc), "details": exc.errors}), 502
+                status_code = exc.status if exc.status in (401, 403, 423) else 502
+                return jsonify({"error": str(exc), "details": exc.errors}), status_code
 
             if not orderable:
                 return jsonify({
@@ -681,7 +683,7 @@ def create_app() -> Flask:
                     order_number,
                 )
             except entire_m.EntireMAPIError as exc:
-                status_code = 423 if exc.status == 423 else 502
+                status_code = exc.status if exc.status in (401, 403, 423) else 502
                 return jsonify({
                     "error": str(exc),
                     "details": exc.errors,

@@ -1022,8 +1022,12 @@
               });
               const payload = await response.json().catch(() => ({}));
               if (!response.ok) {
+                let title = "Order failed";
+                if (response.status === 423) title = "Order blocked by Entire-M";
+                else if (response.status === 403) title = "Entire-M permission denied";
+                else if (response.status === 401) title = "Entire-M authentication failed";
                 this.entireMModal = {
-                  title: response.status === 423 ? "Order blocked by Entire-M" : "Order failed",
+                  title,
                   message: payload.error || `Request failed (status ${response.status}).`,
                   details: Array.isArray(payload.details) ? payload.details : [],
                 };
