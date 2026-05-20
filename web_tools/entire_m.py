@@ -143,6 +143,22 @@ class EntireMAPIError(Exception):
         self.errors = errors or []
 
 
+def _pick(d: Any, *keys: str, default: Any = None) -> Any:
+    """Return d[key] for the first matching key, comparing case-insensitively.
+
+    The sandbox OpenAPI spec declares fields in camelCase but the actual JSON
+    envelope uses PascalCase (Value, IsSuccess, AccessToken). Accept either.
+    """
+    if not isinstance(d, dict):
+        return default
+    lowered = {k.lower(): k for k in d.keys() if isinstance(k, str)}
+    for key in keys:
+        actual = lowered.get(key.lower())
+        if actual is not None:
+            return d[actual]
+    return default
+
+
 def _login() -> str:
     if not _API_CLIENT_ID or not _API_CLIENT_SECRET:
         raise EntireMAPIError(
@@ -159,10 +175,13 @@ def _login() -> str:
             status=resp.status_code,
         )
     payload = resp.json()
-    value = payload.get("value") or {}
-    token = value.get("accessToken")
+    value = _pick(payload, "value") or {}
+    token = _pick(value, "accessToken") or _pick(payload, "accessToken")
     if not token:
-        raise EntireMAPIError("Entire-M login response missing accessToken.", status=resp.status_code)
+        raise EntireMAPIError(
+            f"Entire-M login response missing accessToken. Payload: {payload!r}",
+            status=resp.status_code,
+        )
     return token
 
 
@@ -195,12 +214,13 @@ def _request(method: str, path: str, *, json_body: dict | None = None, params: d
             status=resp.status_code,
         )
 
-    if resp.status_code >= 400 or not payload.get("isSuccess", True):
-        errors = payload.get("errors") or []
+    is_success = _pick(payload, "isSuccess")
+    if resp.status_code >= 400 or is_success is False:
+        errors = _pick(payload, "errors") or []
         message = "; ".join(
-            (e.get("errorMessage") or "").strip()
+            (_pick(e, "errorMessage") or "").strip()
             for e in errors
-            if isinstance(e, dict) and e.get("errorMessage")
+            if isinstance(e, dict) and _pick(e, "errorMessage")
         ) or f"Entire-M {method} {path} failed (HTTP {resp.status_code})"
         raise EntireMAPIError(message, status=resp.status_code, errors=errors)
 
@@ -210,7 +230,7 @@ def _request(method: str, path: str, *, json_body: dict | None = None, params: d
 def get_addresses() -> list[dict]:
     """GET /api/v1/customer/addresses."""
     payload = _request("GET", "/api/v1/customer/addresses")
-    return payload.get("value") or []
+    return _pick(payload, "value") or []
 
 
 def get_stocks(skus: Iterable[str]) -> dict[str, float]:
@@ -220,9 +240,9 @@ def get_stocks(skus: Iterable[str]) -> dict[str, float]:
         return {}
     payload = _request("POST", "/api/v1/stocks", json_body={"items": items})
     result: dict[str, float] = {}
-    for row in payload.get("value") or []:
-        sku = row.get("sku") or row.get("SKU")
-        qty = row.get("quantity")
+    for row in _pick(payload, "value") or []:
+        sku = _pick(row, "sku")
+        qty = _pick(row, "quantity")
         if sku is None or qty is None:
             continue
         try:
@@ -238,8 +258,8 @@ def get_prices(skus: Iterable[str], page_number: int = 1) -> list[dict]:
     if not items:
         return []
     payload = _request("POST", "/api/v1/prices", json_body={"items": items, "pageNumber": page_number})
-    value = payload.get("value") or {}
-    return value.get("prices") or []
+    value = _pick(payload, "value") or {}
+    return _pick(value, "prices") or []
 
 
 def get_products(skus: Iterable[str], language: str | None = None) -> list[dict]:
@@ -259,9 +279,9 @@ def get_products(skus: Iterable[str], language: str | None = None) -> list[dict]
                 "pageNumber": page,
             },
         )
-        value = payload.get("value") or {}
-        out.extend(value.get("products") or [])
-        if int(value.get("pagesLeft") or 0) <= 0:
+        value = _pick(payload, "value") or {}
+        out.extend(_pick(value, "products") or [])
+        if int(_pick(value, "pagesLeft") or 0) <= 0:
             break
         page += 1
     return out
@@ -403,21 +423,21 @@ def fetch_vendor_products(language: str | None = None) -> list[dict]:
             "/api/v1/products",
             json_body={"language": lang, "pageNumber": page},
         )
-        value = payload.get("value") or {}
-        for p in value.get("products") or []:
-            sku = p.get("sku") or ""
+        value = _pick(payload, "value") or {}
+        for p in _pick(value, "products") or []:
+            sku = _pick(p, "sku") or ""
             if not sku:
                 continue
             sku_parts = sku.split("-")
             product_code = "-".join(sku_parts[:3]) if len(sku_parts) >= 3 else sku
-            full_name = p.get("name") or ""
+            full_name = _pick(p, "name") or ""
             if " - " in full_name:
                 base_name, color = full_name.rsplit(" - ", 1)
             else:
                 base_name, color = full_name, ""
             products_by_sku[sku] = {
                 "sku": sku,
-                "ean": p.get("ean") or "",
+                "ean": _pick(p, "ean") or "",
                 "hs_code": "",
                 "size": "",
                 "name": full_name,
@@ -429,11 +449,11 @@ def fetch_vendor_products(language: str | None = None) -> list[dict]:
                 "price": "",
                 "msrp": "",
                 "currency": "",
-                "weight": str(p.get("weight") or ""),
-                "weight_unit": p.get("weightUnit") or "",
+                "weight": str(_pick(p, "weight") or ""),
+                "weight_unit": _pick(p, "weightUnit") or "",
                 "country_of_origin": "",
             }
-        if int(value.get("pagesLeft") or 0) <= 0:
+        if int(_pick(value, "pagesLeft") or 0) <= 0:
             break
         page += 1
 
@@ -445,20 +465,20 @@ def fetch_vendor_products(language: str | None = None) -> list[dict]:
                 "/api/v1/prices",
                 json_body={"pageNumber": price_page},
             )
-            value = payload.get("value") or {}
-            for pr in value.get("prices") or []:
-                sku = pr.get("sku")
+            value = _pick(payload, "value") or {}
+            for pr in _pick(value, "prices") or []:
+                sku = _pick(pr, "sku")
                 if not sku or sku not in products_by_sku:
                     continue
-                details = pr.get("priceDetails") or []
-                wholesale = next((d for d in details if (d.get("priceType") or "").lower() == "wholesale"), None)
-                msrp = next((d for d in details if (d.get("priceType") or "").lower() == "msrp"), None)
+                details = _pick(pr, "priceDetails") or []
+                wholesale = next((d for d in details if (_pick(d, "priceType") or "").lower() == "wholesale"), None)
+                msrp = next((d for d in details if (_pick(d, "priceType") or "").lower() == "msrp"), None)
                 if wholesale:
-                    products_by_sku[sku]["price"] = str(wholesale.get("price") or "")
-                    products_by_sku[sku]["currency"] = wholesale.get("currency") or ""
+                    products_by_sku[sku]["price"] = str(_pick(wholesale, "price") or "")
+                    products_by_sku[sku]["currency"] = _pick(wholesale, "currency") or ""
                 if msrp:
-                    products_by_sku[sku]["msrp"] = str(msrp.get("price") or "")
-            if int(value.get("pagesLeft") or 0) <= 0:
+                    products_by_sku[sku]["msrp"] = str(_pick(msrp, "price") or "")
+            if int(_pick(value, "pagesLeft") or 0) <= 0:
                 break
             price_page += 1
 
