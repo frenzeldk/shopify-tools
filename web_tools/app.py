@@ -30,7 +30,6 @@ from shopify import (
     calculate_brand_inventory_value,
     update_variant_barcode,
     fetch_order_customer,
-    parse_vendor_csv,
     fetch_shopify_products_by_vendors,
     compare_vendor_products,
     add_variants_to_shopify_product,
@@ -62,6 +61,7 @@ from shopify import (
 )
 from chatgpt import fetch_and_translate_vendor_page, translate_product_data, translate_plain_text
 from deerhunter import dh_fetch_all_products, dh_products_to_vendor_format
+import entire_m
 from shipmondo import (
     fetch_all_shipmondo_items,
     clear_bin_location,
@@ -70,7 +70,6 @@ from shipmondo import (
     update_barcode
 )
 from microsoft365 import send_missed_pickup_email
-import re
 import requests as _requests
 import shopify as shopify_module
 import threading
@@ -120,85 +119,6 @@ products_cache = {
     "is_refreshing": False
 }
 products_lock = threading.Lock()
-
-# ── Helikon-Tex image cache ──────────────────
-_HELIKON_BASE_URL = os.environ.get("HELIKON_BASE_URL")
-_HELIKON_AUTH = (os.environ.get("HELIKON_USER"), os.environ.get("HELIKON_PASSWORD"))
-_helikon_listing_cache: list[str] | None = None
-
-
-def _get_helikon_listing() -> list[str]:
-    """Fetch and in-process-cache the Apache directory listing of Helikon-Tex images."""
-    global _helikon_listing_cache
-    if _helikon_listing_cache is not None:
-        return _helikon_listing_cache
-    resp = _requests.get(_HELIKON_BASE_URL, auth=_HELIKON_AUTH, timeout=30)
-    resp.raise_for_status()
-    filenames = re.findall(
-        r'href="([^"?/][^"]*\.(?:jpg|jpeg|png|webp))"',
-        resp.text,
-        re.IGNORECASE,
-    )
-    _helikon_listing_cache = filenames
-    return filenames
-
-
-def _classify_helikon_images(product_code: str, all_files: list[str]) -> dict:
-    """Split Helikon image filenames for a product code into variant and additional groups.
-
-    Additional categories (with ``category`` field):
-      - "front"  : filename suffix contains the word "front"
-      - "back"   : 4th dash-separated field starts with "back"
-      - "detail" : 4th field starts with "detail"
-      - "a"      : 4th field starts with "a"
-    Variant: everything else (field 4 is the color code).
-    """
-    prefix = product_code.lower() + "-"
-    variant_images: list[dict] = []
-    additional_images: list[dict] = []
-    for fname in all_files:
-        if not fname.lower().startswith(prefix):
-            continue
-        stem = fname.rsplit(".", 1)[0]
-        parts = stem.split("-")
-        field4 = parts[3].lower() if len(parts) > 3 else ""
-        suffix_lower = fname[len(prefix):].lower()
-        if "front" in suffix_lower:
-            additional_images.append({"filename": fname, "category": "front"})
-        elif field4.startswith("back"):
-            additional_images.append({"filename": fname, "category": "back"})
-        elif field4.startswith("detail"):
-            additional_images.append({"filename": fname, "category": "detail"})
-        elif field4.startswith("a"):
-            additional_images.append({"filename": fname, "category": "a"})
-        else:
-            variant_images.append({"filename": fname, "color_code": parts[3] if len(parts) > 3 else ""})
-    return {"variant_images": variant_images, "additional_images": additional_images}
-
-
-def _helikon_stage_images(filenames: list[str]) -> dict[str, str | None]:
-    """Download Helikon images with basic auth and stage-upload them to Shopify.
-
-    Each file is uploaded individually so that a per-file size failure can be
-    retried with a downscaled copy (2000×2000, then 1500×1500).
-
-    Returns a mapping of filename → Shopify resourceUrl (None if upload failed).
-    """
-    result: dict[str, str | None] = {}
-    for fname in filenames:
-        url = _HELIKON_BASE_URL + fname
-        try:
-            resp = _requests.get(url, auth=_HELIKON_AUTH, timeout=30)
-            resp.raise_for_status()
-            mime = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-            resource_url = staged_upload_with_fallback(fname, resp.content, mime)
-            result[fname] = resource_url
-        except Exception as exc:
-            logger.warning("_helikon_stage_images: failed to upload %s: %s", fname, exc)
-            result[fname] = None
-    return result
-# ─────────────────────────────────────────────────────────────────────────────
-
 
 def fetch_and_cache_shipmondo_items():
     """Fetch all Shipmondo items and update the global cache."""
@@ -683,6 +603,101 @@ def create_app() -> Flask:
             return jsonify({"error": "Configuration not found."}), 404
         return jsonify({"status": "deleted", "id": config_id})
 
+    @application.post("/purchase-orders/entire-m-order/")
+    async def purchase_orders_entire_m_order() -> Any:
+        """Place a purchase order with Entire-M for the supplied items.
+
+        Request JSON:
+          {
+            "items": [{"sku": str, "quantity": int, ...passthrough}, ...]
+          }
+
+        Response JSON on success/partial-success:
+          {
+            "order_number": str,
+            "address": {AddressId, Name, ...},
+            "ordered": [{sku, quantity, available, ...passthrough}],
+            "not_ordered": [{sku, quantity, available, reason, ...passthrough}]
+          }
+
+        On a hard block (no address / API error / nothing orderable), returns
+        HTTP 4xx/5xx with {"error": "...", "details": [...]} so the client can
+        surface it as a modal.
+        """
+        try:
+            payload = request.get_json(silent=True) or {}
+            items_in = payload.get("items") or []
+            if not isinstance(items_in, list) or not items_in:
+                return jsonify({"error": "No items provided."}), 400
+
+            requested: list[dict] = []
+            for it in items_in:
+                if not isinstance(it, dict):
+                    continue
+                sku = (it.get("sku") or "").strip()
+                if not sku:
+                    continue
+                try:
+                    qty = int(it.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty <= 0:
+                    continue
+                requested.append({**it, "sku": sku, "quantity": qty})
+            if not requested:
+                return jsonify({"error": "No items with a valid SKU and positive quantity."}), 400
+
+            try:
+                addresses = await asyncio.to_thread(entire_m.get_addresses)
+            except entire_m.EntireMAPIError as exc:
+                return jsonify({"error": str(exc), "details": exc.errors}), 502
+
+            if not addresses:
+                return jsonify({"error": "No delivery addresses available from Entire-M."}), 502
+            address = addresses[0]
+
+            try:
+                orderable, blocked, _stocks = await asyncio.to_thread(
+                    entire_m.split_orderable_items, requested
+                )
+            except entire_m.EntireMAPIError as exc:
+                return jsonify({"error": str(exc), "details": exc.errors}), 502
+
+            if not orderable:
+                return jsonify({
+                    "error": "None of the requested items can be ordered (insufficient stock or unknown SKUs).",
+                    "details": [
+                        {"sku": b.get("sku"), "reason": b.get("reason"), "available": b.get("available")}
+                        for b in blocked
+                    ],
+                }), 409
+
+            order_number = entire_m.make_order_number()
+            try:
+                await asyncio.to_thread(
+                    entire_m.place_order,
+                    [{"sku": it["sku"], "quantity": it["quantity"]} for it in orderable],
+                    int(address.get("addressId") or address.get("AddressId") or 0),
+                    order_number,
+                )
+            except entire_m.EntireMAPIError as exc:
+                status_code = 423 if exc.status == 423 else 502
+                return jsonify({
+                    "error": str(exc),
+                    "details": exc.errors,
+                    "order_number": order_number,
+                }), status_code
+
+            return jsonify({
+                "order_number": order_number,
+                "address": address,
+                "ordered": orderable,
+                "not_ordered": blocked,
+            })
+        except Exception as exc:
+            current_app.logger.exception("Failed to place Entire-M order", exc_info=exc)
+            return jsonify({"error": f"Unexpected error: {exc}"}), 500
+
     @application.route("/inventory-tools/")
     @oidc.require_login
     def inventory_tools() -> str:
@@ -1123,7 +1138,7 @@ def create_app() -> Flask:
                     return jsonify({"error": "A CSV file is required."}), 400
 
                 csv_content = csv_file.read().decode("utf-8-sig")
-                vendor_products = parse_vendor_csv(csv_content)
+                vendor_products = entire_m.parse_vendor_csv(csv_content)
                 current_app.logger.info(
                     f"Parsed {len(vendor_products)} rows from uploaded CSV"
                 )
@@ -1785,8 +1800,8 @@ def create_app() -> Flask:
             product_code = payload.get("product_code", "").strip()
             if not product_code:
                 return jsonify({"error": "product_code is required."}), 400
-            all_files = await asyncio.to_thread(_get_helikon_listing)
-            result = _classify_helikon_images(product_code, all_files)
+            all_files = await asyncio.to_thread(entire_m.get_helikon_listing)
+            result = entire_m.classify_helikon_images(product_code, all_files)
             return jsonify(result)
         except Exception as exc:
             current_app.logger.exception("Failed to fetch Helikon images", exc_info=exc)
@@ -1799,9 +1814,10 @@ def create_app() -> Flask:
         if not filename or "/" in filename or ".." in filename:
             return jsonify({"error": "Invalid filename."}), 400
         try:
-            url = _HELIKON_BASE_URL + filename
+            url = entire_m.helikon_image_url(filename)
+            auth = entire_m.helikon_image_basic_auth()
             resp = await asyncio.to_thread(
-                _requests.get, url, auth=_HELIKON_AUTH, timeout=15
+                _requests.get, url, auth=auth, timeout=15
             )
             resp.raise_for_status()
             content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
@@ -1821,7 +1837,7 @@ def create_app() -> Flask:
             filenames = payload.get("filenames", [])
             if not filenames:
                 return jsonify({"error": "filenames is required."}), 400
-            result = await asyncio.to_thread(_helikon_stage_images, filenames)
+            result = await asyncio.to_thread(entire_m.stage_helikon_images, filenames)
             return jsonify(result)
         except Exception as exc:
             current_app.logger.exception("Failed to stage Helikon images", exc_info=exc)

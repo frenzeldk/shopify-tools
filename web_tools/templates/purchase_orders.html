@@ -220,6 +220,8 @@
             cacheTimestamp: null,
             customColumns: [],
             newCustomColumnName: "",
+            entireMOrdering: false,
+            entireMModal: null,
           };
         },
         computed: {
@@ -266,6 +268,16 @@
             return this.allColumns
               .filter((field) => hiddenSet.has(field) && filteredFields.has(field))
               .map((field) => this.columnLabels[field] || this.formatHeader(field));
+          },
+          selectedConfigName() {
+            if (!this.selectedConfigId) return "";
+            const config = this.savedConfigurations.find(
+              (item) => String(item.id) === String(this.selectedConfigId)
+            );
+            return config ? config.name : "";
+          },
+          isHelikonView() {
+            return this.selectedConfigName === "Helikon-Tex";
           },
         },
         watch: {
@@ -970,6 +982,124 @@
             });
             return rows;
           },
+          collectVisibleOrderItems() {
+            if (!this.gridApi) return [];
+            const items = [];
+            this.gridApi.forEachNodeAfterFilterAndSort((node) => {
+              if (!node || !node.data) return;
+              const sku = node.data.sku;
+              const qty = Number(node.data.missing_qty);
+              if (!sku || !Number.isFinite(qty) || qty <= 0) return;
+              items.push({
+                sku: String(sku),
+                quantity: Math.ceil(qty),
+                title: node.data.title || "",
+                product_title: node.data.product_title || "",
+                product_vendor: node.data.product_vendor || "",
+                barcode: node.data.barcode || "",
+              });
+            });
+            return items;
+          },
+          async placeEntireMOrder() {
+            if (this.entireMOrdering) return;
+            const items = this.collectVisibleOrderItems();
+            if (!items.length) {
+              this.entireMModal = {
+                title: "Nothing to order",
+                message: "No visible rows have a positive missing quantity.",
+                details: [],
+              };
+              return;
+            }
+            this.entireMOrdering = true;
+            try {
+              const response = await fetch("/purchase-orders/entire-m-order/", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "same-origin",
+                body: JSON.stringify({ items }),
+              });
+              const payload = await response.json().catch(() => ({}));
+              if (!response.ok) {
+                this.entireMModal = {
+                  title: response.status === 423 ? "Order blocked by Entire-M" : "Order failed",
+                  message: payload.error || `Request failed (status ${response.status}).`,
+                  details: Array.isArray(payload.details) ? payload.details : [],
+                };
+                return;
+              }
+              this.downloadEntireMReport(payload);
+              const orderedCount = (payload.ordered || []).length;
+              const notOrderedCount = (payload.not_ordered || []).length;
+              this.entireMModal = {
+                title: notOrderedCount ? "Order placed (partial)" : "Order placed",
+                message:
+                  `Entire-M order ${payload.order_number} placed for ${orderedCount} line(s). ` +
+                  (notOrderedCount
+                    ? `${notOrderedCount} item(s) were skipped — see the downloaded XLSX report.`
+                    : `Report XLSX downloaded.`),
+                details: payload.not_ordered || [],
+                ok: true,
+              };
+            } catch (error) {
+              console.error("Failed to place Entire-M order", error);
+              this.entireMModal = {
+                title: "Order failed",
+                message: (error && error.message) || "Unexpected error contacting Entire-M.",
+                details: [],
+              };
+            } finally {
+              this.entireMOrdering = false;
+            }
+          },
+          downloadEntireMReport(payload) {
+            if (typeof XLSX === "undefined") return;
+            const orderNumber = payload.order_number || "order";
+            const address = payload.address || {};
+            const orderedRows = (payload.ordered || []).map((item) => ({
+              SKU: item.sku,
+              "Ordered Quantity": item.quantity,
+              "Available Stock": item.available ?? "",
+              Title: item.title || "",
+              "Product Title": item.product_title || "",
+              Vendor: item.product_vendor || "",
+              Barcode: item.barcode || "",
+            }));
+            const notOrderedRows = (payload.not_ordered || []).map((item) => ({
+              SKU: item.sku,
+              "Requested Quantity": item.quantity,
+              "Available Stock": item.available ?? "",
+              Reason: item.reason || "",
+              Title: item.title || "",
+              "Product Title": item.product_title || "",
+              Vendor: item.product_vendor || "",
+              Barcode: item.barcode || "",
+            }));
+            const summaryRows = [
+              ["Order Number", orderNumber],
+              ["Address", [address.name, address.street, address.postCode, address.city, address.country].filter(Boolean).join(", ")],
+              ["Lines Ordered", orderedRows.length],
+              ["Lines Not Ordered", notOrderedRows.length],
+              ["Generated", new Date().toISOString()],
+            ];
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(summaryRows), "Summary");
+            XLSX.utils.book_append_sheet(
+              workbook,
+              XLSX.utils.json_to_sheet(orderedRows.length ? orderedRows : [{ SKU: "(none)" }]),
+              "Ordered"
+            );
+            XLSX.utils.book_append_sheet(
+              workbook,
+              XLSX.utils.json_to_sheet(notOrderedRows.length ? notOrderedRows : [{ SKU: "(none)" }]),
+              "Not Ordered"
+            );
+            XLSX.writeFile(workbook, `entire-m-order-${orderNumber}.xlsx`, { bookType: "xlsx" });
+          },
+          closeEntireMModal() {
+            this.entireMModal = null;
+          },
           buildEditableHeader() {
             const vm = this;
             function EditableHeader() {}
@@ -1644,6 +1774,16 @@
                   >
                     CSV
                   </button>
+                  <button
+                    v-if="isHelikonView"
+                    type="button"
+                    aria-label="Place purchase order with Entire-M"
+                    @click="placeEntireMOrder"
+                    :disabled="entireMOrdering"
+                  >
+                    <span v-if="entireMOrdering">Ordering…</span>
+                    <span v-else>Order from Entire-M</span>
+                  </button>
                 </div>
                 <button type="button" class="configure-button" @click="openModal">Configure Columns</button>
               </div>
@@ -1776,6 +1916,39 @@
                 <div class="modal-footer">
                   <button type="button" class="secondary" @click="closeDeleteModal">Cancel</button>
                   <button type="button" class="danger" @click="deleteConfiguration">Delete</button>
+                </div>
+              </div>
+            </div>
+            <div
+              v-if="entireMModal"
+              class="modal-overlay"
+              @click.self="closeEntireMModal"
+            >
+              <div class="modal" role="dialog" aria-modal="true">
+                <header>
+                  <h2 class="modal-title" v-text="entireMModal.title"></h2>
+                  <button type="button" aria-label="Close" @click="closeEntireMModal">&times;</button>
+                </header>
+                <div class="modal-body">
+                  <p v-text="entireMModal.message"></p>
+                  <div v-if="entireMModal.details && entireMModal.details.length" style="margin-top: 0.75rem;">
+                    <strong>Affected items:</strong>
+                    <ul style="max-height: 240px; overflow-y: auto; margin-top: 0.5rem; padding-left: 1.25rem;">
+                      <li v-for="(detail, idx) in entireMModal.details" :key="idx">
+                        <template v-if="detail.sku">
+                          <strong v-text="detail.sku"></strong>
+                          <template v-if="detail.reason"> — [[ detail.reason ]]</template>
+                          <template v-else-if="detail.errorMessage"> — [[ detail.errorMessage ]]</template>
+                        </template>
+                        <template v-else>
+                          [[ detail.errorMessage || detail.reason || JSON.stringify(detail) ]]
+                        </template>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" @click="closeEntireMModal">Close</button>
                 </div>
               </div>
             </div>
