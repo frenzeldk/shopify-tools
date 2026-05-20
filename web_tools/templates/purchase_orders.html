@@ -1061,43 +1061,47 @@
             if (typeof XLSX === "undefined") return;
             const orderNumber = payload.order_number || "order";
             const address = payload.address || {};
-            const orderedRows = (payload.ordered || []).map((item) => ({
-              SKU: item.sku,
-              "Ordered Quantity": item.quantity,
-              "Available Stock": item.available ?? "",
-              Title: item.title || "",
-              "Product Title": item.product_title || "",
-              Vendor: item.product_vendor || "",
-              Barcode: item.barcode || "",
-            }));
-            const notOrderedRows = (payload.not_ordered || []).map((item) => ({
-              SKU: item.sku,
-              "Requested Quantity": item.quantity,
-              "Available Stock": item.available ?? "",
-              Reason: item.reason || "",
-              Title: item.title || "",
-              "Product Title": item.product_title || "",
-              Vendor: item.product_vendor || "",
-              Barcode: item.barcode || "",
-            }));
+            const lineRows = [
+              ...(payload.ordered || []).map((item) => ({
+                SKU: item.sku,
+                Attempted: Number(item.quantity) || 0,
+                Actual: Number(item.quantity) || 0,
+                Status: "Ordered",
+                "Available Stock": item.available ?? "",
+                Reason: "",
+                Title: item.title || "",
+                "Product Title": item.product_title || "",
+                Vendor: item.product_vendor || "",
+                Barcode: item.barcode || "",
+              })),
+              ...(payload.not_ordered || []).map((item) => ({
+                SKU: item.sku,
+                Attempted: Number(item.quantity) || 0,
+                Actual: 0,
+                Status: "Not Ordered",
+                "Available Stock": item.available ?? "",
+                Reason: item.reason || "",
+                Title: item.title || "",
+                "Product Title": item.product_title || "",
+                Vendor: item.product_vendor || "",
+                Barcode: item.barcode || "",
+              })),
+            ];
+            const orderedCount = (payload.ordered || []).length;
+            const notOrderedCount = (payload.not_ordered || []).length;
             const summaryRows = [
               ["Order Number", orderNumber],
               ["Address", [address.name, address.street, address.postCode, address.city, address.country].filter(Boolean).join(", ")],
-              ["Lines Ordered", orderedRows.length],
-              ["Lines Not Ordered", notOrderedRows.length],
+              ["Lines Ordered", orderedCount],
+              ["Lines Not Ordered", notOrderedCount],
               ["Generated", new Date().toISOString()],
             ];
             const workbook = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(summaryRows), "Summary");
             XLSX.utils.book_append_sheet(
               workbook,
-              XLSX.utils.json_to_sheet(orderedRows.length ? orderedRows : [{ SKU: "(none)" }]),
-              "Ordered"
-            );
-            XLSX.utils.book_append_sheet(
-              workbook,
-              XLSX.utils.json_to_sheet(notOrderedRows.length ? notOrderedRows : [{ SKU: "(none)" }]),
-              "Not Ordered"
+              XLSX.utils.json_to_sheet(lineRows.length ? lineRows : [{ SKU: "(none)", Attempted: 0, Actual: 0 }]),
+              "Order Lines"
             );
             XLSX.writeFile(workbook, `entire-m-order-${orderNumber}.xlsx`, { bookType: "xlsx" });
           },
