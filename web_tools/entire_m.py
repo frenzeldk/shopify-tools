@@ -292,6 +292,63 @@ def get_prices(skus: Iterable[str], page_number: int = 1) -> list[dict]:
     return _pick(value, "prices") or []
 
 
+# PriceType priority for the "actual purchasing price" — most-discounted first.
+_PURCHASE_PRICE_TYPES = (
+    "price-after-all-discounts",
+    "price-after-discount-policy",
+    "wholesale",
+)
+
+
+def get_purchasing_prices(skus: Iterable[str]) -> dict[str, dict]:
+    """Fetch the post-discount unit price for each SKU.
+
+    Returns sku → {"price": float, "currency": str} using the most-discounted
+    PriceType available (price-after-all-discounts > price-after-discount-policy
+    > wholesale). SKUs without any usable price entry are omitted.
+    """
+    sku_list = [s for s in dict.fromkeys(skus) if s]
+    if not sku_list:
+        return {}
+    items = [{"sku": s} for s in sku_list]
+    result: dict[str, dict] = {}
+    page = 1
+    while True:
+        payload = _request(
+            "POST",
+            "/api/v1/prices",
+            json_body={"items": items, "pageNumber": page},
+        )
+        value = _pick(payload, "value") or {}
+        for pr in _pick(value, "prices") or []:
+            sku = _pick(pr, "sku")
+            if not sku:
+                continue
+            details = _pick(pr, "priceDetails") or []
+            chosen = None
+            for pt in _PURCHASE_PRICE_TYPES:
+                chosen = next(
+                    (d for d in details if (_pick(d, "priceType") or "").lower() == pt),
+                    None,
+                )
+                if chosen is not None:
+                    break
+            if chosen is None:
+                continue
+            try:
+                price = float(_pick(chosen, "price"))
+            except (TypeError, ValueError):
+                continue
+            result[sku] = {
+                "price": price,
+                "currency": (_pick(chosen, "currency") or "").upper(),
+            }
+        if int(_pick(value, "pagesLeft") or 0) <= 0:
+            break
+        page += 1
+    return result
+
+
 def get_products(skus: Iterable[str], language: str | None = None) -> list[dict]:
     """POST /api/v1/products — returns a flat list of products across all pages."""
     items = [{"sku": s} for s in dict.fromkeys(skus) if s]

@@ -674,6 +674,78 @@ def create_app() -> Flask:
                     ],
                 }), 409
 
+            # Verify the post-discount order total meets Entire-M's 400 EUR minimum.
+            try:
+                price_map = await asyncio.to_thread(
+                    entire_m.get_purchasing_prices, [it["sku"] for it in orderable]
+                )
+            except entire_m.EntireMAPIError as exc:
+                status_code = exc.status if exc.status in (401, 403, 423) else 502
+                return jsonify({"error": str(exc), "details": exc.errors}), status_code
+
+            MIN_ORDER_EUR = 400.0
+            missing_prices: list[str] = []
+            currencies: set[str] = set()
+            order_total = 0.0
+            for it in orderable:
+                p = price_map.get(it["sku"])
+                if not p:
+                    missing_prices.append(it["sku"])
+                    continue
+                it["unit_price"] = p["price"]
+                it["currency"] = p["currency"]
+                it["line_total"] = round(p["price"] * it["quantity"], 2)
+                if p["currency"]:
+                    currencies.add(p["currency"])
+                order_total += p["price"] * it["quantity"]
+            order_total = round(order_total, 2)
+
+            if missing_prices:
+                return jsonify({
+                    "error": (
+                        "Could not retrieve purchasing price from Entire-M for "
+                        f"{len(missing_prices)} SKU(s); aborting to avoid undercutting the "
+                        "400 EUR minimum order value."
+                    ),
+                    "details": [{"sku": s, "reason": "No price returned by Entire-M."} for s in missing_prices],
+                    "order_total": order_total,
+                }), 409
+
+            if currencies and currencies != {"EUR"}:
+                return jsonify({
+                    "error": (
+                        f"Entire-M returned prices in unexpected currencies {sorted(currencies)} "
+                        "(expected EUR). Order aborted."
+                    ),
+                    "details": [
+                        {"sku": it["sku"], "currency": it.get("currency"), "unit_price": it.get("unit_price")}
+                        for it in orderable
+                    ],
+                    "order_total": order_total,
+                }), 409
+
+            if order_total < MIN_ORDER_EUR:
+                return jsonify({
+                    "error": (
+                        f"Order total {order_total:.2f} EUR is below Entire-M's minimum "
+                        f"order value of {MIN_ORDER_EUR:.0f} EUR. No order was placed."
+                    ),
+                    "details": [
+                        {
+                            "sku": it["sku"],
+                            "quantity": it["quantity"],
+                            "unit_price": it.get("unit_price"),
+                            "line_total": it.get("line_total"),
+                            "currency": it.get("currency"),
+                        }
+                        for it in orderable
+                    ] + [
+                        {"sku": b.get("sku"), "reason": b.get("reason"), "available": b.get("available")}
+                        for b in blocked
+                    ],
+                    "order_total": order_total,
+                }), 409
+
             order_number = entire_m.make_order_number()
             try:
                 await asyncio.to_thread(
