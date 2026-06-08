@@ -222,6 +222,7 @@
             newCustomColumnName: "",
             entireMOrdering: false,
             entireMModal: null,
+            emailOrdering: false,
           };
         },
         computed: {
@@ -278,6 +279,11 @@
           },
           isHelikonView() {
             return this.selectedConfigName === "Helikon-Tex";
+          },
+          emailOrderVendor() {
+            // Configuration names that are ordered by sending an email to the vendor.
+            const emailVendors = ["M-Tac", "Leatherman"];
+            return emailVendors.includes(this.selectedConfigName) ? this.selectedConfigName : null;
           },
         },
         watch: {
@@ -1000,6 +1006,55 @@
               });
             });
             return items;
+          },
+          async placeEmailOrder() {
+            if (this.emailOrdering) return;
+            const vendor = this.emailOrderVendor;
+            if (!vendor) return;
+            const items = this.collectVisibleOrderItems();
+            if (!items.length) {
+              this.entireMModal = {
+                title: "Nothing to order",
+                message: "No visible rows have a positive missing quantity.",
+                details: [],
+              };
+              return;
+            }
+            this.emailOrdering = true;
+            try {
+              const response = await fetch("/purchase-orders/email-order/", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "same-origin",
+                body: JSON.stringify({ vendor, items }),
+              });
+              const payload = await response.json().catch(() => ({}));
+              if (!response.ok) {
+                this.entireMModal = {
+                  title: "Order failed",
+                  message: payload.error || `Request failed (status ${response.status}).`,
+                  details: [],
+                };
+                return;
+              }
+              this.entireMModal = {
+                title: "Order placed",
+                message:
+                  `Order ${payload.order_number} emailed to ${vendor} at ${payload.email} ` +
+                  `for ${payload.line_count} line(s) (${payload.total_quantity} unit(s)).`,
+                details: [],
+                ok: true,
+              };
+            } catch (error) {
+              console.error("Failed to place email order", error);
+              this.entireMModal = {
+                title: "Order failed",
+                message: (error && error.message) || `Unexpected error ordering from ${vendor}.`,
+                details: [],
+              };
+            } finally {
+              this.emailOrdering = false;
+            }
           },
           async placeEntireMOrder() {
             if (this.entireMOrdering) return;
@@ -1791,6 +1846,16 @@
                   >
                     <span v-if="entireMOrdering">Ordering…</span>
                     <span v-else>Order from Entire-M</span>
+                  </button>
+                  <button
+                    v-if="emailOrderVendor"
+                    type="button"
+                    :aria-label="`Email purchase order to ${emailOrderVendor}`"
+                    @click="placeEmailOrder"
+                    :disabled="emailOrdering"
+                  >
+                    <span v-if="emailOrdering">Sending…</span>
+                    <span v-else>Order from {{ emailOrderVendor }}</span>
                   </button>
                 </div>
                 <button type="button" class="configure-button" @click="openModal">Configure Columns</button>

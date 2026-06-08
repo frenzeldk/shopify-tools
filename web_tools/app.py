@@ -69,7 +69,8 @@ from shipmondo import (
     apply_batch_update,
     update_barcode
 )
-from microsoft365 import send_missed_pickup_email
+from microsoft365 import send_missed_pickup_email, send_plaintext_email
+import vendor_orders
 import requests as _requests
 import shopify as shopify_module
 import threading
@@ -770,6 +771,73 @@ def create_app() -> Flask:
             })
         except Exception as exc:
             current_app.logger.exception("Failed to place Entire-M order", exc_info=exc)
+            return jsonify({"error": f"Unexpected error: {exc}"}), 500
+
+    @application.post("/purchase-orders/email-order/")
+    def purchase_orders_email_order() -> Any:
+        """Place a purchase order with an email-only vendor (M-Tac, Leatherman).
+
+        Request JSON:
+          {
+            "vendor": "M-Tac" | "Leatherman",
+            "items": [{"sku": str, "quantity": int, "title": str, ...}, ...]
+          }
+
+        Sends a plain-text order email to the vendor's configured ordering
+        address and returns {order_number, vendor, email, line_count,
+        total_quantity}. Misconfiguration / bad input returns HTTP 4xx; a
+        failed send returns HTTP 502.
+        """
+        try:
+            payload = request.get_json(silent=True) or {}
+            vendor = (payload.get("vendor") or "").strip()
+            if not vendor_orders.is_supported(vendor):
+                return jsonify({"error": f"'{vendor}' is not an email ordering vendor."}), 400
+
+            items_in = payload.get("items") or []
+            if not isinstance(items_in, list) or not items_in:
+                return jsonify({"error": "No items provided."}), 400
+
+            items: list[dict] = []
+            for it in items_in:
+                if not isinstance(it, dict):
+                    continue
+                sku = (it.get("sku") or "").strip()
+                if not sku:
+                    continue
+                try:
+                    qty = int(it.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty <= 0:
+                    continue
+                items.append({**it, "sku": sku, "quantity": qty})
+            if not items:
+                return jsonify({"error": "No items with a valid SKU and positive quantity."}), 400
+
+            try:
+                order = vendor_orders.prepare_order_email(vendor, items)
+            except vendor_orders.VendorOrderError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+            success, message = send_plaintext_email(
+                order["email"], order["subject"], order["body"]
+            )
+            if not success:
+                return jsonify({
+                    "error": f"Failed to send order email to {vendor}: {message}",
+                    "order_number": order["order_number"],
+                }), 502
+
+            return jsonify({
+                "vendor": vendor,
+                "email": order["email"],
+                "order_number": order["order_number"],
+                "line_count": order["line_count"],
+                "total_quantity": order["total_quantity"],
+            })
+        except Exception as exc:
+            current_app.logger.exception("Failed to place email order", exc_info=exc)
             return jsonify({"error": f"Unexpected error: {exc}"}), 500
 
     @application.route("/inventory-tools/")

@@ -1,5 +1,6 @@
 import os
 import logging
+from html import escape
 from O365 import Account
 from flask import render_template
 
@@ -44,4 +45,39 @@ def send_missed_pickup_email(first_name: str, email: str, order_number: str) -> 
         return True, f"Email sent to {email}"
     except Exception as exc:
         logger.exception(f"Failed to send missed-pickup email to {email} for order {order_number}")
+        return False, str(exc)
+
+
+def send_plaintext_email(to_email: str, subject: str, body: str) -> tuple[bool, str]:
+    """
+    Send a plain-text email, preserving the body's line breaks and whitespace.
+
+    The Graph mailbox renders message bodies as HTML, so the plain-text body is
+    HTML-escaped and wrapped in a whitespace-preserving block to keep it
+    readable (e.g. for line-itemised vendor orders).
+
+    Args:
+        to_email: Recipient email address.
+        subject: Email subject line.
+        body: Plain-text email body.
+
+    Returns:
+        Tuple of (success, message).
+    """
+    try:
+        html_body = (
+            '<div style="white-space: pre-wrap; font-family: sans-serif;">'
+            f"{escape(body)}</div>"
+        )
+
+        msg = _get_mailbox().new_message()
+        msg.to.add(to_email)
+        msg.subject = subject
+        msg.body = html_body
+        msg.send()
+
+        logger.info(f"Sent email '{subject}' to {to_email}")
+        return True, f"Email sent to {to_email}"
+    except Exception as exc:
+        logger.exception(f"Failed to send email '{subject}' to {to_email}")
         return False, str(exc)
