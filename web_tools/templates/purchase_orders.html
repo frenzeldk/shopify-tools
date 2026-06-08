@@ -1850,12 +1850,12 @@
                   <button
                     v-if="emailOrderVendor"
                     type="button"
-                    :aria-label="`Email purchase order to ${emailOrderVendor}`"
+                    :aria-label="'Email purchase order to ' + emailOrderVendor"
                     @click="placeEmailOrder"
                     :disabled="emailOrdering"
                   >
                     <span v-if="emailOrdering">Sending…</span>
-                    <span v-else>Order from {{ emailOrderVendor }}</span>
+                    <span v-else>Order from [[ emailOrderVendor ]]</span>
                   </button>
                 </div>
                 <button type="button" class="configure-button" @click="openModal">Configure Columns</button>
