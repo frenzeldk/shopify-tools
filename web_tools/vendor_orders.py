@@ -15,12 +15,15 @@ Body templates use ``string.Template`` ($-style) placeholders:
 """
 from __future__ import annotations
 
+import io
 import logging
 import os
 import time
 from datetime import date
 from pathlib import Path
 from string import Template
+
+from openpyxl import Workbook
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,29 @@ def _format_order_lines(items: list[dict]) -> str:
         title = str(it.get("title") or it.get("product_title") or "").strip()
         lines.append(f"{qty} x {sku}" + (f" - {title}" if title else ""))
     return "\n".join(lines)
+
+
+def build_order_workbook(items: list[dict]) -> bytes:
+    """Build an XLSX workbook of the order lines and return it as bytes."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Order Lines"
+
+    headers = ["SKU", "Quantity", "Title", "Product Title", "Vendor", "Barcode"]
+    sheet.append(headers)
+    for it in items:
+        sheet.append([
+            str(it.get("sku") or ""),
+            int(it.get("quantity") or 0),
+            str(it.get("title") or ""),
+            str(it.get("product_title") or ""),
+            str(it.get("product_vendor") or ""),
+            str(it.get("barcode") or ""),
+        ])
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 def _load_template(vendor: str, config: dict[str, str]) -> Template:
@@ -121,4 +147,6 @@ def prepare_order_email(vendor: str, items: list[dict]) -> dict:
         "order_number": order_number,
         "line_count": len(items),
         "total_quantity": total_quantity,
+        "attachment_bytes": build_order_workbook(items),
+        "attachment_filename": f"PO_{order_number}.xlsx",
     }

@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 import logging
 from html import escape
 from O365 import Account
@@ -48,32 +50,49 @@ def send_missed_pickup_email(first_name: str, email: str, order_number: str) -> 
         return False, str(exc)
 
 
-def send_plaintext_email(to_email: str, subject: str, body: str) -> tuple[bool, str]:
+def send_plaintext_email(
+    to_email: str,
+    subject: str,
+    body: str,
+    attachments: list[tuple[bytes, str]] | None = None,
+) -> tuple[bool, str]:
     """
-    Send a plain-text email, preserving the body's line breaks and whitespace.
+    Send a plain-text email, preserving the body's line breaks.
 
     The Graph mailbox renders message bodies as HTML, so the plain-text body is
-    HTML-escaped and wrapped in a whitespace-preserving block to keep it
-    readable (e.g. for line-itemised vendor orders).
+    HTML-escaped and its newlines are converted to <br> to keep it readable
+    (e.g. for line-itemised vendor orders).
 
     Args:
         to_email: Recipient email address.
         subject: Email subject line.
         body: Plain-text email body.
+        attachments: Optional list of (content_bytes, filename) tuples to attach.
 
     Returns:
         Tuple of (success, message).
     """
+    tmp_dir = None
     try:
         html_body = (
-            '<div style="white-space: pre-wrap; font-family: sans-serif;">'
-            f"{escape(body)}</div>"
+            '<div style="font-family: sans-serif;">'
+            f'{escape(body).replace(chr(10), "<br>")}</div>'
         )
 
         msg = _get_mailbox().new_message()
         msg.to.add(to_email)
         msg.subject = subject
         msg.body = html_body
+
+        if attachments:
+            # O365 attaches by file path, so stage the bytes on disk first.
+            tmp_dir = tempfile.mkdtemp(prefix="o365_attach_")
+            for content, filename in attachments:
+                path = os.path.join(tmp_dir, filename)
+                with open(path, "wb") as handle:
+                    handle.write(content)
+                msg.attachments.add(path)
+
         msg.send()
 
         logger.info(f"Sent email '{subject}' to {to_email}")
@@ -81,3 +100,6 @@ def send_plaintext_email(to_email: str, subject: str, body: str) -> tuple[bool, 
     except Exception as exc:
         logger.exception(f"Failed to send email '{subject}' to {to_email}")
         return False, str(exc)
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)

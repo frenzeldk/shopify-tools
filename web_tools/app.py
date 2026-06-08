@@ -820,8 +820,9 @@ def create_app() -> Flask:
             except vendor_orders.VendorOrderError as exc:
                 return jsonify({"error": str(exc)}), 400
 
+            attachments = [(order["attachment_bytes"], order["attachment_filename"])]
             success, message = send_plaintext_email(
-                order["email"], order["subject"], order["body"]
+                order["email"], order["subject"], order["body"], attachments=attachments
             )
             if not success:
                 return jsonify({
