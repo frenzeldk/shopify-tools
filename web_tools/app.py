@@ -815,8 +815,17 @@ def create_app() -> Flask:
             if not items:
                 return jsonify({"error": "No items with a valid SKU and positive quantity."}), 400
 
+            columns: list[dict] = []
+            for col in payload.get("columns") or []:
+                if not isinstance(col, dict):
+                    continue
+                field = (col.get("field") or "").strip()
+                if not field:
+                    continue
+                columns.append({"field": field, "label": col.get("label") or field})
+
             try:
-                order = vendor_orders.prepare_order_email(vendor, items)
+                order = vendor_orders.prepare_order_email(vendor, items, columns or None)
             except vendor_orders.VendorOrderError as exc:
                 return jsonify({"error": str(exc)}), 400
 

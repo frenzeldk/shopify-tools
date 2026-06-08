@@ -996,16 +996,29 @@
               const sku = node.data.sku;
               const qty = Number(node.data.missing_qty);
               if (!sku || !Number.isFinite(qty) || qty <= 0) return;
-              items.push({
+              const item = {
                 sku: String(sku),
                 quantity: Math.ceil(qty),
                 title: node.data.title || "",
                 product_title: node.data.product_title || "",
                 product_vendor: node.data.product_vendor || "",
                 barcode: node.data.barcode || "",
+              };
+              // Carry the raw value of every selected grid column so the order
+              // workbook can mirror the grid's columns and ordering.
+              this.selectedColumns.forEach((field) => {
+                const value = node.data[field];
+                item[field] = value === null || value === undefined ? "" : value;
               });
+              items.push(item);
             });
             return items;
+          },
+          collectOrderColumns() {
+            return this.selectedColumns.map((field) => ({
+              field,
+              label: this.columnLabels[field] || this.formatHeader(field),
+            }));
           },
           async placeEmailOrder() {
             if (this.emailOrdering) return;
@@ -1026,7 +1039,7 @@
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 credentials: "same-origin",
-                body: JSON.stringify({ vendor, items }),
+                body: JSON.stringify({ vendor, items, columns: this.collectOrderColumns() }),
               });
               const payload = await response.json().catch(() => ({}));
               if (!response.ok) {

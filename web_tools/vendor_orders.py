@@ -22,6 +22,7 @@ import time
 from datetime import date
 from pathlib import Path
 from string import Template
+from typing import Any
 
 from openpyxl import Workbook
 
@@ -73,23 +74,39 @@ def _format_order_lines(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_order_workbook(items: list[dict]) -> bytes:
-    """Build an XLSX workbook of the order lines and return it as bytes."""
+# Header label / item field used when the client supplies no column spec.
+DEFAULT_COLUMNS: list[dict[str, str]] = [
+    {"field": "sku", "label": "SKU"},
+    {"field": "quantity", "label": "Quantity"},
+    {"field": "title", "label": "Title"},
+    {"field": "product_title", "label": "Product Title"},
+    {"field": "product_vendor", "label": "Vendor"},
+    {"field": "barcode", "label": "Barcode"},
+]
+
+
+def _cell_value(value: Any) -> Any:
+    """Coerce a raw item value into something openpyxl can write to a cell."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def build_order_workbook(items: list[dict], columns: list[dict] | None = None) -> bytes:
+    """Build an XLSX workbook of the order lines and return it as bytes.
+
+    ``columns`` is an ordered list of {"field": ..., "label": ...} dicts (as
+    sent by the grid). Only those fields are written, in the given order, with
+    ``label`` as the header. Falls back to DEFAULT_COLUMNS when not supplied.
+    """
+    columns = columns or DEFAULT_COLUMNS
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Order Lines"
 
-    headers = ["SKU", "Quantity", "Title", "Product Title", "Vendor", "Barcode"]
-    sheet.append(headers)
+    sheet.append([str(col.get("label") or col.get("field") or "") for col in columns])
     for it in items:
-        sheet.append([
-            str(it.get("sku") or ""),
-            int(it.get("quantity") or 0),
-            str(it.get("title") or ""),
-            str(it.get("product_title") or ""),
-            str(it.get("product_vendor") or ""),
-            str(it.get("barcode") or ""),
-        ])
+        sheet.append([_cell_value(it.get(col.get("field"))) for col in columns])
 
     buffer = io.BytesIO()
     workbook.save(buffer)
@@ -108,8 +125,13 @@ def _load_template(vendor: str, config: dict[str, str]) -> Template:
         ) from exc
 
 
-def prepare_order_email(vendor: str, items: list[dict]) -> dict:
+def prepare_order_email(
+    vendor: str, items: list[dict], columns: list[dict] | None = None
+) -> dict:
     """Build the recipient, subject and rendered body for a vendor order.
+
+    ``columns`` is the ordered grid column spec used to lay out the XLSX
+    attachment (see build_order_workbook).
 
     Returns a dict with keys: vendor, email, subject, body, order_number,
     line_count, total_quantity. Raises VendorOrderError on misconfiguration.
@@ -147,6 +169,6 @@ def prepare_order_email(vendor: str, items: list[dict]) -> dict:
         "order_number": order_number,
         "line_count": len(items),
         "total_quantity": total_quantity,
-        "attachment_bytes": build_order_workbook(items),
+        "attachment_bytes": build_order_workbook(items, columns),
         "attachment_filename": f"PO_{order_number}.xlsx",
     }
