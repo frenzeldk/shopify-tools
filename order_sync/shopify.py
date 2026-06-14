@@ -106,11 +106,54 @@ def _add_tag_to_order(order_id: str | int, tag: str) -> List[str]:
     return tags
 
 
-def _check_availability(order_id: str | int) -> bool:
-    """Check if all items in the order are available in inventory.
+_INVENTORY_LOCATION_ID = "gid://shopify/Location/100013703511"
+
+
+def _get_inventory_level(inventory_item_id: str) -> int:
+    """Return the actual available quantity for the given inventory item ID.
+
+    Available is computed the same way as the resume job: on-hand stock minus
+    the quantities that are not sellable (reserved, damaged, quality control and
+    safety stock) at the configured location.
 
     Args:
-        order_id: Numeric ID or GraphQL global ID of the target order.  
+        inventory_item_id: The GraphQL global ID of the inventory item to check.
+    """
+    query = gql(
+        """
+        query getInventoryLevel($id: ID!) {
+            inventoryItem(id: $id) {
+                id
+                inventoryLevel(locationId: "%s") {
+                    quantities(names: ["on_hand", "reserved", "damaged",
+                    "safety_stock", "quality_control"]) {
+                        name
+                        quantity
+                    }
+                }
+            }
+        }
+        """ % _INVENTORY_LOCATION_ID
+    )
+    try:
+        result = gql_client.execute(query, variable_values={"id": inventory_item_id})
+    except TransportQueryError as exc:  # pragma: no cover - network interaction
+        raise RuntimeError(
+            f"Failed to fetch inventory level for {inventory_item_id}: {exc}"
+        ) from exc
+
+    levels = result["inventoryItem"]["inventoryLevel"]["quantities"]
+    levels = {item["name"]: item["quantity"] for item in levels}
+    return levels.get("on_hand", 0) - levels.get("reserved", 0)\
+        - levels.get("damaged", 0) - levels.get("quality_control", 0)\
+        - levels.get("safety_stock", 0)
+
+
+def _check_availability(order_id: str | int) -> bool:
+    """Check if all items in the order can be fulfilled from available stock.
+
+    Args:
+        order_id: Numeric ID or GraphQL global ID of the target order.
         """
 
     order_gid = _normalize_order_id(order_id)
@@ -123,9 +166,11 @@ def _check_availability(order_id: str | int) -> bool:
               edges {
                 node {
                   title
-                  quantity
+                  currentQuantity
                   variant {
-                    inventoryQuantity
+                    inventoryItem {
+                      id
+                    }
                   }
                 }
               }
@@ -151,12 +196,15 @@ def _check_availability(order_id: str | int) -> bool:
         node = item.get("node", {})
         variant = node.get("variant")
         if not variant:
-            continue  # Skip items without a variant (e.g., custom items)
-        available_quantity = variant.get("inventoryQuantity", 0)
-        if available_quantity < 0:
-            return False  # Not enough inventory for this item
+            continue  # Skip items without a variant (e.g., custom/deleted items)
+        inventory_item_id = variant.get("inventoryItem", {}).get("id")
+        if not inventory_item_id:
+            continue  # No inventory item to check against
+        available_quantity = _get_inventory_level(inventory_item_id)
+        if available_quantity < node.get("currentQuantity", 0):
+            return False  # Not enough inventory to fulfill this line item
 
-    return True  # All items are available
+    return True  # All items can be fulfilled
 
 def _get_shopify_id_from_handle(handle: int) -> str:
     """Fetch the Shopify order ID from its handle."""
