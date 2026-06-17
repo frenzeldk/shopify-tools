@@ -61,8 +61,6 @@ from shopify import (
     fetch_locations,
     create_inventory_transfer,
     set_transfer_items,
-    mark_transfer_ready_to_ship,
-    add_in_transit_shipment,
     delete_inventory_transfer,
     TransferError,
 )
@@ -954,6 +952,7 @@ def create_app() -> Flask:
 
         transfer_id = transfer["id"]
         transfer_name = transfer.get("name") or ""
+        transfer_status = transfer.get("status")
         order_number = transfer_name[1:] if transfer_name.startswith("#") else transfer_name
 
         # 2) Place the vendor order using the transfer-derived order number.
@@ -972,7 +971,9 @@ def create_app() -> Flask:
             current_app.logger.exception("Failed to place order for %s", vendor, exc_info=exc)
             return jsonify({"error": f"Unexpected error: {exc}"}), 500
 
-        # 3) Add the actually-ordered items to the transfer and mark in transit.
+        # 3) Add the actually-ordered items to the transfer. The transfer is
+        #    left as a draft (no shipment) so the user can manually add the
+        #    supplier in Shopify before creating the shipment.
         ordered = result.get("ordered") or []
         line_items: list[dict] = []
         skipped_skus: list[str] = []
@@ -996,26 +997,15 @@ def create_app() -> Flask:
         if line_items:
             try:
                 set_transfer_items(transfer_id, line_items)
-                # A shipment can only be created once the transfer is
-                # Ready-to-ship; transition it, then create the in-transit shipment.
-                mark_transfer_ready_to_ship(transfer_id)
-                shipment = add_in_transit_shipment(transfer_id, line_items)
-                result["transfer_status"] = shipment.get("status")
             except Exception as exc:  # order already placed — surface as warning, not failure
                 current_app.logger.exception("Transfer update failed for %s", transfer_name, exc_info=exc)
                 warnings.append(f"Order placed, but updating the Shopify transfer failed: {exc}")
         else:
             warnings.append("No items could be added to the Shopify transfer.")
 
-        # 4) Refresh the PO cache for the user so the grid reflects the order.
-        try:
-            session['po_data'] = fetch_purchase_order_data()
-            session['po_data_timestamp'] = datetime.now(timezone.utc).isoformat()
-        except Exception as exc:
-            current_app.logger.exception("Failed to refresh PO cache after order", exc_info=exc)
-
         result["transfer_id"] = transfer_id
         result["transfer_name"] = transfer_name
+        result["transfer_status"] = transfer_status
         result["order_number"] = order_number
         if warnings:
             result["warnings"] = warnings
