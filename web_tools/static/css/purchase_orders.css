@@ -539,6 +539,20 @@ h1 {
   color: #721c24;
 }
 
+.view-total-banner {
+  margin: 0 2rem 0.75rem;
+  padding: 0.6rem 1rem;
+  border-radius: 4px;
+  font-size: 0.95rem;
+  background-color: #eef2f7;
+  border: 1px solid #d6deea;
+  color: #1f2937;
+}
+
+.view-total-banner strong {
+  font-size: 1.05rem;
+}
+
 /* Main Container */
 main {
   margin: 0;

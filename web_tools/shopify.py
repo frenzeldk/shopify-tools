@@ -136,6 +136,9 @@ query ($cursor: String, $query: String!) {
         inventoryItem {
           id
           tracked
+          unitCost {
+            amount
+          }
           inventoryLevels(first: 10) {
             edges {
               node {
@@ -185,13 +188,21 @@ def fetch_missing_inventory():
             # Define your threshold for "missing" (e.g., less than 0 in stock after incoming)
             total = available + incoming
             if total < 0:
+                # Per-unit cost (store currency, DKK); used only for the
+                # current-view total, not shown as a table column.
+                unit_cost_data = node["inventoryItem"].get("unitCost")
+                try:
+                    cost = float(unit_cost_data["amount"]) if unit_cost_data and unit_cost_data.get("amount") else 0.0
+                except (TypeError, ValueError):
+                    cost = 0.0
                 missing.append({
                     "sku": node["sku"],
                     "title": node["title"],
                     "barcode": node["barcode"],
                     "product_title": node["product"]["title"],
                     "product_vendor": node["product"]["vendor"],
-                    "missing_qty": 0 - total  # Order enough to reach 0 in stock
+                    "missing_qty": 0 - total,  # Order enough to reach 0 in stock
+                    "cost": cost
                 })
         page_info = result["productVariants"]["pageInfo"]
         if not page_info["hasNextPage"]:

@@ -223,6 +223,7 @@
             orderMethods: {},
             placingOrder: false,
             entireMModal: null,
+            viewTotalCost: 0,
             settingsMenuOpen: false,
             orderingTemplateModalOpen: false,
             orderingTemplateLoading: false,
@@ -295,6 +296,17 @@
           orderButtonLabel() {
             const meta = this.orderMethods[this.selectedConfigName];
             return (meta && meta.label) || this.selectedConfigName;
+          },
+          formattedViewTotalCost() {
+            try {
+              return new Intl.NumberFormat("da-DK", {
+                style: "currency",
+                currency: "DKK",
+                maximumFractionDigits: 2,
+              }).format(this.viewTotalCost || 0);
+            } catch (e) {
+              return `${(this.viewTotalCost || 0).toFixed(2)} DKK`;
+            }
           },
         },
         watch: {
@@ -1032,6 +1044,23 @@
               label: this.columnLabels[field] || this.formatHeader(field),
             }));
           },
+          recomputeViewTotalCost() {
+            // Sum cost × quantity-to-order over the rows currently visible
+            // (after filtering), mirroring what would actually be ordered.
+            if (!this.gridApi || typeof this.gridApi.forEachNodeAfterFilterAndSort !== "function") {
+              this.viewTotalCost = 0;
+              return;
+            }
+            let total = 0;
+            this.gridApi.forEachNodeAfterFilterAndSort((node) => {
+              if (!node || !node.data) return;
+              const qty = Number(node.data.missing_qty);
+              const cost = Number(node.data.cost);
+              if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(cost)) return;
+              total += Math.ceil(qty) * cost;
+            });
+            this.viewTotalCost = total;
+          },
           async loadOrderMethods() {
             // Pull the per-configuration ordering method/label from the backend
             // so the order button is rendered straight from config.
@@ -1595,7 +1624,9 @@
             if (!Array.isArray(data) || !data.length) {
               return [];
             }
-            return Object.keys(data[0]);
+            // `cost` rides along on each row for the current-view total only; it
+            // must never surface as a selectable/visible table column.
+            return Object.keys(data[0]).filter((key) => key !== "cost");
           },
           collectColumnLabels() {
             const labels = {};
@@ -1686,6 +1717,11 @@
               },
               onColumnMoved() {
                 vm.syncColumnOrderFromGrid();
+              },
+              onModelUpdated() {
+                // Fires after data load, filtering and sorting — keep the
+                // current-view total cost in sync with what's displayed.
+                vm.recomputeViewTotalCost();
               },
             };
           },
@@ -2117,6 +2153,10 @@
               role="alert"
               v-text="dataFetchError"
             ></div>
+            <div class="view-total-banner" role="status">
+              Total order cost (current view):
+              <strong>[[ formattedViewTotalCost ]]</strong>
+            </div>
             <div
               id="grid-wrapper"
               class="ag-theme-alpine"
