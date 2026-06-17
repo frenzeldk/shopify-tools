@@ -5579,6 +5579,34 @@ def set_transfer_items(transfer_id: str, line_items: list[dict]) -> dict:
     return payload.get("inventoryTransfer") or {}
 
 
+__TRANSFER_MARK_READY__ = gql("""
+mutation ($id: ID!, $key: String!) {
+  inventoryTransferMarkAsReadyToShip(id: $id) @idempotent(key: $key) {
+    inventoryTransfer { id status }
+    userErrors { field message }
+  }
+}
+""")
+
+
+def mark_transfer_ready_to_ship(transfer_id: str) -> dict:
+    """Transition a draft transfer to Ready-to-ship.
+
+    A shipment can only be created once the transfer is Ready-to-ship (or
+    In-progress), so this runs after the items are set and before the in-transit
+    shipment is created.
+    """
+    variables = {"id": transfer_id, "key": str(uuid.uuid4())}
+    result = _execute(__TRANSFER_MARK_READY__, variable_values=variables)
+    payload = result["inventoryTransferMarkAsReadyToShip"]
+    if payload.get("userErrors"):
+        raise TransferError(
+            _user_errors_message(payload["userErrors"], "Failed to mark the transfer ready to ship."),
+            payload["userErrors"],
+        )
+    return payload.get("inventoryTransfer") or {}
+
+
 __SHIPMENT_CREATE_IN_TRANSIT__ = gql("""
 mutation ($input: InventoryShipmentCreateInput!, $key: String!) {
   inventoryShipmentCreateInTransit(input: $input) @idempotent(key: $key) {

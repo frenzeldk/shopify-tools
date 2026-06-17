@@ -61,6 +61,7 @@ from shopify import (
     fetch_locations,
     create_inventory_transfer,
     set_transfer_items,
+    mark_transfer_ready_to_ship,
     add_in_transit_shipment,
     delete_inventory_transfer,
     TransferError,
@@ -995,6 +996,9 @@ def create_app() -> Flask:
         if line_items:
             try:
                 set_transfer_items(transfer_id, line_items)
+                # A shipment can only be created once the transfer is
+                # Ready-to-ship; transition it, then create the in-transit shipment.
+                mark_transfer_ready_to_ship(transfer_id)
                 shipment = add_in_transit_shipment(transfer_id, line_items)
                 result["transfer_status"] = shipment.get("status")
             except Exception as exc:  # order already placed — surface as warning, not failure
