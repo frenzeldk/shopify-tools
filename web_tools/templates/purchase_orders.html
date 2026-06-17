@@ -224,6 +224,7 @@
             placingOrder: false,
             entireMModal: null,
             viewTotalCost: 0,
+            locations: [],
             settingsMenuOpen: false,
             orderingTemplateModalOpen: false,
             orderingTemplateLoading: false,
@@ -333,6 +334,7 @@
           void this.fetchConfigurations();
           void this.loadPurchaseOrders();
           void this.loadOrderMethods();
+          void this.loadLocations();
         },
         mounted() {
           if (!this.$refs.gridContainer) {
@@ -1027,6 +1029,8 @@
                 product_title: node.data.product_title || "",
                 product_vendor: node.data.product_vendor || "",
                 barcode: node.data.barcode || "",
+                // Needed server-side to build the Shopify transfer line items.
+                inventory_item_id: node.data.inventory_item_id || "",
               };
               // Carry the raw value of every selected grid column so the order
               // workbook can mirror the grid's columns and ordering.
@@ -1075,6 +1079,20 @@
               console.error("Failed to load order methods", error);
             }
           },
+          async loadLocations() {
+            // Shopify locations used as transfer destinations in the editor.
+            try {
+              const response = await fetch("/purchase-orders/locations/", {
+                credentials: "same-origin",
+              });
+              if (response.ok) {
+                const data = await response.json();
+                this.locations = Array.isArray(data.locations) ? data.locations : [];
+              }
+            } catch (error) {
+              console.error("Failed to load locations", error);
+            }
+          },
           toggleSettingsMenu() {
             this.settingsMenuOpen = !this.settingsMenuOpen;
           },
@@ -1086,6 +1104,8 @@
             return {
               method: "email",
               label: this.selectedConfigName || "",
+              location_id: "",
+              location_name: "",
               email: {
                 to: "",
                 to_env: "",
@@ -1118,6 +1138,8 @@
                 const tmpl = this.defaultOrderingTemplate();
                 tmpl.method = data.method || "email";
                 tmpl.label = data.label || name;
+                tmpl.location_id = data.location_id || "";
+                tmpl.location_name = data.location_name || "";
                 if (data.method === "email") {
                   const email = data.email || {};
                   tmpl.email = {
@@ -1151,10 +1173,15 @@
             this.orderingTemplateSaving = true;
             this.orderingTemplateError = "";
             try {
+              const selectedLocation = this.locations.find(
+                (loc) => loc.id === this.orderingTemplate.location_id
+              );
               const body = {
                 name: this.orderingTemplateName,
                 method: this.orderingTemplate.method,
                 label: this.orderingTemplate.label,
+                location_id: this.orderingTemplate.location_id,
+                location_name: selectedLocation ? selectedLocation.name : this.orderingTemplate.location_name,
               };
               if (this.orderingTemplate.method === "email") {
                 body.email = this.orderingTemplate.email;
@@ -1242,6 +1269,10 @@
                 };
                 return;
               }
+              const warn = Array.isArray(payload.warnings) && payload.warnings.length
+                ? " Note: " + payload.warnings.join(" ")
+                : "";
+              const transferLabel = payload.transfer_name ? ` (transfer ${payload.transfer_name})` : "";
               if (method === "api") {
                 this.downloadEntireMReport(payload);
                 const orderedCount = (payload.ordered || []).length;
@@ -1249,10 +1280,10 @@
                 this.entireMModal = {
                   title: notOrderedCount ? "Order placed (partial)" : "Order placed",
                   message:
-                    `Order ${payload.order_number} placed for ${orderedCount} line(s). ` +
+                    `Order ${payload.order_number}${transferLabel} placed for ${orderedCount} line(s). ` +
                     (notOrderedCount
                       ? `${notOrderedCount} item(s) were skipped — see the downloaded XLSX report.`
-                      : `Report XLSX downloaded.`),
+                      : `Report XLSX downloaded.`) + warn,
                   details: payload.not_ordered || [],
                   ok: true,
                 };
@@ -1260,12 +1291,14 @@
                 this.entireMModal = {
                   title: "Order placed",
                   message:
-                    `Order ${payload.order_number} emailed to ${vendor} at ${payload.email} ` +
-                    `for ${payload.line_count} line(s) (${payload.total_quantity} unit(s)).`,
+                    `Order ${payload.order_number}${transferLabel} emailed to ${vendor} at ${payload.email} ` +
+                    `for ${payload.line_count} line(s) (${payload.total_quantity} unit(s)).` + warn,
                   details: [],
                   ok: true,
                 };
               }
+              // The server refreshed the PO cache; reload so the grid reflects it.
+              void this.loadPurchaseOrders();
             } catch (error) {
               console.error("Failed to place order", error);
               this.entireMModal = {
@@ -1624,9 +1657,11 @@
             if (!Array.isArray(data) || !data.length) {
               return [];
             }
-            // `cost` rides along on each row for the current-view total only; it
-            // must never surface as a selectable/visible table column.
-            return Object.keys(data[0]).filter((key) => key !== "cost");
+            // `cost` and `inventory_item_id` ride along on each row (for the
+            // view total and transfer line items) but must never surface as
+            // selectable/visible table columns.
+            const hidden = new Set(["cost", "inventory_item_id"]);
+            return Object.keys(data[0]).filter((key) => !hidden.has(key));
           },
           collectColumnLabels() {
             const labels = {};
@@ -2212,6 +2247,15 @@
                     <div class="form-row">
                       <label>Button label</label>
                       <input type="text" v-model="orderingTemplate.label" placeholder="Shown on the order button" />
+                    </div>
+
+                    <div class="form-row">
+                      <label>Destination location</label>
+                      <select v-model="orderingTemplate.location_id">
+                        <option value="">Select a location…</option>
+                        <option v-for="loc in locations" :key="loc.id" :value="loc.id" v-text="loc.name"></option>
+                      </select>
+                      <small>Each order creates a Shopify transfer of the ordered items into this location.</small>
                     </div>
 
                     <template v-if="orderingTemplate.method === 'email'">

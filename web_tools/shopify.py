@@ -5,6 +5,7 @@ import os
 import logging
 import threading
 import io
+import uuid
 import requests
 from PIL import Image, ImageDraw
 from gql import Client, gql
@@ -202,7 +203,10 @@ def fetch_missing_inventory():
                     "product_title": node["product"]["title"],
                     "product_vendor": node["product"]["vendor"],
                     "missing_qty": 0 - total,  # Order enough to reach 0 in stock
-                    "cost": cost
+                    "cost": cost,
+                    # Inventory item GID — needed to build Shopify transfer line
+                    # items; carried on the row but hidden from the grid.
+                    "inventory_item_id": node["inventoryItem"].get("id")
                 })
         page_info = result["productVariants"]["pageInfo"]
         if not page_info["hasNextPage"]:
@@ -5468,3 +5472,160 @@ def update_product(
     user_errors = result.get("productUpdate", {}).get("userErrors", [])
     errors = [f"{e.get('field', '?')}: {e['message']}" for e in user_errors] if user_errors else []
     return {"updated": len(errors) == 0, "errors": errors}
+
+# ── Locations & inventory transfers ───────────────────────────────────────────
+#
+# Used by the purchase-order flow: every order creates an inventory transfer into
+# a destination Location, then ships the ordered items "in transit". Shopify's
+# Admin API exposes no supplier concept, so transfers are destination-only here.
+# On API version 2026-04 the create/in-transit mutations require an @idempotent
+# key.
+
+
+class TransferError(Exception):
+    """Raised when a locations/transfer GraphQL call returns userErrors."""
+
+    def __init__(self, message: str, errors: list | None = None):
+        super().__init__(message)
+        self.errors = errors or []
+
+
+def _user_errors_message(errors: list | None, fallback: str) -> str:
+    msgs = [(e.get("message") or "").strip() for e in (errors or []) if (e.get("message") or "").strip()]
+    return "; ".join(msgs) or fallback
+
+
+__LOCATIONS_QUERY__ = gql("""
+query ($cursor: String) {
+  locations(first: 100, after: $cursor, includeInactive: false) {
+    edges { node { id name } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+""")
+
+
+def fetch_locations() -> list[dict]:
+    """Return active Shopify locations as [{"id": gid, "name": str}]."""
+    out: list[dict] = []
+    cursor = None
+    while True:
+        result = _execute(__LOCATIONS_QUERY__, variable_values={"cursor": cursor})
+        conn = result["locations"]
+        for edge in conn["edges"]:
+            node = edge["node"]
+            out.append({"id": node["id"], "name": node["name"]})
+        page = conn["pageInfo"]
+        if not page["hasNextPage"]:
+            break
+        cursor = page["endCursor"]
+    return out
+
+
+__TRANSFER_CREATE__ = gql("""
+mutation ($input: InventoryTransferCreateInput!, $key: String!) {
+  inventoryTransferCreate(input: $input) @idempotent(key: $key) {
+    inventoryTransfer { id name status }
+    userErrors { field message }
+  }
+}
+""")
+
+
+def create_inventory_transfer(destination_location_id: str) -> dict:
+    """Create an empty draft transfer into ``destination_location_id``.
+
+    Returns {"id", "name", "status"}; the ``name`` (e.g. "#T0733") is used to
+    derive the purchase-order number.
+    """
+    variables = {
+        "input": {"destinationLocationId": destination_location_id, "lineItems": []},
+        "key": str(uuid.uuid4()),
+    }
+    result = _execute(__TRANSFER_CREATE__, variable_values=variables)
+    payload = result["inventoryTransferCreate"]
+    if payload.get("userErrors"):
+        raise TransferError(
+            _user_errors_message(payload["userErrors"], "Failed to create inventory transfer."),
+            payload["userErrors"],
+        )
+    transfer = payload["inventoryTransfer"]
+    return {"id": transfer["id"], "name": transfer["name"], "status": transfer["status"]}
+
+
+__TRANSFER_SET_ITEMS__ = gql("""
+mutation ($input: InventoryTransferSetItemsInput!) {
+  inventoryTransferSetItems(input: $input) {
+    inventoryTransfer { id totalQuantity }
+    userErrors { field message }
+  }
+}
+""")
+
+
+def set_transfer_items(transfer_id: str, line_items: list[dict]) -> dict:
+    """Set the expected line items on a transfer.
+
+    ``line_items``: [{"inventoryItemId": gid, "quantity": int}, ...].
+    """
+    variables = {"input": {"id": transfer_id, "lineItems": line_items}}
+    result = _execute(__TRANSFER_SET_ITEMS__, variable_values=variables)
+    payload = result["inventoryTransferSetItems"]
+    if payload.get("userErrors"):
+        raise TransferError(
+            _user_errors_message(payload["userErrors"], "Failed to add items to the transfer."),
+            payload["userErrors"],
+        )
+    return payload.get("inventoryTransfer") or {}
+
+
+__SHIPMENT_CREATE_IN_TRANSIT__ = gql("""
+mutation ($input: InventoryShipmentCreateInput!, $key: String!) {
+  inventoryShipmentCreateInTransit(input: $input) @idempotent(key: $key) {
+    inventoryShipment { id status }
+    userErrors { field message }
+  }
+}
+""")
+
+
+def add_in_transit_shipment(transfer_id: str, line_items: list[dict]) -> dict:
+    """Create an in-transit shipment on ``transfer_id`` for ``line_items``.
+
+    This both records the shipped items and moves them to "In transit".
+    Returns {"id", "status"}.
+    """
+    variables = {
+        "input": {"movementId": transfer_id, "lineItems": line_items},
+        "key": str(uuid.uuid4()),
+    }
+    result = _execute(__SHIPMENT_CREATE_IN_TRANSIT__, variable_values=variables)
+    payload = result["inventoryShipmentCreateInTransit"]
+    if payload.get("userErrors"):
+        raise TransferError(
+            _user_errors_message(payload["userErrors"], "Failed to mark the transfer as in transit."),
+            payload["userErrors"],
+        )
+    shipment = payload["inventoryShipment"]
+    return {"id": shipment["id"], "status": shipment["status"]}
+
+
+__TRANSFER_DELETE__ = gql("""
+mutation ($id: ID!) {
+  inventoryTransferDelete(id: $id) {
+    deletedId
+    userErrors { field message }
+  }
+}
+""")
+
+
+def delete_inventory_transfer(transfer_id: str) -> None:
+    """Delete a (draft) transfer — used to clean up if an order fails."""
+    result = _execute(__TRANSFER_DELETE__, variable_values={"id": transfer_id})
+    payload = result["inventoryTransferDelete"]
+    if payload.get("userErrors"):
+        raise TransferError(
+            _user_errors_message(payload["userErrors"], "Failed to delete the transfer."),
+            payload["userErrors"],
+        )

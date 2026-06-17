@@ -98,12 +98,18 @@ def place_order(
     columns: list[dict] | None = None,
     *,
     send_email: Callable[..., tuple[bool, str]] | None = None,
+    order_number: str | None = None,
 ) -> dict:
     """Place an order for ``vendor`` (a purchase-order configuration name).
 
     ``items`` are raw grid rows; they are normalised here. ``send_email`` is
     the transport used by email vendors (the package owns the rendering, the
-    caller owns delivery). Raises :class:`OrderError` on any failure.
+    caller owns delivery). ``order_number`` lets the caller supply a reference
+    (e.g. a Shopify transfer name) instead of the package generating one.
+
+    The result always includes an ``ordered`` list of the items actually
+    ordered (all items for email; the in-stock subset for API). Raises
+    :class:`OrderError` on any failure.
     """
     vcfg = _config.get_vendor(vendor)
     if not vcfg:
@@ -116,7 +122,9 @@ def place_order(
     norm_columns = normalize_columns(columns)
 
     if method == "email":
-        return email_backend.place_order(vendor, vcfg, norm_items, norm_columns, send_email=send_email)
+        return email_backend.place_order(
+            vendor, vcfg, norm_items, norm_columns, send_email=send_email, order_number=order_number
+        )
     if method == "api":
-        return api_backend.place_order(vendor, vcfg, norm_items, norm_columns)
+        return api_backend.place_order(vendor, vcfg, norm_items, norm_columns, order_number=order_number)
     raise OrderError(f"Unknown ordering method '{method}' for {vendor}.", status=400)

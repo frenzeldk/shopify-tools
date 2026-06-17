@@ -328,11 +328,13 @@ def _no_orderable_error(blocked: list[dict]) -> OrderError:
     )
 
 
-def place_order_rest(vendor: str, vcfg: dict, items: list[dict], columns: list[dict] | None) -> dict:
+def place_order_rest(
+    vendor: str, vcfg: dict, items: list[dict], columns: list[dict] | None, order_number: str | None = None
+) -> dict:
     api = vcfg.get("api") or {}
     client = RestClient(vendor, api)
     company = cfg.defaults().get("company_name", "")
-    order_number = make_order_number(cfg.defaults().get("order_number_prefix", "WT"))
+    order_number = order_number or make_order_number(cfg.defaults().get("order_number_prefix", "WT"))
 
     refs: dict[str, Any] = {"order_number": order_number}
     address: dict | None = None
@@ -430,11 +432,13 @@ class GraphQLClient:
         return payload.get("data") or {}
 
 
-def place_order_graphql(vendor: str, vcfg: dict, items: list[dict], columns: list[dict] | None) -> dict:
+def place_order_graphql(
+    vendor: str, vcfg: dict, items: list[dict], columns: list[dict] | None, order_number: str | None = None
+) -> dict:
     api = vcfg.get("api") or {}
     client = GraphQLClient(vendor, api)
     company = cfg.defaults().get("company_name", "")
-    order_number = make_order_number(cfg.defaults().get("order_number_prefix", "WT"))
+    order_number = order_number or make_order_number(cfg.defaults().get("order_number_prefix", "WT"))
 
     orderable: list[dict] = list(items)
     blocked: list[dict] = []
@@ -482,11 +486,13 @@ def place_order_graphql(vendor: str, vcfg: dict, items: list[dict], columns: lis
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
 
-def place_order(vendor: str, vcfg: dict, items: list[dict], columns: list[dict] | None) -> dict:
+def place_order(
+    vendor: str, vcfg: dict, items: list[dict], columns: list[dict] | None, order_number: str | None = None
+) -> dict:
     api = vcfg.get("api") or {}
     api_type = (api.get("type") or "openapi").lower()
     if api_type in ("openapi", "rest", "swagger", "openapi3"):
-        return place_order_rest(vendor, vcfg, items, columns)
+        return place_order_rest(vendor, vcfg, items, columns, order_number=order_number)
     if api_type == "graphql":
-        return place_order_graphql(vendor, vcfg, items, columns)
+        return place_order_graphql(vendor, vcfg, items, columns, order_number=order_number)
     raise OrderError(f"Unknown API type '{api_type}' for {vendor}.", status=500)

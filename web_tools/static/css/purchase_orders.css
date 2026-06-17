@@ -797,7 +797,8 @@ main {
 }
 
 .template-body input[type="text"],
-.template-body textarea {
+.template-body textarea,
+.template-body select {
   width: 100%;
   border: 2px solid #ddd;
   border-radius: 4px;
@@ -808,7 +809,8 @@ main {
 }
 
 .template-body input[type="text"]:focus,
-.template-body textarea:focus {
+.template-body textarea:focus,
+.template-body select:focus {
   outline: none;
   border-color: #3498db;
 }

@@ -45,12 +45,14 @@ def place_order(
     columns: list[dict] | None,
     *,
     send_email: Callable[..., tuple[bool, str]] | None = None,
+    order_number: str | None = None,
 ) -> dict:
     """Prepare (and, if ``send_email`` is given, send) a vendor order email.
 
     Returns a result dict with vendor/email/order_number/line_count/
-    total_quantity. When ``send_email`` is omitted the rendered message is
-    returned under ``prepared`` for the caller to send.
+    total_quantity and ``ordered`` (every item — email orders the lot). When
+    ``send_email`` is omitted the rendered message is returned under
+    ``prepared`` for the caller to send.
     """
     ecfg = vcfg.get("email") or {}
     company = cfg.defaults().get("company_name", "")
@@ -61,7 +63,7 @@ def place_order(
         env_hint = f" (set the {ecfg.get('to_env')} environment variable)" if ecfg.get("to_env") else ""
         raise OrderError(f"No ordering email address configured for {vendor}{env_hint}.", status=400)
 
-    order_number = make_order_number(prefix)
+    order_number = order_number or make_order_number(prefix)
     total_quantity = sum(int(it.get("quantity") or 0) for it in items)
     fmt = {
         "order_number": order_number,
@@ -89,6 +91,7 @@ def place_order(
         "line_count": len(items),
         "total_quantity": total_quantity,
         "subject": subject,
+        "ordered": items,
     }
 
     if send_email is None:

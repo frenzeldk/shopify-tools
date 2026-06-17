@@ -58,6 +58,12 @@ from shopify import (
     add_product_images,
     reorder_product_images,
     delete_product_image,
+    fetch_locations,
+    create_inventory_transfer,
+    set_transfer_items,
+    add_in_transit_shipment,
+    delete_inventory_transfer,
+    TransferError,
 )
 from chatgpt import fetch_and_translate_vendor_page, translate_product_data, translate_plain_text
 from deerhunter import dh_fetch_all_products, dh_products_to_vendor_format
@@ -121,6 +127,14 @@ products_cache = {
     "is_refreshing": False
 }
 products_lock = threading.Lock()
+
+# Global Shopify locations cache (id, name) — used as transfer destinations
+locations_cache = {
+    "locations": [],
+    "last_updated": None,
+    "is_refreshing": False
+}
+locations_lock = threading.Lock()
 
 def fetch_and_cache_shipmondo_items():
     """Fetch all Shipmondo items and update the global cache."""
@@ -221,6 +235,29 @@ def fetch_and_cache_all_products():
         products_cache["is_refreshing"] = False
 
 
+def fetch_and_cache_locations():
+    """Fetch Shopify locations and update the global cache."""
+    if locations_cache["is_refreshing"]:
+        logger.info("Locations cache refresh already in progress, skipping")
+        return
+
+    try:
+        locations_cache["is_refreshing"] = True
+        logger.info(f"Starting locations fetch at {datetime.now()}")
+        locations = fetch_locations()
+        logger.info(f"Fetched {len(locations)} locations")
+
+        with locations_lock:
+            locations_cache["locations"] = locations
+            locations_cache["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        logger.info(f"Successfully cached {len(locations)} locations")
+    except Exception as e:
+        logger.error(f"Error fetching locations: {e}", exc_info=True)
+    finally:
+        locations_cache["is_refreshing"] = False
+
+
 def refresh_all_shopify_caches():
     """Run all Shopify-dependent cache refreshes sequentially.
 
@@ -232,6 +269,7 @@ def refresh_all_shopify_caches():
     fetch_and_cache_taxonomy()
     fetch_and_cache_product_tags()
     fetch_and_cache_all_products()
+    fetch_and_cache_locations()
     logger.info("refresh_all_shopify_caches: all Shopify caches refreshed")
 
 
@@ -512,6 +550,14 @@ def migrate_yaml_to_db(db_path: str | None = None, yaml_path: str | None = None)
 
     summary["migrated"] = True
     return summary
+
+
+def _safe_delete_transfer(transfer_id: str) -> None:
+    """Best-effort delete of an orphaned (empty) transfer after an order failure."""
+    try:
+        delete_inventory_transfer(transfer_id)
+    except Exception:
+        logger.warning("Could not delete orphaned transfer %s", transfer_id, exc_info=True)
 
 
 def create_app() -> Flask:
@@ -849,42 +895,126 @@ def create_app() -> Flask:
             current_app.logger.exception("Failed to load ordering configuration", exc_info=exc)
             return jsonify({"error": "Failed to load ordering configuration."}), 500
 
+    @application.get("/purchase-orders/locations/")
+    def purchase_orders_locations() -> Any:
+        """Return cached Shopify locations (used as transfer destinations)."""
+        try:
+            with locations_lock:
+                locations = list(locations_cache["locations"])
+            if not locations:
+                # Lazy-fill the cache if the startup refresh hasn't run yet.
+                fetch_and_cache_locations()
+                with locations_lock:
+                    locations = list(locations_cache["locations"])
+            return jsonify({"locations": locations})
+        except Exception as exc:
+            current_app.logger.exception("Failed to load locations", exc_info=exc)
+            return jsonify({"error": "Failed to load locations."}), 500
+
     @application.post("/purchase-orders/place-order/")
     def purchase_orders_place_order() -> Any:
-        """Place a purchase order for the selected configuration.
+        """Place a purchase order and record it as a Shopify inventory transfer.
+
+        Flow: create an empty transfer into the template's destination location
+        → use its name (e.g. "#T0733" → "T0733") as the order number → place the
+        vendor order (email or API) → add the actually-ordered items to the
+        transfer and mark it in transit → refresh the PO cache for the user.
 
         Request JSON: {"vendor": <configuration name>, "items": [...],
-        "columns": [...]}. Dispatches to the email or API backend defined for
-        that vendor in the ordering config (purchase_order/orders.yaml). Email
-        vendors are delivered via send_plaintext_email; API vendors (OpenAPI or
-        GraphQL) perform their own authenticated requests.
-
-        Validation / business-rule blocks return HTTP 4xx with
-        {"error", "details", ...extra}. Success matches the backend shape —
-        email: {order_number, email, line_count, total_quantity}; api:
-        {order_number, address, ordered, not_ordered}.
+        "columns": [...]}. On vendor-order failure the empty transfer is cleaned
+        up. Validation / business blocks return HTTP 4xx; success returns the
+        backend result augmented with transfer_name / order_number / warnings.
         """
         payload = request.get_json(silent=True) or {}
         vendor = (payload.get("vendor") or payload.get("config_name") or "").strip()
-        if not purchase_order.is_supported(vendor):
+        template = purchase_order.get_vendor(vendor)
+        if not template:
             return jsonify({"error": f"'{vendor}' has no ordering configuration."}), 400
 
         items = payload.get("items") or []
         if not isinstance(items, list) or not items:
             return jsonify({"error": "No items provided."}), 400
 
+        destination_location_id = (template.get("location_id") or "").strip()
+        if not destination_location_id:
+            return jsonify({
+                "error": "This ordering template has no destination location. "
+                         "Edit the template and choose one before ordering."
+            }), 400
+
+        # 1) Create the empty transfer first so its name becomes the order number.
+        try:
+            transfer = create_inventory_transfer(destination_location_id)
+        except TransferError as exc:
+            return jsonify({"error": f"Could not create the Shopify transfer: {exc}", "details": exc.errors}), 502
+        except Exception as exc:
+            current_app.logger.exception("Failed to create transfer for %s", vendor, exc_info=exc)
+            return jsonify({"error": f"Could not create the Shopify transfer: {exc}"}), 502
+
+        transfer_id = transfer["id"]
+        transfer_name = transfer.get("name") or ""
+        order_number = transfer_name[1:] if transfer_name.startswith("#") else transfer_name
+
+        # 2) Place the vendor order using the transfer-derived order number.
         try:
             result = purchase_order.place_order(
-                vendor, items, payload.get("columns"), send_email=send_plaintext_email
+                vendor, items, payload.get("columns"),
+                send_email=send_plaintext_email, order_number=order_number,
             )
         except purchase_order.OrderError as exc:
+            _safe_delete_transfer(transfer_id)
             body = {"error": str(exc), "details": exc.details}
             body.update(exc.extra)
             return jsonify(body), (exc.status or 500)
         except Exception as exc:
+            _safe_delete_transfer(transfer_id)
             current_app.logger.exception("Failed to place order for %s", vendor, exc_info=exc)
             return jsonify({"error": f"Unexpected error: {exc}"}), 500
 
+        # 3) Add the actually-ordered items to the transfer and mark in transit.
+        ordered = result.get("ordered") or []
+        line_items: list[dict] = []
+        skipped_skus: list[str] = []
+        for it in ordered:
+            inv_id = it.get("inventory_item_id")
+            try:
+                qty = int(it.get("quantity") or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            if not inv_id or qty <= 0:
+                skipped_skus.append(it.get("sku"))
+                continue
+            line_items.append({"inventoryItemId": inv_id, "quantity": qty})
+
+        warnings: list[str] = []
+        if skipped_skus:
+            warnings.append(
+                f"{len(skipped_skus)} ordered item(s) had no Shopify inventory item id and "
+                "were not added to the transfer."
+            )
+        if line_items:
+            try:
+                set_transfer_items(transfer_id, line_items)
+                shipment = add_in_transit_shipment(transfer_id, line_items)
+                result["transfer_status"] = shipment.get("status")
+            except Exception as exc:  # order already placed — surface as warning, not failure
+                current_app.logger.exception("Transfer update failed for %s", transfer_name, exc_info=exc)
+                warnings.append(f"Order placed, but updating the Shopify transfer failed: {exc}")
+        else:
+            warnings.append("No items could be added to the Shopify transfer.")
+
+        # 4) Refresh the PO cache for the user so the grid reflects the order.
+        try:
+            session['po_data'] = fetch_purchase_order_data()
+            session['po_data_timestamp'] = datetime.now(timezone.utc).isoformat()
+        except Exception as exc:
+            current_app.logger.exception("Failed to refresh PO cache after order", exc_info=exc)
+
+        result["transfer_id"] = transfer_id
+        result["transfer_name"] = transfer_name
+        result["order_number"] = order_number
+        if warnings:
+            result["warnings"] = warnings
         return jsonify(result)
 
     @application.get("/purchase-orders/ordering-template/")
@@ -906,6 +1036,8 @@ def create_app() -> Flask:
             "view_name": name,
             "method": template.get("method"),
             "label": template.get("label", name),
+            "location_id": template.get("location_id", ""),
+            "location_name": template.get("location_name", ""),
         }
         if template.get("method") == "email":
             resp["email"] = template.get("email") or {}
@@ -925,7 +1057,12 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         name = (payload.get("name") or payload.get("view_name") or "").strip()
         method = (payload.get("method") or "").lower()
-        data: dict[str, Any] = {"method": method, "label": payload.get("label") or name}
+        data: dict[str, Any] = {
+            "method": method,
+            "label": payload.get("label") or name,
+            "location_id": payload.get("location_id"),
+            "location_name": payload.get("location_name"),
+        }
 
         if method == "email":
             data["email"] = payload.get("email") or {}

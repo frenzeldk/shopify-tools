@@ -34,6 +34,14 @@ def validate_template(name: str, data: dict) -> dict:
     method = (data.get("method") or "").lower()
     out: dict = {"method": method, "label": (str(data.get("label") or name)).strip() or name}
 
+    # Destination location (required) — every order creates a Shopify transfer
+    # into this location. Common to both email and API templates.
+    location_id = (str(data.get("location_id") or "")).strip()
+    if not location_id:
+        raise OrderError("A destination location is required.", status=400)
+    out["location_id"] = location_id
+    out["location_name"] = (str(data.get("location_name") or "")).strip()
+
     if method == "email":
         email = data.get("email") or {}
         if not isinstance(email, dict):
