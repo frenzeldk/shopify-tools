@@ -70,10 +70,11 @@ from shipmondo import (
     update_barcode
 )
 from microsoft365 import send_missed_pickup_email, send_plaintext_email
-import vendor_orders
+import purchase_order
 import requests as _requests
 import shopify as shopify_module
 import threading
+import yaml
 
 # Configure logging to stdout for systemd/journalctl
 logging.basicConfig(
@@ -290,7 +291,227 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE purchase_order_configurations ADD COLUMN column_widths TEXT NOT NULL DEFAULT '{}'"
             )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ordering_templates (
+                view_name TEXT PRIMARY KEY,
+                template_json TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ordering_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
+
+
+def load_ordering_templates(db_path: str) -> dict[str, dict]:
+    """Return all stored ordering templates as {view_name: template dict}.
+
+    Uses its own short-lived connection so it is safe to call from the
+    purchase_order vendors-provider regardless of request context.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT view_name, template_json FROM ordering_templates"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+    out: dict[str, dict] = {}
+    for view_name, template_json in rows:
+        try:
+            out[view_name] = json.loads(template_json)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def get_ordering_template(db_path: str, name: str) -> dict | None:
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT template_json FROM ordering_templates WHERE view_name = ?", (name,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    try:
+        return json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def save_ordering_template(db_path: str, name: str, template: dict) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO ordering_templates (view_name, template_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(view_name) DO UPDATE SET
+                template_json = excluded.template_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (name, json.dumps(template)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_ordering_template(db_path: str, name: str) -> bool:
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute("DELETE FROM ordering_templates WHERE view_name = ?", (name,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def load_ordering_defaults(db_path: str) -> dict:
+    """Return the global ordering defaults from the DB.
+
+    Falls back to the YAML file's ``defaults`` while a migration has not yet run
+    (so the app keeps working before/without migration); the backends apply
+    their own sane fallbacks if neither is set.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM ordering_settings WHERE key = 'defaults'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.close()
+    if row:
+        try:
+            data = json.loads(row[0])
+            if data:
+                return data
+        except (TypeError, ValueError):
+            pass
+    return purchase_order.file_defaults()
+
+
+def save_ordering_defaults(db_path: str, defaults: dict) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ordering_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.execute(
+            """
+            INSERT INTO ordering_settings (key, value) VALUES ('defaults', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (json.dumps(defaults),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _yaml_vendor_to_template(name: str, vcfg: dict, yaml_dir: Path) -> dict:
+    """Convert a YAML vendor entry into the storable template shape.
+
+    Email bodies may be inline (``body``) or, for legacy files, read from
+    ``body_template_file`` resolved relative to the YAML file or its parent.
+    """
+    method = (vcfg.get("method") or "").lower()
+    out: dict = {"method": method, "label": vcfg.get("label", name)}
+    if method == "email":
+        email = dict(vcfg.get("email") or {})
+        body = email.get("body")
+        if not body and email.get("body_template_file"):
+            rel = Path(email["body_template_file"])
+            candidates = [rel] if rel.is_absolute() else [yaml_dir / rel, yaml_dir.parent / rel]
+            for candidate in candidates:
+                try:
+                    body = candidate.read_text(encoding="utf-8")
+                    break
+                except OSError:
+                    continue
+        attachment = email.get("attachment") or {}
+        out["email"] = {
+            "to": email.get("to", ""),
+            "to_env": email.get("to_env", ""),
+            "subject": email.get("subject", "Purchase Order {order_number} - {company_name}"),
+            "body": body or "",
+            "attachment": {
+                "enabled": bool(attachment.get("enabled", True)),
+                "filename": attachment.get("filename", "PO_{order_number}.xlsx"),
+            },
+        }
+    elif method == "api":
+        out["api"] = vcfg.get("api") or {}
+    return out
+
+
+def migrate_yaml_to_db(db_path: str | None = None, yaml_path: str | None = None) -> dict:
+    """Migrate ordering config from a YAML file into the database.
+
+    Moves the ``defaults`` block and every ``vendors`` entry (email and API
+    alike) into ``ordering_settings`` / ``ordering_templates``. Safe to re-run
+    (upserts). Returns a summary; if no YAML file is present nothing is changed.
+    """
+    db_path = db_path or str(DATABASE_PATH)
+    ypath = Path(yaml_path) if yaml_path else Path(purchase_order.config_path())
+    summary: dict = {
+        "yaml_path": str(ypath),
+        "migrated": False,
+        "defaults": False,
+        "templates": [],
+        "skipped": [],
+    }
+    if not ypath.exists():
+        summary["reason"] = "no YAML file present"
+        return summary
+
+    with open(ypath, "r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ordering_templates "
+            "(view_name TEXT PRIMARY KEY, template_json TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ordering_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    defaults = data.get("defaults") or {}
+    if defaults:
+        save_ordering_defaults(db_path, defaults)
+        summary["defaults"] = True
+
+    for name, vcfg in (data.get("vendors") or {}).items():
+        try:
+            template = _yaml_vendor_to_template(name, vcfg or {}, ypath.parent)
+            template = purchase_order.validate_template(name, template)
+        except Exception as exc:  # noqa: BLE001 — collect, don't abort the batch
+            summary["skipped"].append({"name": name, "reason": str(exc)})
+            continue
+        save_ordering_template(db_path, name, template)
+        summary["templates"].append(name)
+
+    summary["migrated"] = True
+    return summary
 
 
 def create_app() -> Flask:
@@ -318,7 +539,18 @@ def create_app() -> Flask:
     
     with application.app_context():
         init_db()
-    
+
+    # All ordering config (templates + global defaults) lives in the DB and is
+    # edited through the UI. Point the purchase_order package at the DB so edits
+    # take effect without restarts.
+    _ordering_db_path = application.config.get("DATABASE", str(DATABASE_PATH))
+    purchase_order.register_vendors_provider(
+        lambda: load_ordering_templates(_ordering_db_path)
+    )
+    purchase_order.register_defaults_provider(
+        lambda: load_ordering_defaults(_ordering_db_path)
+    )
+
     # ── GQL async permanent session ───────────────────────────────
     # Open a single persistent GraphQL connection with automatic
     # reconnection.  Must happen before the scheduler fires any
@@ -604,251 +836,135 @@ def create_app() -> Flask:
             return jsonify({"error": "Configuration not found."}), 404
         return jsonify({"status": "deleted", "id": config_id})
 
-    @application.post("/purchase-orders/entire-m-order/")
-    async def purchase_orders_entire_m_order() -> Any:
-        """Place a purchase order with Entire-M for the supplied items.
+    @application.get("/purchase-orders/order-methods/")
+    def purchase_orders_order_methods() -> Any:
+        """Return the ordering method/label for each configured vendor.
 
-        Request JSON:
-          {
-            "items": [{"sku": str, "quantity": int, ...passthrough}, ...]
-          }
-
-        Response JSON on success/partial-success:
-          {
-            "order_number": str,
-            "address": {AddressId, Name, ...},
-            "ordered": [{sku, quantity, available, ...passthrough}],
-            "not_ordered": [{sku, quantity, available, reason, ...passthrough}]
-          }
-
-        On a hard block (no address / API error / nothing orderable), returns
-        HTTP 4xx/5xx with {"error": "...", "details": [...]} so the client can
-        surface it as a modal.
+        Lets the grid decide which order button to show (and which flow to run)
+        purely from the ordering config, keyed by the saved configuration name.
         """
         try:
-            payload = request.get_json(silent=True) or {}
-            items_in = payload.get("items") or []
-            if not isinstance(items_in, list) or not items_in:
-                return jsonify({"error": "No items provided."}), 400
-
-            requested: list[dict] = []
-            for it in items_in:
-                if not isinstance(it, dict):
-                    continue
-                sku = (it.get("sku") or "").strip()
-                if not sku:
-                    continue
-                try:
-                    qty = int(it.get("quantity") or 0)
-                except (TypeError, ValueError):
-                    qty = 0
-                if qty <= 0:
-                    continue
-                requested.append({**it, "sku": sku, "quantity": qty})
-            if not requested:
-                return jsonify({"error": "No items with a valid SKU and positive quantity."}), 400
-
-            try:
-                addresses = await asyncio.to_thread(entire_m.get_addresses)
-            except entire_m.EntireMAPIError as exc:
-                status_code = exc.status if exc.status in (401, 403, 423) else 502
-                return jsonify({"error": str(exc), "details": exc.errors}), status_code
-
-            if not addresses:
-                return jsonify({"error": "No delivery addresses available from Entire-M."}), 502
-            address = addresses[0]
-
-            try:
-                orderable, blocked, _stocks = await asyncio.to_thread(
-                    entire_m.split_orderable_items, requested
-                )
-            except entire_m.EntireMAPIError as exc:
-                status_code = exc.status if exc.status in (401, 403, 423) else 502
-                return jsonify({"error": str(exc), "details": exc.errors}), status_code
-
-            if not orderable:
-                return jsonify({
-                    "error": "None of the requested items can be ordered (insufficient stock or unknown SKUs).",
-                    "details": [
-                        {"sku": b.get("sku"), "reason": b.get("reason"), "available": b.get("available")}
-                        for b in blocked
-                    ],
-                }), 409
-
-            # Verify the post-discount order total meets Entire-M's 400 EUR minimum.
-            try:
-                price_map = await asyncio.to_thread(
-                    entire_m.get_purchasing_prices, [it["sku"] for it in orderable]
-                )
-            except entire_m.EntireMAPIError as exc:
-                status_code = exc.status if exc.status in (401, 403, 423) else 502
-                return jsonify({"error": str(exc), "details": exc.errors}), status_code
-
-            MIN_ORDER_EUR = 400.0
-            missing_prices: list[str] = []
-            currencies: set[str] = set()
-            order_total = 0.0
-            for it in orderable:
-                p = price_map.get(it["sku"])
-                if not p:
-                    missing_prices.append(it["sku"])
-                    continue
-                it["unit_price"] = p["price"]
-                it["currency"] = p["currency"]
-                it["line_total"] = round(p["price"] * it["quantity"], 2)
-                if p["currency"]:
-                    currencies.add(p["currency"])
-                order_total += p["price"] * it["quantity"]
-            order_total = round(order_total, 2)
-
-            if missing_prices:
-                return jsonify({
-                    "error": (
-                        "Could not retrieve purchasing price from Entire-M for "
-                        f"{len(missing_prices)} SKU(s); aborting to avoid undercutting the "
-                        "400 EUR minimum order value."
-                    ),
-                    "details": [{"sku": s, "reason": "No price returned by Entire-M."} for s in missing_prices],
-                    "order_total": order_total,
-                }), 409
-
-            if currencies and currencies != {"EUR"}:
-                return jsonify({
-                    "error": (
-                        f"Entire-M returned prices in unexpected currencies {sorted(currencies)} "
-                        "(expected EUR). Order aborted."
-                    ),
-                    "details": [
-                        {"sku": it["sku"], "currency": it.get("currency"), "unit_price": it.get("unit_price")}
-                        for it in orderable
-                    ],
-                    "order_total": order_total,
-                }), 409
-
-            if order_total < MIN_ORDER_EUR:
-                return jsonify({
-                    "error": (
-                        f"Order total {order_total:.2f} EUR is below Entire-M's minimum "
-                        f"order value of {MIN_ORDER_EUR:.0f} EUR. No order was placed."
-                    ),
-                    "details": [
-                        {
-                            "sku": it["sku"],
-                            "quantity": it["quantity"],
-                            "unit_price": it.get("unit_price"),
-                            "line_total": it.get("line_total"),
-                            "currency": it.get("currency"),
-                        }
-                        for it in orderable
-                    ] + [
-                        {"sku": b.get("sku"), "reason": b.get("reason"), "available": b.get("available")}
-                        for b in blocked
-                    ],
-                    "order_total": order_total,
-                }), 409
-
-            order_number = entire_m.make_order_number()
-            try:
-                await asyncio.to_thread(
-                    entire_m.place_order,
-                    [{"sku": it["sku"], "quantity": it["quantity"]} for it in orderable],
-                    int(address.get("addressId") or address.get("AddressId") or 0),
-                    order_number,
-                )
-            except entire_m.EntireMAPIError as exc:
-                status_code = exc.status if exc.status in (401, 403, 423) else 502
-                return jsonify({
-                    "error": str(exc),
-                    "details": exc.errors,
-                    "order_number": order_number,
-                }), status_code
-
-            return jsonify({
-                "order_number": order_number,
-                "address": address,
-                "ordered": orderable,
-                "not_ordered": blocked,
-            })
+            return jsonify(purchase_order.list_vendors())
         except Exception as exc:
-            current_app.logger.exception("Failed to place Entire-M order", exc_info=exc)
-            return jsonify({"error": f"Unexpected error: {exc}"}), 500
+            current_app.logger.exception("Failed to load ordering configuration", exc_info=exc)
+            return jsonify({"error": "Failed to load ordering configuration."}), 500
 
-    @application.post("/purchase-orders/email-order/")
-    def purchase_orders_email_order() -> Any:
-        """Place a purchase order with an email-only vendor (M-Tac, Leatherman).
+    @application.post("/purchase-orders/place-order/")
+    def purchase_orders_place_order() -> Any:
+        """Place a purchase order for the selected configuration.
 
-        Request JSON:
-          {
-            "vendor": "M-Tac" | "Leatherman",
-            "items": [{"sku": str, "quantity": int, "title": str, ...}, ...]
-          }
+        Request JSON: {"vendor": <configuration name>, "items": [...],
+        "columns": [...]}. Dispatches to the email or API backend defined for
+        that vendor in the ordering config (purchase_order/orders.yaml). Email
+        vendors are delivered via send_plaintext_email; API vendors (OpenAPI or
+        GraphQL) perform their own authenticated requests.
 
-        Sends a plain-text order email to the vendor's configured ordering
-        address and returns {order_number, vendor, email, line_count,
-        total_quantity}. Misconfiguration / bad input returns HTTP 4xx; a
-        failed send returns HTTP 502.
+        Validation / business-rule blocks return HTTP 4xx with
+        {"error", "details", ...extra}. Success matches the backend shape —
+        email: {order_number, email, line_count, total_quantity}; api:
+        {order_number, address, ordered, not_ordered}.
         """
+        payload = request.get_json(silent=True) or {}
+        vendor = (payload.get("vendor") or payload.get("config_name") or "").strip()
+        if not purchase_order.is_supported(vendor):
+            return jsonify({"error": f"'{vendor}' has no ordering configuration."}), 400
+
+        items = payload.get("items") or []
+        if not isinstance(items, list) or not items:
+            return jsonify({"error": "No items provided."}), 400
+
         try:
-            payload = request.get_json(silent=True) or {}
-            vendor = (payload.get("vendor") or "").strip()
-            if not vendor_orders.is_supported(vendor):
-                return jsonify({"error": f"'{vendor}' is not an email ordering vendor."}), 400
-
-            items_in = payload.get("items") or []
-            if not isinstance(items_in, list) or not items_in:
-                return jsonify({"error": "No items provided."}), 400
-
-            items: list[dict] = []
-            for it in items_in:
-                if not isinstance(it, dict):
-                    continue
-                sku = (it.get("sku") or "").strip()
-                if not sku:
-                    continue
-                try:
-                    qty = int(it.get("quantity") or 0)
-                except (TypeError, ValueError):
-                    qty = 0
-                if qty <= 0:
-                    continue
-                items.append({**it, "sku": sku, "quantity": qty})
-            if not items:
-                return jsonify({"error": "No items with a valid SKU and positive quantity."}), 400
-
-            columns: list[dict] = []
-            for col in payload.get("columns") or []:
-                if not isinstance(col, dict):
-                    continue
-                field = (col.get("field") or "").strip()
-                if not field:
-                    continue
-                columns.append({"field": field, "label": col.get("label") or field})
-
-            try:
-                order = vendor_orders.prepare_order_email(vendor, items, columns or None)
-            except vendor_orders.VendorOrderError as exc:
-                return jsonify({"error": str(exc)}), 400
-
-            attachments = [(order["attachment_bytes"], order["attachment_filename"])]
-            success, message = send_plaintext_email(
-                order["email"], order["subject"], order["body"], attachments=attachments
+            result = purchase_order.place_order(
+                vendor, items, payload.get("columns"), send_email=send_plaintext_email
             )
-            if not success:
-                return jsonify({
-                    "error": f"Failed to send order email to {vendor}: {message}",
-                    "order_number": order["order_number"],
-                }), 502
-
-            return jsonify({
-                "vendor": vendor,
-                "email": order["email"],
-                "order_number": order["order_number"],
-                "line_count": order["line_count"],
-                "total_quantity": order["total_quantity"],
-            })
+        except purchase_order.OrderError as exc:
+            body = {"error": str(exc), "details": exc.details}
+            body.update(exc.extra)
+            return jsonify(body), (exc.status or 500)
         except Exception as exc:
-            current_app.logger.exception("Failed to place email order", exc_info=exc)
+            current_app.logger.exception("Failed to place order for %s", vendor, exc_info=exc)
             return jsonify({"error": f"Unexpected error: {exc}"}), 500
+
+        return jsonify(result)
+
+    @application.get("/purchase-orders/ordering-template/")
+    def get_ordering_template_route() -> Any:
+        """Return the ordering template for a saved view (for the editor).
+
+        Query: ?name=<view name>. Responds with {exists, view_name, method,
+        label} plus either an ``email`` object or an ``api_raw`` YAML string for
+        the raw API editor.
+        """
+        name = (request.args.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "A view name is required."}), 400
+        template = get_ordering_template(_ordering_db_path, name)
+        if not template:
+            return jsonify({"exists": False, "view_name": name})
+        resp: dict[str, Any] = {
+            "exists": True,
+            "view_name": name,
+            "method": template.get("method"),
+            "label": template.get("label", name),
+        }
+        if template.get("method") == "email":
+            resp["email"] = template.get("email") or {}
+        else:
+            resp["api_raw"] = yaml.safe_dump(
+                template.get("api") or {}, sort_keys=False, allow_unicode=True
+            )
+        return jsonify(resp)
+
+    @application.post("/purchase-orders/ordering-template/")
+    def save_ordering_template_route() -> Any:
+        """Create or update the ordering template for a saved view.
+
+        Body: {name, method, label, email{...}} for email, or
+        {name, method, label, api_raw: <YAML string>} for API.
+        """
+        payload = request.get_json(silent=True) or {}
+        name = (payload.get("name") or payload.get("view_name") or "").strip()
+        method = (payload.get("method") or "").lower()
+        data: dict[str, Any] = {"method": method, "label": payload.get("label") or name}
+
+        if method == "email":
+            data["email"] = payload.get("email") or {}
+        elif method == "api":
+            raw = payload.get("api_raw")
+            if isinstance(raw, str):
+                try:
+                    data["api"] = yaml.safe_load(raw) or {}
+                except yaml.YAMLError as exc:
+                    return jsonify({"error": f"API config is not valid YAML/JSON: {exc}"}), 400
+            else:
+                data["api"] = payload.get("api") or {}
+        else:
+            return jsonify({"error": "Template method must be 'email' or 'api'."}), 400
+
+        try:
+            template = purchase_order.validate_template(name, data)
+        except purchase_order.OrderError as exc:
+            return jsonify({"error": str(exc)}), (exc.status or 400)
+
+        save_ordering_template(_ordering_db_path, name, template)
+        return jsonify(
+            {
+                "status": "saved",
+                "view_name": name,
+                "method": template["method"],
+                "label": template["label"],
+            }
+        )
+
+    @application.delete("/purchase-orders/ordering-template/")
+    def delete_ordering_template_route() -> Any:
+        """Delete the ordering template for a saved view."""
+        name = (request.args.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "A view name is required."}), 400
+        if not delete_ordering_template(_ordering_db_path, name):
+            return jsonify({"error": "No ordering template exists for that view."}), 404
+        return jsonify({"status": "deleted", "view_name": name})
 
     @application.route("/inventory-tools/")
     @oidc.require_login
@@ -2374,6 +2490,13 @@ def _fetch_cleanup_variants():
     }
 
 if __name__ == "__main__":
+    # One-off migration of YAML ordering config into the DB, without booting the
+    # full server:  python app.py migrate-ordering-config [yaml_path]
+    if len(sys.argv) > 1 and sys.argv[1] == "migrate-ordering-config":
+        result = migrate_yaml_to_db(yaml_path=sys.argv[2] if len(sys.argv) > 2 else None)
+        print(json.dumps(result, indent=2))
+        sys.exit(0)
+
     app = create_app()
 
     # Ensure the GQL session is closed cleanly on interpreter exit

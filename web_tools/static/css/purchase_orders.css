@@ -699,3 +699,164 @@ main {
     padding: 0.75rem 1rem 1rem;
   }
 }
+
+/* ── Settings (gear) menu ─────────────────────────────────────────────── */
+.settings-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+#controls .settings-menu .gear-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
+  background-color: #95a5a6;
+  color: #ffffff;
+}
+
+#controls .settings-menu .gear-button:hover:not(:disabled) {
+  background-color: #7f8c8d;
+}
+
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+}
+
+.settings-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 220px;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.18);
+  padding: 0.35rem;
+  z-index: 901;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+#controls .settings-dropdown .settings-item {
+  background: transparent;
+  color: #1f2937;
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+  border-radius: 4px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+#controls .settings-dropdown .settings-item:hover:not(:disabled) {
+  background-color: #f1f5f9;
+}
+
+/* ── Ordering-template editor ─────────────────────────────────────────── */
+.ordering-template-modal {
+  width: min(680px, 100%);
+}
+
+.ordering-template-modal .modal-body.template-body {
+  display: block;
+}
+
+.template-body .form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+}
+
+.template-body .form-row > label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #334155;
+}
+
+.template-body .form-row small {
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.template-body input[type="text"],
+.template-body textarea {
+  width: 100%;
+  border: 2px solid #ddd;
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.95rem;
+  background-color: #ffffff;
+  box-sizing: border-box;
+}
+
+.template-body input[type="text"]:focus,
+.template-body textarea:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.template-body textarea.code-editor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.template-body .method-toggle {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.template-body .method-toggle label,
+.template-body .checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 500;
+  color: #334155;
+}
+
+.template-error {
+  background-color: #fee2e2;
+  border: 1px solid #fca5a5;
+  color: #991b1b;
+  padding: 0.6rem 0.8rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.template-warning {
+  background-color: #fff3cd;
+  border: 1px solid #ffc107;
+  color: #856404;
+  padding: 0.75rem 1rem;
+  border-radius: 4px;
+  margin: 0;
+}
+
+.modal-footer.template-footer {
+  align-items: center;
+}
+
+.template-footer .footer-spacer {
+  flex: 1;
+}
+
+.modal-footer button.danger.ghost {
+  background-color: transparent;
+  color: #dc2626;
+  border: 1px solid #dc2626;
+}
+
+.modal-footer button.danger.ghost:hover:not(:disabled) {
+  background-color: #fee2e2;
+}
+
+.modal-overlay.nested {
+  z-index: 1100;
+}

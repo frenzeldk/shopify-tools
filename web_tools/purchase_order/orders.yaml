@@ -1,0 +1,118 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Purchase-order ordering configuration
+#
+# ALL ordering config now lives in the database. Templates (email + API) are
+# edited from the UI (gear menu → "Create/Edit ordering template"), keyed by the
+# saved grid-view name; global `defaults` are stored in the DB too.
+#
+# This file is OPTIONAL. The `defaults` below act only as a fallback until they
+# are migrated into the DB. To migrate an existing YAML file into the database:
+#     python app.py migrate-ordering-config [path/to/orders.yaml]
+# The schema below documents the API template shape for the raw editor.
+#
+# `method` chooses the backend:
+#   email                   -> email_backend  (templated email + order XLSX)
+#   api  + api.type=openapi -> api_backend    (authenticated REST / OpenAPI flow)
+#   api  + api.type=graphql -> api_backend    (GraphQL queries + place mutation)
+#
+# Secrets are referenced as {$env: VAR}; {$ref: ...} pulls a runtime value,
+# {$value: "..."} interpolates {order_number}/{company_name}/{address_id}, and
+# {$items: {dest: source}} builds a list from the order lines.
+# Override the file location with the PURCHASE_ORDER_CONFIG environment variable.
+# ─────────────────────────────────────────────────────────────────────────────
+
+defaults:
+  company_name: XtraGrej
+  order_number_prefix: WT
+
+# ── Schema reference (for the API raw editor; not loaded as templates) ────────
+#
+# Email template shape:
+#   method: email
+#   label: My Vendor
+#   email:
+#     to: orders@vendor.com          # or to_env: VENDOR_ORDER_EMAIL (env wins)
+#     subject: "Purchase Order {order_number} - {company_name}"
+#     body: |                        # $-placeholders: $order_number $date
+#       Dear team,                   # $order_lines $line_count $total_quantity
+#       $order_lines                 # $company_name
+#     attachment:
+#       enabled: true
+#       filename: "PO_{order_number}.xlsx"
+#
+# API template — OpenAPI / REST (paste the `api:` block into the raw editor):
+#   type: openapi
+#   base_url_env: VENDOR_BASE_URL
+#   base_url: "https://api.vendor.com"
+#   timeout: 60
+#   envelope:
+#     success_path: [isSuccess]
+#     errors_path: [errors]
+#     error_message_key: errorMessage
+#     value_path: [value]
+#   auth:
+#     type: login_bearer            # login_bearer | bearer | basic | header | none
+#     header: Authorization
+#     scheme: Bearer
+#     login:
+#       method: POST
+#       path: /api/v1/auth/login
+#       json:
+#         clientId: {$env: VENDOR_CLIENT_ID}
+#         clientSecret: {$env: VENDOR_CLIENT_SECRET}
+#       token_path: [value, accessToken]
+#   flow:
+#     - type: fetch_address
+#       request: {method: GET, path: /api/v1/customer/addresses}
+#       value_path: [value]
+#       select: first
+#       id_field: addressId
+#     - type: stock_filter
+#       request:
+#         method: POST
+#         path: /api/v1/stocks
+#         json: {items: {$items: {sku: sku}}}
+#       response: {rows_path: [value], sku_key: sku, qty_key: quantity}
+#     - type: price_minimum
+#       request:
+#         method: POST
+#         path: /api/v1/prices
+#         json: {items: {$items: {sku: sku}}}
+#         paginate: {page_param: pageNumber, pages_left_path: [value, pagesLeft]}
+#       response:
+#         rows_path: [value, prices]
+#         sku_key: sku
+#         details_key: priceDetails
+#         price_type_key: priceType
+#         price_key: price
+#         currency_key: currency
+#         price_type_priority: [price-after-all-discounts, price-after-discount-policy, wholesale]
+#       minimum: 400.0
+#       currency: EUR
+#   place_order:
+#     method: POST
+#     path: /api/v1/orders
+#     json:
+#       addressID: {$ref: address_id}
+#       orderNumber: {$value: "{order_number}"}
+#       items: {$items: {sku: sku, quantity: quantity}}
+#
+# API template — GraphQL:
+#   type: graphql
+#   base_url_env: VENDOR_GQL_ENDPOINT
+#   base_url: "https://vendor.com/graphql"
+#   auth: {type: bearer, token_env: VENDOR_GQL_TOKEN, header: Authorization, scheme: Bearer}
+#   flow:
+#     - type: stock_filter
+#       query: |
+#         query Stock($items: [StockQueryItem!]!) { stock(items: $items) { sku quantity } }
+#       variables: {items: {$items: {sku: sku}}}
+#       response: {rows_path: [stock], sku_key: sku, qty_key: quantity}
+#   place_order:
+#     mutation: |
+#       mutation PlaceOrder($orderNumber: String!, $items: [OrderItemInput!]!) {
+#         createPurchaseOrder(orderNumber: $orderNumber, items: $items) { id }
+#       }
+#     variables:
+#       orderNumber: {$value: "{order_number}"}
+#       items: {$items: {sku: sku, quantity: quantity}}

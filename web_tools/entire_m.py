@@ -14,11 +14,14 @@ Public surface used by app.py:
   - classify_helikon_images(product_code, all_files)
   - stage_helikon_images(filenames)
   - helikon_image_url(filename) / helikon_image_basic_auth()
-  - fetch_vendor_products()           — drop-in replacement for parse_vendor_csv
-  - get_stocks(skus)
-  - get_addresses()
-  - place_order(items, address_id, order_number)
+  - parse_vendor_csv(csv_content)      — parse the Helikon-Tex CSV export
+  - fetch_vendor_products()            — API-backed replacement for parse_vendor_csv
+  - get_products(skus)
   - EntireMAPIError                    — raised on API/business errors
+
+Vendor *ordering* (addresses, stock/price checks, place order) is no longer
+hardcoded here — it lives in the config-driven ``purchase_order`` package
+(see purchase_order/orders.yaml, vendor "Helikon-Tex").
 """
 
 from __future__ import annotations
@@ -257,98 +260,6 @@ def _request(method: str, path: str, *, json_body: dict | None = None, params: d
     return payload
 
 
-def get_addresses() -> list[dict]:
-    """GET /api/v1/customer/addresses."""
-    payload = _request("GET", "/api/v1/customer/addresses")
-    return _pick(payload, "value") or []
-
-
-def get_stocks(skus: Iterable[str]) -> dict[str, float]:
-    """POST /api/v1/stocks — returns mapping sku → available quantity."""
-    items = [{"sku": s} for s in dict.fromkeys(skus) if s]
-    if not items:
-        return {}
-    payload = _request("POST", "/api/v1/stocks", json_body={"items": items})
-    result: dict[str, float] = {}
-    for row in _pick(payload, "value") or []:
-        sku = _pick(row, "sku")
-        qty = _pick(row, "quantity")
-        if sku is None or qty is None:
-            continue
-        try:
-            result[sku] = float(qty)
-        except (TypeError, ValueError):
-            continue
-    return result
-
-
-def get_prices(skus: Iterable[str], page_number: int = 1) -> list[dict]:
-    """POST /api/v1/prices for a list of SKUs (one page)."""
-    items = [{"sku": s} for s in dict.fromkeys(skus) if s]
-    if not items:
-        return []
-    payload = _request("POST", "/api/v1/prices", json_body={"items": items, "pageNumber": page_number})
-    value = _pick(payload, "value") or {}
-    return _pick(value, "prices") or []
-
-
-# PriceType priority for the "actual purchasing price" — most-discounted first.
-_PURCHASE_PRICE_TYPES = (
-    "price-after-all-discounts",
-    "price-after-discount-policy",
-    "wholesale",
-)
-
-
-def get_purchasing_prices(skus: Iterable[str]) -> dict[str, dict]:
-    """Fetch the post-discount unit price for each SKU.
-
-    Returns sku → {"price": float, "currency": str} using the most-discounted
-    PriceType available (price-after-all-discounts > price-after-discount-policy
-    > wholesale). SKUs without any usable price entry are omitted.
-    """
-    sku_list = [s for s in dict.fromkeys(skus) if s]
-    if not sku_list:
-        return {}
-    items = [{"sku": s} for s in sku_list]
-    result: dict[str, dict] = {}
-    page = 1
-    while True:
-        payload = _request(
-            "POST",
-            "/api/v1/prices",
-            json_body={"items": items, "pageNumber": page},
-        )
-        value = _pick(payload, "value") or {}
-        for pr in _pick(value, "prices") or []:
-            sku = _pick(pr, "sku")
-            if not sku:
-                continue
-            details = _pick(pr, "priceDetails") or []
-            chosen = None
-            for pt in _PURCHASE_PRICE_TYPES:
-                chosen = next(
-                    (d for d in details if (_pick(d, "priceType") or "").lower() == pt),
-                    None,
-                )
-                if chosen is not None:
-                    break
-            if chosen is None:
-                continue
-            try:
-                price = float(_pick(chosen, "price"))
-            except (TypeError, ValueError):
-                continue
-            result[sku] = {
-                "price": price,
-                "currency": (_pick(chosen, "currency") or "").upper(),
-            }
-        if int(_pick(value, "pagesLeft") or 0) <= 0:
-            break
-        page += 1
-    return result
-
-
 def get_products(skus: Iterable[str], language: str | None = None) -> list[dict]:
     """POST /api/v1/products — returns a flat list of products across all pages."""
     items = [{"sku": s} for s in dict.fromkeys(skus) if s]
@@ -372,65 +283,6 @@ def get_products(skus: Iterable[str], language: str | None = None) -> list[dict]
             break
         page += 1
     return out
-
-
-def place_order(items: list[dict], address_id: int, order_number: str) -> dict:
-    """POST /api/v1/orders.
-
-    items: list of {"sku": str, "quantity": int}
-    Returns the parsed envelope. Raises EntireMAPIError on any failure.
-    """
-    body = {
-        "addressID": int(address_id),
-        "orderNumber": str(order_number),
-        "items": [
-            {"sku": str(it["sku"]), "quantity": int(it["quantity"])}
-            for it in items
-            if it.get("sku") and int(it.get("quantity") or 0) > 0
-        ],
-    }
-    if not body["items"]:
-        raise EntireMAPIError("place_order called with no orderable items.")
-    return _request("POST", "/api/v1/orders", json_body=body)
-
-
-def make_order_number(prefix: str = "WT") -> str:
-    """Generate a unique order number for our side of the call (<=100 chars)."""
-    return f"{prefix}-{int(time.time())}"
-
-
-def split_orderable_items(
-    requested: list[dict],
-) -> tuple[list[dict], list[dict], dict[str, float]]:
-    """Look up stock for each requested item and split into orderable / blocked lists.
-
-    requested: list of {"sku": str, "quantity": int, ...passthrough}
-    Returns (orderable, blocked, stock_map).
-      - orderable: items where stock >= requested quantity (quantity clamped to int).
-      - blocked: items that cannot be ordered, each with an added "reason" field.
-    """
-    skus = [it["sku"] for it in requested if it.get("sku")]
-    stock_map = get_stocks(skus)
-    orderable: list[dict] = []
-    blocked: list[dict] = []
-    for it in requested:
-        sku = it.get("sku")
-        try:
-            qty = int(it.get("quantity") or 0)
-        except (TypeError, ValueError):
-            qty = 0
-        if not sku or qty <= 0:
-            blocked.append({**it, "reason": "Invalid SKU or zero quantity."})
-            continue
-        if sku not in stock_map:
-            blocked.append({**it, "available": 0, "reason": "Not found in Entire-M catalog."})
-            continue
-        available = stock_map[sku]
-        if available < qty:
-            blocked.append({**it, "available": available, "reason": f"Insufficient stock (available: {available})."})
-            continue
-        orderable.append({**it, "available": available})
-    return orderable, blocked, stock_map
 
 
 # ── Vendor catalog (drop-in replacement for the legacy Helikon CSV export) ────

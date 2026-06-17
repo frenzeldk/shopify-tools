@@ -220,9 +220,18 @@
             cacheTimestamp: null,
             customColumns: [],
             newCustomColumnName: "",
-            entireMOrdering: false,
+            orderMethods: {},
+            placingOrder: false,
             entireMModal: null,
-            emailOrdering: false,
+            settingsMenuOpen: false,
+            orderingTemplateModalOpen: false,
+            orderingTemplateLoading: false,
+            orderingTemplateSaving: false,
+            orderingTemplateError: "",
+            orderingTemplateExists: false,
+            orderingTemplateName: "",
+            orderingTemplateDeleteConfirm: false,
+            orderingTemplate: null,
           };
         },
         computed: {
@@ -277,13 +286,15 @@
             );
             return config ? config.name : "";
           },
-          isHelikonView() {
-            return this.selectedConfigName === "Helikon-Tex";
+          currentOrderMethod() {
+            // Ordering method for the selected view, driven entirely by the
+            // backend ordering config (no hardcoded vendor names here).
+            const meta = this.orderMethods[this.selectedConfigName];
+            return meta ? meta.method : null;
           },
-          emailOrderVendor() {
-            // Configuration names that are ordered by sending an email to the vendor.
-            const emailVendors = ["M-Tac", "Leatherman"];
-            return emailVendors.includes(this.selectedConfigName) ? this.selectedConfigName : null;
+          orderButtonLabel() {
+            const meta = this.orderMethods[this.selectedConfigName];
+            return (meta && meta.label) || this.selectedConfigName;
           },
         },
         watch: {
@@ -309,6 +320,7 @@
           this.bootstrapInitialData(initialPurchaseOrders);
           void this.fetchConfigurations();
           void this.loadPurchaseOrders();
+          void this.loadOrderMethods();
         },
         mounted() {
           if (!this.$refs.gridContainer) {
@@ -1020,10 +1032,157 @@
               label: this.columnLabels[field] || this.formatHeader(field),
             }));
           },
-          async placeEmailOrder() {
-            if (this.emailOrdering) return;
-            const vendor = this.emailOrderVendor;
-            if (!vendor) return;
+          async loadOrderMethods() {
+            // Pull the per-configuration ordering method/label from the backend
+            // so the order button is rendered straight from config.
+            try {
+              const response = await fetch("/purchase-orders/order-methods/", {
+                credentials: "same-origin",
+              });
+              if (response.ok) {
+                this.orderMethods = await response.json();
+              }
+            } catch (error) {
+              console.error("Failed to load order methods", error);
+            }
+          },
+          toggleSettingsMenu() {
+            this.settingsMenuOpen = !this.settingsMenuOpen;
+          },
+          openColumnsFromMenu() {
+            this.settingsMenuOpen = false;
+            this.openModal();
+          },
+          defaultOrderingTemplate() {
+            return {
+              method: "email",
+              label: this.selectedConfigName || "",
+              email: {
+                to: "",
+                to_env: "",
+                subject: "Purchase Order {order_number} - {company_name}",
+                body: "",
+                attachment: { enabled: true, filename: "PO_{order_number}.xlsx" },
+              },
+              api_raw: 'type: openapi\nbase_url: ""\nplace_order:\n  method: POST\n  path: ""\n',
+            };
+          },
+          async openOrderingTemplate() {
+            this.settingsMenuOpen = false;
+            const name = this.selectedConfigName;
+            if (!name) return;
+            this.orderingTemplateName = name;
+            this.orderingTemplateError = "";
+            this.orderingTemplateDeleteConfirm = false;
+            this.orderingTemplateExists = false;
+            this.orderingTemplate = this.defaultOrderingTemplate();
+            this.orderingTemplateLoading = true;
+            this.orderingTemplateModalOpen = true;
+            try {
+              const response = await fetch(
+                "/purchase-orders/ordering-template/?name=" + encodeURIComponent(name),
+                { credentials: "same-origin" }
+              );
+              const data = await response.json().catch(() => ({}));
+              if (response.ok && data.exists) {
+                this.orderingTemplateExists = true;
+                const tmpl = this.defaultOrderingTemplate();
+                tmpl.method = data.method || "email";
+                tmpl.label = data.label || name;
+                if (data.method === "email") {
+                  const email = data.email || {};
+                  tmpl.email = {
+                    to: email.to || "",
+                    to_env: email.to_env || "",
+                    subject: email.subject || tmpl.email.subject,
+                    body: email.body || "",
+                    attachment: {
+                      enabled: !(email.attachment && email.attachment.enabled === false),
+                      filename: (email.attachment && email.attachment.filename) || "PO_{order_number}.xlsx",
+                    },
+                  };
+                } else {
+                  tmpl.api_raw = data.api_raw || tmpl.api_raw;
+                }
+                this.orderingTemplate = tmpl;
+              }
+            } catch (error) {
+              console.error("Failed to load ordering template", error);
+              this.orderingTemplateError = (error && error.message) || "Failed to load template.";
+            } finally {
+              this.orderingTemplateLoading = false;
+            }
+          },
+          closeOrderingTemplate() {
+            this.orderingTemplateModalOpen = false;
+            this.orderingTemplateDeleteConfirm = false;
+          },
+          async saveOrderingTemplate() {
+            if (this.orderingTemplateSaving || !this.orderingTemplate) return;
+            this.orderingTemplateSaving = true;
+            this.orderingTemplateError = "";
+            try {
+              const body = {
+                name: this.orderingTemplateName,
+                method: this.orderingTemplate.method,
+                label: this.orderingTemplate.label,
+              };
+              if (this.orderingTemplate.method === "email") {
+                body.email = this.orderingTemplate.email;
+              } else {
+                body.api_raw = this.orderingTemplate.api_raw;
+              }
+              const response = await fetch("/purchase-orders/ordering-template/", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "same-origin",
+                body: JSON.stringify(body),
+              });
+              const data = await response.json().catch(() => ({}));
+              if (!response.ok) {
+                this.orderingTemplateError = data.error || `Save failed (status ${response.status}).`;
+                return;
+              }
+              await this.loadOrderMethods();
+              this.orderingTemplateModalOpen = false;
+            } catch (error) {
+              console.error("Failed to save ordering template", error);
+              this.orderingTemplateError = (error && error.message) || "Save failed.";
+            } finally {
+              this.orderingTemplateSaving = false;
+            }
+          },
+          async deleteOrderingTemplate() {
+            if (this.orderingTemplateSaving) return;
+            this.orderingTemplateSaving = true;
+            this.orderingTemplateError = "";
+            try {
+              const response = await fetch(
+                "/purchase-orders/ordering-template/?name=" + encodeURIComponent(this.orderingTemplateName),
+                { method: "DELETE", credentials: "same-origin" }
+              );
+              const data = await response.json().catch(() => ({}));
+              if (!response.ok) {
+                this.orderingTemplateError = data.error || `Delete failed (status ${response.status}).`;
+                this.orderingTemplateDeleteConfirm = false;
+                return;
+              }
+              await this.loadOrderMethods();
+              this.orderingTemplateDeleteConfirm = false;
+              this.orderingTemplateModalOpen = false;
+            } catch (error) {
+              console.error("Failed to delete ordering template", error);
+              this.orderingTemplateError = (error && error.message) || "Delete failed.";
+              this.orderingTemplateDeleteConfirm = false;
+            } finally {
+              this.orderingTemplateSaving = false;
+            }
+          },
+          async placeOrder() {
+            if (this.placingOrder) return;
+            const vendor = this.selectedConfigName;
+            const method = this.currentOrderMethod;
+            if (!vendor || !method) return;
             const items = this.collectVisibleOrderItems();
             if (!items.length) {
               this.entireMModal = {
@@ -1033,9 +1192,9 @@
               };
               return;
             }
-            this.emailOrdering = true;
+            this.placingOrder = true;
             try {
-              const response = await fetch("/purchase-orders/email-order/", {
+              const response = await fetch("/purchase-orders/place-order/", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 credentials: "same-origin",
@@ -1043,57 +1202,10 @@
               });
               const payload = await response.json().catch(() => ({}));
               if (!response.ok) {
-                this.entireMModal = {
-                  title: "Order failed",
-                  message: payload.error || `Request failed (status ${response.status}).`,
-                  details: [],
-                };
-                return;
-              }
-              this.entireMModal = {
-                title: "Order placed",
-                message:
-                  `Order ${payload.order_number} emailed to ${vendor} at ${payload.email} ` +
-                  `for ${payload.line_count} line(s) (${payload.total_quantity} unit(s)).`,
-                details: [],
-                ok: true,
-              };
-            } catch (error) {
-              console.error("Failed to place email order", error);
-              this.entireMModal = {
-                title: "Order failed",
-                message: (error && error.message) || `Unexpected error ordering from ${vendor}.`,
-                details: [],
-              };
-            } finally {
-              this.emailOrdering = false;
-            }
-          },
-          async placeEntireMOrder() {
-            if (this.entireMOrdering) return;
-            const items = this.collectVisibleOrderItems();
-            if (!items.length) {
-              this.entireMModal = {
-                title: "Nothing to order",
-                message: "No visible rows have a positive missing quantity.",
-                details: [],
-              };
-              return;
-            }
-            this.entireMOrdering = true;
-            try {
-              const response = await fetch("/purchase-orders/entire-m-order/", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                credentials: "same-origin",
-                body: JSON.stringify({ items }),
-              });
-              const payload = await response.json().catch(() => ({}));
-              if (!response.ok) {
                 let title = "Order failed";
-                if (response.status === 423) title = "Order blocked by Entire-M";
-                else if (response.status === 403) title = "Entire-M permission denied";
-                else if (response.status === 401) title = "Entire-M authentication failed";
+                if (response.status === 423) title = "Order blocked by vendor";
+                else if (response.status === 403) title = "Vendor permission denied";
+                else if (response.status === 401) title = "Vendor authentication failed";
                 this.entireMModal = {
                   title,
                   message: payload.error || `Request failed (status ${response.status}).`,
@@ -1101,28 +1213,39 @@
                 };
                 return;
               }
-              this.downloadEntireMReport(payload);
-              const orderedCount = (payload.ordered || []).length;
-              const notOrderedCount = (payload.not_ordered || []).length;
-              this.entireMModal = {
-                title: notOrderedCount ? "Order placed (partial)" : "Order placed",
-                message:
-                  `Entire-M order ${payload.order_number} placed for ${orderedCount} line(s). ` +
-                  (notOrderedCount
-                    ? `${notOrderedCount} item(s) were skipped — see the downloaded XLSX report.`
-                    : `Report XLSX downloaded.`),
-                details: payload.not_ordered || [],
-                ok: true,
-              };
+              if (method === "api") {
+                this.downloadEntireMReport(payload);
+                const orderedCount = (payload.ordered || []).length;
+                const notOrderedCount = (payload.not_ordered || []).length;
+                this.entireMModal = {
+                  title: notOrderedCount ? "Order placed (partial)" : "Order placed",
+                  message:
+                    `Order ${payload.order_number} placed for ${orderedCount} line(s). ` +
+                    (notOrderedCount
+                      ? `${notOrderedCount} item(s) were skipped — see the downloaded XLSX report.`
+                      : `Report XLSX downloaded.`),
+                  details: payload.not_ordered || [],
+                  ok: true,
+                };
+              } else {
+                this.entireMModal = {
+                  title: "Order placed",
+                  message:
+                    `Order ${payload.order_number} emailed to ${vendor} at ${payload.email} ` +
+                    `for ${payload.line_count} line(s) (${payload.total_quantity} unit(s)).`,
+                  details: [],
+                  ok: true,
+                };
+              }
             } catch (error) {
-              console.error("Failed to place Entire-M order", error);
+              console.error("Failed to place order", error);
               this.entireMModal = {
                 title: "Order failed",
-                message: (error && error.message) || "Unexpected error contacting Entire-M.",
+                message: (error && error.message) || `Unexpected error ordering from ${vendor}.`,
                 details: [],
               };
             } finally {
-              this.entireMOrdering = false;
+              this.placingOrder = false;
             }
           },
           downloadEntireMReport(payload) {
@@ -1171,7 +1294,7 @@
               XLSX.utils.json_to_sheet(lineRows.length ? lineRows : [{ SKU: "(none)", Attempted: 0, Actual: 0 }]),
               "Order Lines"
             );
-            XLSX.writeFile(workbook, `entire-m-order-${orderNumber}.xlsx`, { bookType: "xlsx" });
+            XLSX.writeFile(workbook, `purchase-order-${orderNumber}.xlsx`, { bookType: "xlsx" });
           },
           closeEntireMModal() {
             this.entireMModal = null;
@@ -1851,27 +1974,43 @@
                     CSV
                   </button>
                   <button
-                    v-if="isHelikonView"
+                    v-if="currentOrderMethod"
                     type="button"
-                    aria-label="Place purchase order with Entire-M"
-                    @click="placeEntireMOrder"
-                    :disabled="entireMOrdering"
+                    :aria-label="'Place purchase order with ' + orderButtonLabel"
+                    @click="placeOrder"
+                    :disabled="placingOrder"
                   >
-                    <span v-if="entireMOrdering">Ordering…</span>
-                    <span v-else>Order from Entire-M</span>
-                  </button>
-                  <button
-                    v-if="emailOrderVendor"
-                    type="button"
-                    :aria-label="'Email purchase order to ' + emailOrderVendor"
-                    @click="placeEmailOrder"
-                    :disabled="emailOrdering"
-                  >
-                    <span v-if="emailOrdering">Sending…</span>
-                    <span v-else>Order from [[ emailOrderVendor ]]</span>
+                    <span v-if="placingOrder">Ordering…</span>
+                    <span v-else>Order from [[ orderButtonLabel ]]</span>
                   </button>
                 </div>
-                <button type="button" class="configure-button" @click="openModal">Configure Columns</button>
+                <div class="settings-menu">
+                  <button
+                    type="button"
+                    class="configure-button gear-button"
+                    aria-label="Settings"
+                    title="Settings"
+                    :aria-expanded="settingsMenuOpen ? 'true' : 'false'"
+                    @click.stop="toggleSettingsMenu"
+                  >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <circle cx="12" cy="12" r="3"></circle>
+                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                  </button>
+                  <div v-if="settingsMenuOpen" class="settings-backdrop" @click="settingsMenuOpen = false"></div>
+                  <div v-if="settingsMenuOpen" class="settings-dropdown" @click.stop>
+                    <button type="button" class="settings-item" @click="openColumnsFromMenu">Configure Columns</button>
+                    <button
+                      v-if="selectedConfigName"
+                      type="button"
+                      class="settings-item"
+                      @click="openOrderingTemplate"
+                    >
+                      [[ currentOrderMethod ? 'Edit ordering template' : 'Create ordering template' ]]
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
             <div
@@ -2002,6 +2141,140 @@
                 <div class="modal-footer">
                   <button type="button" class="secondary" @click="closeDeleteModal">Cancel</button>
                   <button type="button" class="danger" @click="deleteConfiguration">Delete</button>
+                </div>
+              </div>
+            </div>
+            <div
+              v-if="orderingTemplateModalOpen"
+              class="modal-overlay"
+              @click.self="closeOrderingTemplate"
+            >
+              <div class="modal ordering-template-modal" role="dialog" aria-modal="true">
+                <header>
+                  <h2 class="modal-title">
+                    [[ orderingTemplateExists ? 'Edit' : 'Create' ]] ordering template — [[ orderingTemplateName ]]
+                  </h2>
+                  <button type="button" aria-label="Close" @click="closeOrderingTemplate">&times;</button>
+                </header>
+                <div class="modal-body template-body">
+                  <p v-if="orderingTemplateLoading">Loading…</p>
+                  <template v-else-if="orderingTemplate">
+                    <p v-if="orderingTemplateError" class="template-error" v-text="orderingTemplateError"></p>
+
+                    <div class="form-row">
+                      <label>Ordering method</label>
+                      <div class="method-toggle">
+                        <label><input type="radio" value="email" v-model="orderingTemplate.method" /> Email</label>
+                        <label><input type="radio" value="api" v-model="orderingTemplate.method" /> API</label>
+                      </div>
+                    </div>
+
+                    <div class="form-row">
+                      <label>Button label</label>
+                      <input type="text" v-model="orderingTemplate.label" placeholder="Shown on the order button" />
+                    </div>
+
+                    <template v-if="orderingTemplate.method === 'email'">
+                      <div class="form-row">
+                        <label>Recipient address</label>
+                        <input type="text" v-model="orderingTemplate.email.to" placeholder="orders@vendor.com" />
+                      </div>
+                      <div class="form-row">
+                        <label>…or recipient from env var</label>
+                        <input type="text" v-model="orderingTemplate.email.to_env" placeholder="e.g. MTAC_ORDER_EMAIL" />
+                        <small>If set, the environment variable wins over the address above.</small>
+                      </div>
+                      <div class="form-row">
+                        <label>Subject (header)</label>
+                        <input type="text" v-model="orderingTemplate.email.subject" />
+                        <small>Placeholders: {order_number}, {company_name}</small>
+                      </div>
+                      <div class="form-row">
+                        <label>Body (content)</label>
+                        <textarea rows="9" v-model="orderingTemplate.email.body"></textarea>
+                        <small>Placeholders: $order_number, $date, $order_lines, $line_count, $total_quantity, $company_name</small>
+                      </div>
+                      <div class="form-row">
+                        <label class="checkbox-row">
+                          <input type="checkbox" v-model="orderingTemplate.email.attachment.enabled" />
+                          Attach order spreadsheet (XLSX)
+                        </label>
+                      </div>
+                      <div class="form-row" v-if="orderingTemplate.email.attachment.enabled">
+                        <label>Attachment filename</label>
+                        <input type="text" v-model="orderingTemplate.email.attachment.filename" />
+                        <small>Placeholder: {order_number}</small>
+                      </div>
+                    </template>
+
+                    <template v-else>
+                      <div class="form-row">
+                        <label>API configuration (YAML)</label>
+                        <textarea
+                          rows="16"
+                          class="code-editor"
+                          spellcheck="false"
+                          v-model="orderingTemplate.api_raw"
+                        ></textarea>
+                        <small>
+                          Defines <code>type</code> (openapi/graphql), <code>base_url</code>, <code>auth</code>,
+                          <code>flow</code> and <code>place_order</code> with field mappings. See
+                          <code>purchase_order/orders.yaml</code> for the documented schema.
+                        </small>
+                      </div>
+                    </template>
+                  </template>
+                </div>
+                <div class="modal-footer template-footer">
+                  <button
+                    v-if="orderingTemplateExists"
+                    type="button"
+                    class="danger ghost"
+                    @click="orderingTemplateDeleteConfirm = true"
+                  >
+                    Delete template
+                  </button>
+                  <span class="footer-spacer"></span>
+                  <button type="button" class="secondary" @click="closeOrderingTemplate">Cancel</button>
+                  <button
+                    type="button"
+                    @click="saveOrderingTemplate"
+                    :disabled="orderingTemplateSaving || orderingTemplateLoading || !orderingTemplate"
+                  >
+                    [[ orderingTemplateSaving ? 'Saving…' : 'Save template' ]]
+                  </button>
+                </div>
+
+                <div
+                  v-if="orderingTemplateDeleteConfirm"
+                  class="modal-overlay nested"
+                  @click.self="orderingTemplateDeleteConfirm = false"
+                >
+                  <div class="modal" role="dialog" aria-modal="true">
+                    <header>
+                      <h2 class="modal-title">Delete ordering template</h2>
+                      <button type="button" aria-label="Close" @click="orderingTemplateDeleteConfirm = false">&times;</button>
+                    </header>
+                    <div class="modal-body template-body">
+                      <p class="template-warning">
+                        ⚠ This permanently deletes the ordering template for
+                        <strong>[[ orderingTemplateName ]]</strong>. The order button for this view
+                        will disappear and orders can no longer be placed for it until the template
+                        is recreated.
+                      </p>
+                    </div>
+                    <div class="modal-footer">
+                      <button type="button" class="secondary" @click="orderingTemplateDeleteConfirm = false">Cancel</button>
+                      <button
+                        type="button"
+                        class="danger"
+                        @click="deleteOrderingTemplate"
+                        :disabled="orderingTemplateSaving"
+                      >
+                        Delete permanently
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
