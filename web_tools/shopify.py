@@ -5554,8 +5554,8 @@ def create_inventory_transfer(destination_location_id: str) -> dict:
 
 
 __TRANSFER_SET_ITEMS__ = gql("""
-mutation ($input: InventoryTransferSetItemsInput!) {
-  inventoryTransferSetItems(input: $input) {
+mutation ($input: InventoryTransferSetItemsInput!, $key: String!) {
+  inventoryTransferSetItems(input: $input) @idempotent(key: $key) {
     inventoryTransfer { id totalQuantity }
     userErrors { field message }
   }
@@ -5568,7 +5568,7 @@ def set_transfer_items(transfer_id: str, line_items: list[dict]) -> dict:
 
     ``line_items``: [{"inventoryItemId": gid, "quantity": int}, ...].
     """
-    variables = {"input": {"id": transfer_id, "lineItems": line_items}}
+    variables = {"input": {"id": transfer_id, "lineItems": line_items}, "key": str(uuid.uuid4())}
     result = _execute(__TRANSFER_SET_ITEMS__, variable_values=variables)
     payload = result["inventoryTransferSetItems"]
     if payload.get("userErrors"):
@@ -5611,8 +5611,8 @@ def add_in_transit_shipment(transfer_id: str, line_items: list[dict]) -> dict:
 
 
 __TRANSFER_DELETE__ = gql("""
-mutation ($id: ID!) {
-  inventoryTransferDelete(id: $id) {
+mutation ($id: ID!, $key: String!) {
+  inventoryTransferDelete(id: $id) @idempotent(key: $key) {
     deletedId
     userErrors { field message }
   }
@@ -5622,7 +5622,7 @@ mutation ($id: ID!) {
 
 def delete_inventory_transfer(transfer_id: str) -> None:
     """Delete a (draft) transfer — used to clean up if an order fails."""
-    result = _execute(__TRANSFER_DELETE__, variable_values={"id": transfer_id})
+    result = _execute(__TRANSFER_DELETE__, variable_values={"id": transfer_id, "key": str(uuid.uuid4())})
     payload = result["inventoryTransferDelete"]
     if payload.get("userErrors"):
         raise TransferError(
