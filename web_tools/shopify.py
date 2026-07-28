@@ -411,14 +411,15 @@ def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
 def fetch_order_customer(order_name: str) -> dict | None:
     """
     Look up a Shopify order by its display name (e.g. "#27542") and return
-    the customer's first name and email address.
+    the customer's name and email address.
 
     Args:
         order_name: The order name with or without the '#' prefix.
 
     Returns:
-        A dict with keys ``first_name`` and ``email``, or ``None`` when
-        the order cannot be found or has no customer attached.
+        A dict with keys ``first_name``, ``last_name``, ``email`` and
+        ``order_number`` (the order's canonical name as Shopify reports it),
+        or ``None`` when the order cannot be found or has no customer attached.
     """
     # Normalise: strip whitespace and ensure a leading '#'
     order_name = order_name.strip().lstrip("#")
@@ -432,6 +433,7 @@ def fetch_order_customer(order_name: str) -> dict | None:
             name
             customer {
               firstName
+              lastName
               email
             }
           }
@@ -448,13 +450,16 @@ def fetch_order_customer(order_name: str) -> dict | None:
     if not edges:
         return None
 
-    customer = edges[0]["node"].get("customer")
+    node = edges[0]["node"]
+    customer = node.get("customer")
     if not customer:
         return None
 
     return {
-        "first_name": customer.get("firstName", ""),
-        "email": customer.get("email", ""),
+        "first_name": customer.get("firstName") or "",
+        "last_name": customer.get("lastName") or "",
+        "email": customer.get("email") or "",
+        "order_number": node.get("name") or order_name,
     }
 
 

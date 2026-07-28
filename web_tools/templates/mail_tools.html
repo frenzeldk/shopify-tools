@@ -26,13 +26,26 @@
     font-weight: 600;
     margin-bottom: 6px;
   }
-  .input-group input {
+  .input-group input,
+  .input-group select,
+  .input-group textarea {
     width: 100%;
     max-width: 320px;
     padding: 8px 12px;
     border: 1px solid var(--border-color, #ccc);
     border-radius: 6px;
     font-size: 14px;
+    font-family: inherit;
+  }
+  .input-group input.wide,
+  .input-group select.wide,
+  .input-group textarea.wide {
+    max-width: 640px;
+  }
+  .input-group textarea {
+    min-height: 200px;
+    resize: vertical;
+    line-height: 1.5;
   }
   button.btn {
     padding: 10px 20px;
@@ -61,6 +74,26 @@
   }
   .btn-send:hover:not(:disabled) {
     background: #15803d;
+  }
+  .btn-secondary {
+    background: #e5e7eb;
+    color: #374151;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: #d1d5db;
+  }
+  .btn-danger {
+    background: #fee2e2;
+    color: #b91c1c;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: #fecaca;
+  }
+  .button-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
   }
   .result-section {
     margin-top: 20px;
@@ -101,16 +134,59 @@
     border-radius: 6px;
     margin-top: 12px;
   }
+  .variable-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .variable-chip {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #1d4ed8;
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    cursor: pointer;
+  }
+  .variable-chip:hover {
+    background: #dbeafe;
+  }
+  .preview-box {
+    margin-top: 16px;
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .preview-header {
+    background: #f9fafb;
+    border-bottom: 1px solid var(--border-color, #e0e0e0);
+    padding: 12px 16px;
+    font-size: 14px;
+  }
+  .preview-header p {
+    margin: 2px 0;
+  }
+  .preview-box iframe {
+    width: 100%;
+    height: 480px;
+    border: 0;
+    background: #fff;
+  }
 </style>
 {% endblock %}
 
 {% block page_title %}Mail Tools{% endblock %}
 
 {% block content %}
+{# Vue owns this markup and the {{ variable }} tokens shown to the user, so keep
+   Jinja out of it entirely. #}
+{% raw %}
 <div id="mail-tools-app">
   <div class="tool-section">
-    <h2>Send Missed Pickup Email</h2>
-    <p class="tool-description">Look up an order by number and send a missed-pickup notification to the customer.</p>
+    <h2>Look Up Order</h2>
+    <p class="tool-description">Find the customer behind an order. The result is used by both tools below.</p>
 
     <div class="input-group">
       <label for="order-number">Order Number:</label>
@@ -131,23 +207,125 @@
     <div v-if="lookupError" class="error-message">[[ lookupError ]]</div>
 
     <div v-if="customer" class="customer-info">
-      <p><strong>Name:</strong> [[ customer.first_name ]]</p>
-      <p><strong>Email:</strong> [[ customer.email ]]</p>
-
-      <button class="btn btn-send" @click="sendEmail" :disabled="sendLoading">
-        <span v-if="!sendLoading">✉️ Send Missed Pickup Email</span>
-        <span v-else>Sending…</span>
-      </button>
+      <p><strong>Name:</strong> [[ customer.first_name ]] [[ customer.last_name ]]</p>
+      <p><strong>Email:</strong> [[ customer.email || '—' ]]</p>
+      <p><strong>Order:</strong> [[ customer.order_number ]]</p>
     </div>
+  </div>
+
+  <div class="tool-section">
+    <h2>Send Missed Pickup Email</h2>
+    <p class="tool-description">Send the standard missed-pickup notification to the customer.</p>
+
+    <div v-if="!customer" class="info-message">Look up an order first.</div>
+
+    <button v-else class="btn btn-send" @click="sendEmail" :disabled="sendLoading">
+      <span v-if="!sendLoading">✉️ Send Missed Pickup Email</span>
+      <span v-else>Sending…</span>
+    </button>
 
     <div v-if="sendError" class="error-message">[[ sendError ]]</div>
     <div v-if="sendSuccess" class="success-message">[[ sendSuccess ]]</div>
   </div>
+
+  <div class="tool-section">
+    <h2>Email Templates</h2>
+    <p class="tool-description">
+      Write, save and reuse email templates. Click a variable to insert it — the placeholders
+      work in both the subject and the body, and are filled in from the looked-up order.
+    </p>
+
+    <div class="input-group">
+      <label for="template-select">Saved Templates:</label>
+      <select id="template-select" class="wide" v-model="selectedTemplate" @change="loadTemplate">
+        <option value="">— New template —</option>
+        <option v-for="tpl in templates" :key="tpl.name" :value="tpl.name">[[ tpl.name ]]</option>
+      </select>
+    </div>
+
+    <div class="input-group">
+      <label for="template-name">Template Name:</label>
+      <input type="text" id="template-name" class="wide" v-model="templateName" placeholder="Gensend af pakke">
+    </div>
+
+    <div class="variable-chips">
+      <span
+        v-for="variable in variables"
+        :key="variable"
+        class="variable-chip"
+        :title="'Insert into the ' + (lastFocused === 'subject' ? 'subject' : 'body')"
+        @click="insertVariable(variable)"
+      >[[ '{{ ' + variable + ' }}' ]]</span>
+    </div>
+
+    <div class="input-group">
+      <label for="template-subject">Subject:</label>
+      <input
+        type="text"
+        id="template-subject"
+        class="wide"
+        ref="subjectField"
+        v-model="templateSubject"
+        placeholder="Vedr. din ordre {{ order_number }}"
+        @focus="lastFocused = 'subject'"
+      >
+    </div>
+
+    <div class="input-group">
+      <label for="template-body">Body:</label>
+      <textarea
+        id="template-body"
+        class="wide"
+        ref="bodyField"
+        v-model="templateBody"
+        placeholder="Kære {{ first_name }}!&#10;&#10;Vedrørende din ordre {{ order_number }}…"
+        @focus="lastFocused = 'body'"
+      ></textarea>
+    </div>
+
+    <div class="button-row">
+      <button class="btn btn-primary" @click="saveTemplate" :disabled="templateSaving || !canSaveTemplate">
+        <span v-if="!templateSaving">Save Template</span>
+        <span v-else>Saving…</span>
+      </button>
+      <button class="btn btn-secondary" @click="previewTemplate" :disabled="previewLoading || !canSendTemplate">
+        <span v-if="!previewLoading">Preview</span>
+        <span v-else>Rendering…</span>
+      </button>
+      <button class="btn btn-danger" @click="deleteTemplate" :disabled="templateDeleting || !selectedTemplate">
+        <span v-if="!templateDeleting">Delete</span>
+        <span v-else>Deleting…</span>
+      </button>
+    </div>
+
+    <div v-if="templateError" class="error-message">[[ templateError ]]</div>
+    <div v-if="templateSuccess" class="success-message">[[ templateSuccess ]]</div>
+
+    <div v-if="preview" class="preview-box">
+      <div class="preview-header">
+        <p><strong>To:</strong> [[ preview.to ]]</p>
+        <p><strong>Subject:</strong> [[ preview.subject ]]</p>
+      </div>
+      <iframe ref="previewFrame" sandbox=""></iframe>
+    </div>
+
+    <div v-if="!customer" class="info-message">Look up an order first to preview or send.</div>
+
+    <button v-else class="btn btn-send" @click="sendTemplate" :disabled="templateSending || !canSendTemplate">
+      <span v-if="!templateSending">✉️ Send to [[ customer.email || 'customer' ]]</span>
+      <span v-else>Sending…</span>
+    </button>
+
+    <div v-if="templateSendError" class="error-message">[[ templateSendError ]]</div>
+    <div v-if="templateSendSuccess" class="success-message">[[ templateSendSuccess ]]</div>
+  </div>
 </div>
+{% endraw %}
 {% endblock %}
 
 {% block extra_js %}
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+{% raw %}
 <script>
 const { createApp } = Vue;
 
@@ -162,7 +340,35 @@ createApp({
       sendLoading: false,
       sendError: '',
       sendSuccess: '',
+
+      templates: [],
+      variables: [],
+      selectedTemplate: '',
+      templateName: '',
+      templateSubject: '',
+      templateBody: '',
+      lastFocused: 'body',
+      templateSaving: false,
+      templateDeleting: false,
+      previewLoading: false,
+      templateSending: false,
+      templateError: '',
+      templateSuccess: '',
+      templateSendError: '',
+      templateSendSuccess: '',
+      preview: null,
     };
+  },
+  computed: {
+    canSaveTemplate() {
+      return !!(this.templateName.trim() && this.templateSubject.trim() && this.templateBody.trim());
+    },
+    canSendTemplate() {
+      return !!(this.customer && this.templateSubject.trim() && this.templateBody.trim());
+    },
+  },
+  mounted() {
+    this.fetchTemplates();
   },
   methods: {
     async lookupOrder() {
@@ -174,6 +380,8 @@ createApp({
       this.customer = null;
       this.sendError = '';
       this.sendSuccess = '';
+      this.templateSendError = '';
+      this.templateSendSuccess = '';
 
       try {
         const resp = await fetch('/mail-tools/lookup-order/', {
@@ -217,7 +425,185 @@ createApp({
         this.sendLoading = false;
       }
     },
+
+    async fetchTemplates() {
+      try {
+        const resp = await fetch('/mail-tools/templates/');
+        const data = await resp.json();
+        if (resp.ok) {
+          this.templates = data.templates || [];
+          this.variables = data.variables || [];
+        } else {
+          this.templateError = data.error || 'Failed to load templates.';
+        }
+      } catch (e) {
+        this.templateError = 'Network error loading templates.';
+      }
+    },
+
+    loadTemplate() {
+      this.templateError = '';
+      this.templateSuccess = '';
+      this.preview = null;
+
+      if (!this.selectedTemplate) {
+        this.templateName = '';
+        this.templateSubject = '';
+        this.templateBody = '';
+        return;
+      }
+
+      const tpl = this.templates.find((t) => t.name === this.selectedTemplate);
+      if (tpl) {
+        this.templateName = tpl.name;
+        this.templateSubject = tpl.subject;
+        this.templateBody = tpl.body;
+      }
+    },
+
+    insertVariable(variable) {
+      const token = '{{ ' + variable + ' }}';
+      const isSubject = this.lastFocused === 'subject';
+      const field = isSubject ? this.$refs.subjectField : this.$refs.bodyField;
+      const current = isSubject ? this.templateSubject : this.templateBody;
+
+      // Drop the token at the caret so it lands where the user was typing.
+      const start = field && field.selectionStart !== null ? field.selectionStart : current.length;
+      const end = field && field.selectionEnd !== null ? field.selectionEnd : current.length;
+      const next = current.slice(0, start) + token + current.slice(end);
+
+      if (isSubject) {
+        this.templateSubject = next;
+      } else {
+        this.templateBody = next;
+      }
+
+      this.$nextTick(() => {
+        if (!field) return;
+        field.focus();
+        field.setSelectionRange(start + token.length, start + token.length);
+      });
+    },
+
+    async saveTemplate() {
+      this.templateSaving = true;
+      this.templateError = '';
+      this.templateSuccess = '';
+
+      try {
+        const resp = await fetch('/mail-tools/templates/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: this.templateName.trim(),
+            subject: this.templateSubject.trim(),
+            body: this.templateBody,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.templateError = data.error || 'Failed to save template.';
+        } else {
+          this.templateSuccess = `Template "${data.name}" saved.`;
+          await this.fetchTemplates();
+          this.selectedTemplate = data.name;
+        }
+      } catch (e) {
+        this.templateError = 'Network error saving template.';
+      } finally {
+        this.templateSaving = false;
+      }
+    },
+
+    async deleteTemplate() {
+      const name = this.selectedTemplate;
+      if (!name || !confirm(`Delete the template "${name}"?`)) return;
+
+      this.templateDeleting = true;
+      this.templateError = '';
+      this.templateSuccess = '';
+
+      try {
+        const resp = await fetch(`/mail-tools/templates/?name=${encodeURIComponent(name)}`, {
+          method: 'DELETE',
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.templateError = data.error || 'Failed to delete template.';
+        } else {
+          this.templateSuccess = `Template "${name}" deleted.`;
+          this.selectedTemplate = '';
+          this.loadTemplate();
+          await this.fetchTemplates();
+        }
+      } catch (e) {
+        this.templateError = 'Network error deleting template.';
+      } finally {
+        this.templateDeleting = false;
+      }
+    },
+
+    async previewTemplate() {
+      this.previewLoading = true;
+      this.templateError = '';
+      this.preview = null;
+
+      try {
+        const resp = await fetch('/mail-tools/preview-template/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            order_number: this.orderNumber.trim(),
+            subject: this.templateSubject.trim(),
+            body: this.templateBody,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.templateError = data.error || 'Failed to render preview.';
+        } else {
+          this.preview = data;
+          this.$nextTick(() => {
+            const frame = this.$refs.previewFrame;
+            if (frame) frame.srcdoc = data.html;
+          });
+        }
+      } catch (e) {
+        this.templateError = 'Network error rendering preview.';
+      } finally {
+        this.previewLoading = false;
+      }
+    },
+
+    async sendTemplate() {
+      this.templateSending = true;
+      this.templateSendError = '';
+      this.templateSendSuccess = '';
+
+      try {
+        const resp = await fetch('/mail-tools/send-template/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            order_number: this.orderNumber.trim(),
+            subject: this.templateSubject.trim(),
+            body: this.templateBody,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.templateSendError = data.error || 'Failed to send email.';
+        } else {
+          this.templateSendSuccess = data.message;
+        }
+      } catch (e) {
+        this.templateSendError = 'Network error sending email.';
+      } finally {
+        this.templateSending = false;
+      }
+    },
   },
 }).mount('#mail-tools-app');
 </script>
+{% endraw %}
 {% endblock %}

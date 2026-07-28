@@ -5,11 +5,24 @@ import logging
 from html import escape
 from O365 import Account
 from flask import render_template
+from jinja2 import TemplateError
+from jinja2.sandbox import SandboxedEnvironment
+from markupsafe import Markup
 
 logger = logging.getLogger(__name__)
 
 _credentials = (os.getenv('O365_CLIENT_ID'), os.getenv('O365_CLIENT_SECRET'))
 _tenant_id = os.getenv('O365_TENANT_ID')
+
+# Variables a saved template may reference as {{ name }} in its subject/body.
+TEMPLATE_VARIABLES = ("first_name", "last_name", "email", "order_number")
+
+# Saved templates are author-supplied, so they are rendered in a sandbox rather
+# than through the app's Jinja environment.  The body escapes substituted values
+# (a customer name containing '&' must not break the markup) while leaving the
+# author's own HTML intact; the subject is plain text, so it is not escaped.
+_body_env = SandboxedEnvironment(autoescape=True)
+_subject_env = SandboxedEnvironment(autoescape=False)
 
 
 def _get_mailbox():
@@ -47,6 +60,78 @@ def send_missed_pickup_email(first_name: str, email: str, order_number: str) -> 
         return True, f"Email sent to {email}"
     except Exception as exc:
         logger.exception(f"Failed to send missed-pickup email to {email} for order {order_number}")
+        return False, str(exc)
+
+
+def render_email_template(
+    subject: str,
+    body: str,
+    variables: dict[str, str],
+) -> tuple[str, str]:
+    """
+    Render a saved template's subject and body against a set of variables.
+
+    The body is substituted the same way as the missed-pickup email — {{ name }}
+    placeholders resolved by Jinja — then line breaks are converted to <br> and
+    the result is dropped into the shared branded email layout.
+
+    Args:
+        subject: Subject line, may contain {{ variable }} placeholders.
+        body: Email body, may contain {{ variable }} placeholders and HTML.
+        variables: Values for the placeholders (see ``TEMPLATE_VARIABLES``).
+
+    Returns:
+        Tuple of (rendered subject, full HTML email body).
+
+    Raises:
+        ValueError: When the subject or body cannot be rendered — bad syntax, or
+            an expression the sandbox refuses to evaluate.
+    """
+    try:
+        rendered_subject = _subject_env.from_string(subject).render(**variables).strip()
+        rendered_body = _body_env.from_string(body).render(**variables)
+    except TemplateError as exc:
+        detail = getattr(exc, "message", None) or str(exc)
+        raise ValueError(f"Invalid template: {detail}") from exc
+
+    html_body = render_template(
+        "custom_email.html",
+        body_html=Markup(rendered_body.replace("\n", "<br>\n")),
+        order_number=variables.get("order_number", ""),
+    )
+    return rendered_subject, html_body
+
+
+def send_template_email(
+    subject: str,
+    body: str,
+    variables: dict[str, str],
+) -> tuple[bool, str]:
+    """
+    Render a saved template and send it to the address in ``variables['email']``.
+
+    Args:
+        subject: Subject line, may contain {{ variable }} placeholders.
+        body: Email body, may contain {{ variable }} placeholders and HTML.
+        variables: Values for the placeholders; ``email`` is the recipient.
+
+    Returns:
+        Tuple of (success, message).
+    """
+    to_email = variables.get("email", "")
+    try:
+        rendered_subject, html_body = render_email_template(subject, body, variables)
+
+        msg = _get_mailbox().new_message()
+        msg.to.add(to_email)
+        msg.subject = rendered_subject
+        msg.body = html_body
+        msg.send()
+
+        logger.info(f"Sent template email '{rendered_subject}' to {to_email}")
+        return True, f"Email sent to {to_email}"
+    except Exception as exc:
+        logger.exception(f"Failed to send template email to {to_email}")
         return False, str(exc)
 
 

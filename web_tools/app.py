@@ -74,7 +74,13 @@ from shipmondo import (
     apply_batch_update,
     update_barcode
 )
-from microsoft365 import send_missed_pickup_email, send_plaintext_email
+from microsoft365 import (
+    TEMPLATE_VARIABLES,
+    render_email_template,
+    send_missed_pickup_email,
+    send_plaintext_email,
+    send_template_email,
+)
 import purchase_order
 import requests as _requests
 import shopify as shopify_module
@@ -345,6 +351,16 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_templates (
+                name TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.commit()
 
 
@@ -458,6 +474,97 @@ def save_ordering_defaults(db_path: str, defaults: dict) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def load_email_templates(db_path: str) -> list[dict]:
+    """Return every saved mail-tools email template, ordered by name."""
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name, subject, body FROM email_templates ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+    return [{"name": name, "subject": subject, "body": body} for name, subject, body in rows]
+
+
+def get_email_template(db_path: str, name: str) -> dict | None:
+    """Return a single saved email template, or ``None`` when it is unknown."""
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT name, subject, body FROM email_templates WHERE name = ?", (name,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {"name": row[0], "subject": row[1], "body": row[2]}
+
+
+def save_email_template(db_path: str, name: str, subject: str, body: str) -> None:
+    """Insert or replace the email template stored under ``name``."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO email_templates (name, subject, body, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(name) DO UPDATE SET
+                subject = excluded.subject,
+                body = excluded.body,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (name, subject, body),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_email_template(db_path: str, name: str) -> bool:
+    """Delete the named email template; return whether a row was removed."""
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute("DELETE FROM email_templates WHERE name = ?", (name,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+async def _resolve_order_customer(order_number: str) -> tuple[dict | None, Any]:
+    """
+    Resolve an order number to its customer for the mail tools.
+
+    Returns:
+        Tuple of (customer, error_response).  Exactly one is set: on success the
+        customer dict, otherwise a ready-to-return (payload, status) tuple.
+    """
+    if not order_number:
+        return None, (jsonify({"error": "Order number is required."}), 400)
+
+    if not order_number.startswith("#"):
+        order_number = f"#{order_number}"
+
+    customer = await asyncio.to_thread(fetch_order_customer, order_number)
+
+    if customer is None:
+        return None, (
+            jsonify({"error": f"Order {order_number} not found or has no customer."}),
+            404,
+        )
+
+    return customer, None
+
+
+def _template_variables(customer: dict) -> dict[str, str]:
+    """Build the {{ variable }} values a saved email template can reference."""
+    return {name: customer.get(name, "") or "" for name in TEMPLATE_VARIABLES}
 
 
 def _yaml_vendor_to_template(name: str, vcfg: dict, yaml_dir: Path) -> dict:
@@ -2347,17 +2454,9 @@ def create_app() -> Flask:
             payload = request.get_json(silent=True) or {}
             order_number = str(payload.get("order_number", "")).strip()
 
-            if not order_number:
-                return jsonify({"error": "Order number is required."}), 400
-
-            # Ensure the order number starts with '#'
-            if not order_number.startswith("#"):
-                order_number = f"#{order_number}"
-
-            customer = await asyncio.to_thread(fetch_order_customer, order_number)
-
-            if customer is None:
-                return jsonify({"error": f"Order {order_number} not found or has no customer."}), 404
+            customer, error = await _resolve_order_customer(order_number)
+            if error:
+                return error
 
             return jsonify(customer)
         except Exception as exc:
@@ -2371,25 +2470,20 @@ def create_app() -> Flask:
             payload = request.get_json(silent=True) or {}
             order_number = str(payload.get("order_number", "")).strip()
 
-            if not order_number:
-                return jsonify({"error": "Order number is required."}), 400
+            customer, error = await _resolve_order_customer(order_number)
+            if error:
+                return error
 
-            if not order_number.startswith("#"):
-                order_number = f"#{order_number}"
-
-            customer = await asyncio.to_thread(fetch_order_customer, order_number)
-
-            if customer is None:
-                return jsonify({"error": f"Order {order_number} not found or has no customer."}), 404
-
-            first_name = customer["first_name"]
             email = customer["email"]
 
             if not email:
                 return jsonify({"error": "Customer has no email address on file."}), 400
 
             success, message = await asyncio.to_thread(
-                send_missed_pickup_email, first_name, email, order_number
+                send_missed_pickup_email,
+                customer["first_name"],
+                email,
+                customer["order_number"],
             )
 
             if success:
@@ -2398,6 +2492,129 @@ def create_app() -> Flask:
                 return jsonify({"error": message}), 500
         except Exception as exc:
             current_app.logger.exception("Failed to send missed-pickup email", exc_info=exc)
+            return jsonify({"error": "Failed to send email."}), 500
+
+    @application.get("/mail-tools/templates/")
+    def list_email_templates() -> Any:
+        """Return every saved email template plus the variables they may use."""
+        try:
+            return jsonify(
+                {
+                    "templates": load_email_templates(_ordering_db_path),
+                    "variables": list(TEMPLATE_VARIABLES),
+                }
+            )
+        except Exception as exc:
+            current_app.logger.exception("Failed to load email templates", exc_info=exc)
+            return jsonify({"error": "Failed to load email templates."}), 500
+
+    @application.post("/mail-tools/templates/")
+    def save_email_template_route() -> Any:
+        """Create or update a named email template."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            name = str(payload.get("name", "")).strip()
+            subject = str(payload.get("subject", "")).strip()
+            body = str(payload.get("body", ""))
+
+            if not name:
+                return jsonify({"error": "A template name is required."}), 400
+            if not subject:
+                return jsonify({"error": "A subject is required."}), 400
+            if not body.strip():
+                return jsonify({"error": "A body is required."}), 400
+
+            # Reject unrenderable templates now rather than at send time.
+            try:
+                render_email_template(
+                    subject, body, {name: "" for name in TEMPLATE_VARIABLES}
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+            save_email_template(_ordering_db_path, name, subject, body)
+            return jsonify({"status": "saved", "name": name})
+        except Exception as exc:
+            current_app.logger.exception("Failed to save email template", exc_info=exc)
+            return jsonify({"error": "Failed to save email template."}), 500
+
+    @application.delete("/mail-tools/templates/")
+    def delete_email_template_route() -> Any:
+        """Delete a named email template."""
+        try:
+            name = (request.args.get("name") or "").strip()
+            if not name:
+                return jsonify({"error": "A template name is required."}), 400
+            if not delete_email_template(_ordering_db_path, name):
+                return jsonify({"error": "No template exists with that name."}), 404
+            return jsonify({"status": "deleted", "name": name})
+        except Exception as exc:
+            current_app.logger.exception("Failed to delete email template", exc_info=exc)
+            return jsonify({"error": "Failed to delete email template."}), 500
+
+    @application.post("/mail-tools/preview-template/")
+    async def preview_template() -> Any:
+        """Render a template against a real order so it can be checked first."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            order_number = str(payload.get("order_number", "")).strip()
+            subject = str(payload.get("subject", ""))
+            body = str(payload.get("body", ""))
+
+            customer, error = await _resolve_order_customer(order_number)
+            if error:
+                return error
+
+            try:
+                rendered_subject, html_body = render_email_template(
+                    subject, body, _template_variables(customer)
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+            return jsonify(
+                {
+                    "to": customer["email"],
+                    "subject": rendered_subject,
+                    "html": html_body,
+                }
+            )
+        except Exception as exc:
+            current_app.logger.exception("Failed to preview email template", exc_info=exc)
+            return jsonify({"error": "Failed to preview email template."}), 500
+
+    @application.post("/mail-tools/send-template/")
+    async def send_template() -> Any:
+        """Look up the order, render the template and mail it to the customer."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            order_number = str(payload.get("order_number", "")).strip()
+            subject = str(payload.get("subject", "")).strip()
+            body = str(payload.get("body", ""))
+
+            if not subject:
+                return jsonify({"error": "A subject is required."}), 400
+            if not body.strip():
+                return jsonify({"error": "A body is required."}), 400
+
+            customer, error = await _resolve_order_customer(order_number)
+            if error:
+                return error
+
+            variables = _template_variables(customer)
+
+            if not variables["email"]:
+                return jsonify({"error": "Customer has no email address on file."}), 400
+
+            success, message = await asyncio.to_thread(
+                send_template_email, subject, body, variables
+            )
+
+            if success:
+                return jsonify({"message": message})
+            return jsonify({"error": message}), 500
+        except Exception as exc:
+            current_app.logger.exception("Failed to send template email", exc_info=exc)
             return jsonify({"error": "Failed to send email."}), 500
 
     return application
