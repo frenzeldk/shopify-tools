@@ -66,6 +66,7 @@ from shopify import (
 )
 from chatgpt import fetch_and_translate_vendor_page, translate_product_data, translate_plain_text
 from deerhunter import dh_fetch_all_products, dh_products_to_vendor_format
+from pentagon import pt_fetch_all_products, pt_products_to_vendor_format
 import entire_m
 from shipmondo import (
     fetch_all_shipmondo_items,
@@ -1614,6 +1615,7 @@ def create_app() -> Flask:
     VENDOR_SHOPIFY_BRANDS: dict[str, list[str]] = {
         "entirem": ["Helikon-Tex", "Tac Maven"],
         "deerhunter": ["Deerhunter"],
+        "pentagon": ["Pentagon Tactical"],
     }
 
     # Vendors that require a CSV file upload (others fetch data automatically)
@@ -1637,6 +1639,12 @@ def create_app() -> Flask:
                 vendor_products = dh_products_to_vendor_format(dh_products)
                 current_app.logger.info(
                     f"Fetched {len(vendor_products)} rows from Deerhunter FTP"
+                )
+            elif vendor == "pentagon":
+                pt_products = await asyncio.to_thread(pt_fetch_all_products)
+                vendor_products = pt_products_to_vendor_format(pt_products)
+                current_app.logger.info(
+                    f"Fetched {len(vendor_products)} rows from the Pentagon XML feed"
                 )
             else:
                 csv_file = request.files.get("csv_file")

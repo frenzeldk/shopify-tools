@@ -23,6 +23,7 @@
           <option value="" disabled>Select a vendor…</option>
           <option value="entirem">Entire M (Helikon-Tex / Tac Maven)</option>
           <option value="deerhunter">Deerhunter</option>
+          <option value="pentagon">Pentagon Tactical</option>
         </select>
       </div>
 
@@ -106,7 +107,7 @@
                 <tr v-for="p in group.variants" :key="p.sku">
                   <td class="mono">[[ p.sku ]]</td>
                   <td>[[ p.color ]]</td>
-                  <td>[[ p.size ]]</td>
+                  <td>[[ sizeLabel(p) ]]</td>
                   <td class="mono">[[ p.ean ]]</td>
                   <td class="num">[[ p.price ]] [[ p.currency ]]</td>
                   <td class="num">[[ p.msrp ]] [[ p.currency ]]</td>
@@ -181,7 +182,7 @@
             <td class="num">[[ v.price ]] [[ v.currency ]]</td>
             <td class="num">[[ v.msrp ]] [[ v.currency ]]</td>
             <td>[[ v.weight ]] [[ v.weight_unit ]]</td>
-            <td>[[ v.size ]]</td>
+            <td>[[ sizeLabel(v) ]]</td>
             <td>[[ v.country_of_origin ]]</td>
             <td class="mono">[[ v.hs_code ]]</td>
           </tr>
@@ -1341,7 +1342,7 @@
                 </td>
                 <td class="mono">[[ v.sku ]]</td>
                 <td>[[ v.color ]]</td>
-                <td>[[ v.size ]]</td>
+                <td>[[ sizeLabel(v) ]]</td>
                 <td class="mono">[[ v.ean ]]</td>
                 <td class="num">[[ v.price ]] [[ v.currency ]]</td>
                 <td>[[ v.weight ]] [[ v.weight_unit ]]</td>
@@ -3536,10 +3537,18 @@ createApp({
       }
     },
 
+    sizeLabel(variant) {
+      // Vendors with a separate length dimension (Pentagon's inseam) show it
+      // alongside the size, e.g. 38 / 30".
+      const length = (variant.length || '').trim();
+      return length ? `${variant.size} / ${length}` : variant.size;
+    },
+
     getVendorDisplayName(vendorKey) {
       const VENDOR_MAP = {
         'entirem': 'Helikon-Tex',
         'deerhunter': 'Deerhunter',
+        'pentagon': 'Pentagon Tactical',
       };
       return VENDOR_MAP[vendorKey] || vendorKey;
     },
@@ -3552,6 +3561,7 @@ createApp({
       const VENDOR_BRAND_MAP = {
         'entirem': ['Helikon-Tex', 'Tac Maven'],
         'deerhunter': ['Deerhunter'],
+        'pentagon': ['Pentagon Tactical'],
       };
       const brands = VENDOR_BRAND_MAP[this.selectedVendor] || [];
       const vendor = brands.length > 0 ? brands[0] : this.selectedVendor;
@@ -3610,10 +3620,11 @@ createApp({
 
       this.showCreateProductModal = true;
 
-      // Auto-generate description for Deerhunter products from imported data
-      if (this.selectedVendor === 'deerhunter' && group.variants.length > 0) {
+      // Auto-generate the description from imported vendor data when the
+      // feed carries one (Deerhunter CSV, Pentagon XML).
+      if (group.variants.length > 0) {
         const sample = group.variants[0];
-        if (sample.dh_description || sample.dh_composition) {
+        if (sample.dh_description || sample.dh_composition || sample.pt_description) {
           this.cpDescSource = 'manual';
           this._autoTranslateProductData(sample);
         }
@@ -3632,8 +3643,8 @@ createApp({
               product_name: variant.base_name || variant.name || '',
               composition_type: variant.dh_composition_type || '',
               composition: variant.dh_composition || '',
-              description: variant.dh_description || '',
-              keywords: variant.dh_keywords || '',
+              description: variant.dh_description || variant.pt_description || '',
+              keywords: variant.dh_keywords || variant.pt_categories || '',
               season: variant.dh_season || '',
             },
           }),

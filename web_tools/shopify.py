@@ -1771,24 +1771,8 @@ def check_linked_option_values(product_id: str, variants_data: list[dict]) -> di
         return {"options": {}}
 
     # ── Collect needed values from variants ─────────────────────
-    LENGTH_NAMES = {
-        "A": "Short", "B": "Regular", "C": "Long",
-        "D": "XLong", "U": "Unisex",
-    }
-
-    def _extract_length_letter(sku: str) -> str | None:
-        parts = sku.split("-")
-        if len(parts) >= 5:
-            sc = parts[4]
-            if sc and sc[0].isalpha():
-                return sc[0].upper()
-        return None
-
-    length_letters = {
-        _extract_length_letter(v.get("sku", ""))
-        for v in variants_data
-    } - {None}
-    include_length = len(length_letters) > 1
+    lengths = {_variant_length(v) for v in variants_data} - {None}
+    include_length = len(lengths) > 1
 
     needed: dict[str, set[str]] = {}
     for v in variants_data:
@@ -1802,8 +1786,7 @@ def check_linked_option_values(product_id: str, variants_data: list[dict]) -> di
         if color:
             needed.setdefault("Farve", set()).add(color)
         if include_length:
-            letter = _extract_length_letter(v.get("sku", ""))
-            length_name = LENGTH_NAMES.get(letter, letter) if letter else None
+            length_name = _variant_length(v)
             if length_name:
                 needed.setdefault("Længde", set()).add(length_name)
 
@@ -2537,20 +2520,13 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
             rounded = math.ceil(dkk / 100) * 100
         return f"{rounded - 1:.2f}"
 
-    # Use module-level constants for length handling
-    LENGTH_NAMES = _LENGTH_NAMES
-
     # Determine whether this batch of variants has multiple length values.
     # If so, include the "Længde" option on each variant.
-    length_letters = set()
-    for v in variants_data:
-        letter = _extract_length_letter(v.get("sku", ""))
-        if letter:
-            length_letters.add(letter)
-    include_length = len(length_letters) > 1
+    lengths = {_variant_length(v) for v in variants_data} - {None}
+    include_length = len(lengths) > 1
     log.info(
-        "add_variants: length letters=%s → include_length=%s",
-        length_letters, include_length,
+        "add_variants: lengths=%s → include_length=%s",
+        lengths, include_length,
     )
 
     # ── Pre-create missing metafield-linked option values ──────────
@@ -2576,8 +2552,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
             if color:
                 needed.setdefault("Farve", set()).add(color)
             if include_length:
-                letter = _extract_length_letter(v.get("sku", ""))
-                length_name = LENGTH_NAMES.get(letter, letter) if letter else None
+                length_name = _variant_length(v)
                 if length_name:
                     needed.setdefault("Længde", set()).add(length_name)
         return needed
@@ -2886,8 +2861,7 @@ def add_variants_to_shopify_product(product_id: str, variants_data: list[dict], 
         if v.get("color"):
             _add_option("Farve", v["color"])
         if include_length:
-            letter = _extract_length_letter(v.get("sku", ""))
-            length_name = LENGTH_NAMES.get(letter, letter) if letter else None
+            length_name = _variant_length(v)
             if length_name:
                 _add_option("Længde", length_name)
 
@@ -4554,6 +4528,32 @@ def _extract_length_letter(sku: str) -> str | None:
     return None
 
 
+def _variant_length(variant: dict) -> str | None:
+    """Return the "Længde" option value for a variant, or None when it has none.
+
+    Vendors that know their own length dimension pass it explicitly — Pentagon
+    supplies the inseam ('32"') — and an empty value then means "no length",
+    so the SKU is not second-guessed.  Feeds without a ``length`` key fall back
+    to the Helikon convention, where the 5th dash-part of the SKU starts with
+    a length letter ("B05" → Regular).
+    """
+    if "length" in variant:
+        return (variant.get("length") or "").strip() or None
+    letter = _extract_length_letter(variant.get("sku", ""))
+    return _LENGTH_NAMES.get(letter, letter) if letter else None
+
+
+def _length_sort_key(name: str) -> tuple[int, float, str]:
+    """Order named lengths (Short → Unisex) first, then numeric inseams."""
+    order = list(_LENGTH_NAMES.values())
+    if name in order:
+        return (0, float(order.index(name)), "")
+    match = _re.match(r"\s*(\d+(?:[.,]\d+)?)", name)
+    if match:
+        return (1, float(match.group(1).replace(",", ".")), "")
+    return (2, 0.0, name)
+
+
 def detect_product_options(
     vendor: str,
     variants_data: list[dict],
@@ -4595,7 +4595,7 @@ def detect_product_options(
     # ── 1. Collect unique values per option from variant data ──────
     colors: list[str] = []
     sizes: list[str] = []
-    length_letters: set[str] = set()
+    length_values: set[str] = set()
 
     seen_colors: set[str] = set()
     seen_sizes: set[str] = set()
@@ -4614,19 +4614,14 @@ def detect_product_options(
             seen_sizes.add(size)
             sizes.append(size)
 
-        letter = _extract_length_letter(v.get("sku", ""))
-        if letter:
-            length_letters.add(letter)
+        length = _variant_length(v)
+        if length:
+            length_values.add(length)
 
-    include_length = len(length_letters) > 1
+    include_length = len(length_values) > 1
     lengths: list[str] = []
     if include_length:
-        lengths = sorted(
-            [_LENGTH_NAMES.get(l, l) for l in length_letters],
-            key=lambda n: list(_LENGTH_NAMES.values()).index(n)
-            if n in _LENGTH_NAMES.values()
-            else 99,
-        )
+        lengths = sorted(length_values, key=_length_sort_key)
 
     _log.info(
         "detect_product_options: colors=%d sizes=%d lengths=%d",
