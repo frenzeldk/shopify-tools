@@ -1,8 +1,11 @@
 """Provides function for working with Shipmondo"""
+import logging
 import os
 import time
 import base64
 import requests
+
+logger = logging.getLogger(__name__)
 
 API_USER = os.getenv("SHIPMONDO_API_USER")
 API_KEY = os.getenv("SHIPMONDO_API_KEY")
@@ -117,14 +120,29 @@ def set_order_status(oid: str, status: str):
 def pause_order(oid: str):
     """Pause an order in Shipmondo."""
     url = BASE_URL + f"sales_orders/{oid}"
-    response = requests.put(url,
-                            headers={"Content-Type": "application/json",
-                                     "Accept": "application/json",
-                                     "Authorization": f"Basic {AUTH_STRING}"},
-                            json={"order_status": "on_hold"},
-                            timeout=5)
+    try:
+        response = requests.put(url,
+                                headers={"Content-Type": "application/json",
+                                         "Accept": "application/json",
+                                         "Authorization": f"Basic {AUTH_STRING}"},
+                                json={"order_status": "on_hold"},
+                                timeout=5)
+    except requests.exceptions.RequestException as exc:
+        # The 5s timeout is tight enough that this is a real failure mode.
+        logger.error("PAUSE-FAILED shipmondo=%s: request failed: %s", oid, exc)
+        raise
+    if not response.ok:
+        logger.error(
+            "PAUSE-FAILED shipmondo=%s: HTTP %s %s",
+            oid, response.status_code, response.text[:200],
+        )
     response.raise_for_status()
-    return response.json()
+    result = response.json()
+    logger.info(
+        "Shipmondo order %s set to on_hold, status is now %r",
+        oid, result.get("order_status") if isinstance(result, dict) else result,
+    )
+    return result
 
 def resume_order(sid: str):
     """Resume an order in Shipmondo."""

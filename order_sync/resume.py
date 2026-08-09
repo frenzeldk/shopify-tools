@@ -11,6 +11,12 @@ from shipmondo import resume_order
 SHOPIFY_URL = os.environ.get("SHOPIFY_URL")
 SHOPIFY_HEADER = {"X-Shopify-Access-Token": os.environ.get("SHOPIFY_API_KEY")}
 
+# Home Assistant webhook used to report orders that could not be resumed.
+# A Home Assistant webhook ID is a bearer credential — the endpoint has no
+# other authentication — so it is configuration, never source.  Notification is
+# skipped when it is unset.
+HA_WEBHOOK_URL = os.environ.get("HOME_ASSISTANT_WEBHOOK_URL")
+
 transport = AIOHTTPTransport(url=SHOPIFY_URL, headers=SHOPIFY_HEADER, ssl=True)
 gql_client = Client(transport=transport, fetch_schema_from_transport=True)
 
@@ -127,10 +133,19 @@ def _resume_orders(orders: list[dict]) -> None:
                 print(f"Error removing tags from order {order['name']}: {e}")
                 raise RuntimeError(f"Failed to remove tags from order {order['name']}: {e}") from e
     if failed_orders:
-        requests.post("https://hassio.frenzel.dk/api/webhook/-GAqW4T8Gju-HPs-PSV3JCSme",
-                        json={"orders": "\n".join(failed_orders)},
-                        timeout=10
-                        )
+        if not HA_WEBHOOK_URL:
+            print(
+                "HOME_ASSISTANT_WEBHOOK_URL is not set; skipping the failure "
+                f"notification for: {', '.join(failed_orders)}"
+            )
+            return
+        try:
+            requests.post(HA_WEBHOOK_URL,
+                          json={"orders": "\n".join(failed_orders)},
+                          timeout=10
+                          )
+        except requests.exceptions.RequestException as e:
+            print(f"Could not notify Home Assistant about failed orders: {e}")
 
 def get_orders() -> list[dict]:
     """Fetch all unfulfilled orders.
