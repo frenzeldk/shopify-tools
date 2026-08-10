@@ -11,23 +11,31 @@ whole story::
 The log lines are tagged so each known failure mode is identifiable on its own:
 
     ``decision=``          the outcome of a job (in-stock / paused / failed).
-    ``COMMITTED-BLIND``    the line passed only because stock committed to
-                           other unfulfilled orders was counted as available.
-    ``DUPLICATE-ITEM``     the same inventory item appears on several lines and
-                           was checked against the full pool once per line.
+    ``NEWLY-CAUGHT``       the order is short once other orders' commitments
+                           and repeated line items are accounted for; the old
+                           per-line check would have let it through.
     ``NO-INVENTORY``       a line was skipped, so it could never pause anything.
     ``TRUNCATED``          the order has more line items than we fetched.
     ``AMBIGUOUS-ORDER``    the order-number search matched more than one order.
-    ``WRONG-ORDER``        the resolved order's name is not the one requested.
-    ``FAILED``             the job raised, so the order was never paused.
+    ``WRONG-ORDER``        the search matched orders, none of them this one.
+    ``ORDER-NOT-FOUND``    the order number never resolved, so no check ran.
+    ``FAILED``             the job raised; ``retries_left=0`` means the order
+                           really was left unpaused.
 
-Set ``ORDER_SYNC_LOG_LEVEL=DEBUG`` for the raw Shopify quantity payloads.
+Environment:
+    ORDER_SYNC_LOG_LEVEL         Log level, default INFO. DEBUG adds the raw
+                                 Shopify quantity payloads.
+    ORDER_SYNC_LOOKUP_ATTEMPTS   Order-number lookups before giving up,
+                                 default 4.
+    ORDER_SYNC_LOOKUP_BACKOFF    Seconds before the second lookup, doubling
+                                 each time after that, default 2.
 """
 
 from __future__ import annotations
 import logging
 import os
 import re
+import time
 from typing import Dict, Iterable, List
 
 from gql import Client, gql
@@ -62,15 +70,27 @@ except ImportError:  # pragma: no cover - direct invocation
     get_current_job = None
 
 
+def _current_job():
+    """Return the rq job we run under, or None outside a worker."""
+    if get_current_job is None:
+        return None
+    try:
+        return get_current_job()
+    except Exception:  # pragma: no cover - no connection outside a worker
+        return None
+
+
 def _job_id() -> str:
     """Return the id of the rq job we run under, to join worker and web logs."""
-    if get_current_job is None:
-        return "-"
-    try:
-        job = get_current_job()
-    except Exception:  # pragma: no cover - no connection outside a worker
-        return "-"
+    job = _current_job()
     return job.id if job is not None else "-"
+
+
+def _retries_left() -> str:
+    """Return how many rq retries remain, so a final failure is recognisable."""
+    job = _current_job()
+    remaining = getattr(job, "retries_left", None) if job is not None else None
+    return "-" if remaining is None else str(remaining)
 
 
 SHOPIFY_URL = os.environ.get("SHOPIFY_URL")
@@ -171,8 +191,8 @@ def _add_tag_to_order(order_id: str | int, tag: str) -> List[str]:
 
 _INVENTORY_LOCATION_ID = "gid://shopify/Location/100013703511"
 
-# ``committed`` is fetched for diagnostics only: it is what Shopify has already
-# promised to unfulfilled orders, and the availability formula below ignores it.
+# ``committed`` is what Shopify has already promised to unfulfilled orders. It
+# is the difference between stock that exists and stock this order can have.
 _QUANTITY_NAMES = [
     "on_hand",
     "committed",
@@ -254,30 +274,33 @@ def _fetch_inventory_quantities(inventory_item_id: str) -> Dict[str, int]:
     return levels
 
 
-def _available(levels: Dict[str, int]) -> int:
-    """Return the availability figure the pause check currently acts on.
+def _physical_stock(levels: Dict[str, int]) -> int:
+    """Return the sellable stock at the location, before anyone's commitments.
 
-    Note this is *not* Shopify's ``available``: ``committed`` is deliberately
-    left out, so stock already promised to other unfulfilled orders still
-    counts as free here.
+    On-hand less the quantities Shopify holds back as not sellable. This is what
+    the check used to compare against on its own, which is why stock already
+    promised to other orders still counted as free.
     """
     return levels.get("on_hand", 0) - levels.get("reserved", 0)\
         - levels.get("damaged", 0) - levels.get("quality_control", 0)\
         - levels.get("safety_stock", 0)
 
 
-def _available_after_commitments(levels: Dict[str, int]) -> int:
-    """Return availability with ``committed`` subtracted, for comparison only."""
-    return _available(levels) - levels.get("committed", 0)
+def _free_for_order(levels: Dict[str, int], needed: int) -> int:
+    """Return the stock this order can actually draw on.
 
+    Shopify leaves an order's units in ``on_hand`` until it ships and counts
+    them in ``committed`` from the moment it is placed, so on-hand alone says
+    nothing about whether anything is left for us. What matters is the stock
+    committed to *other* orders: everything committed, less our own share.
 
-def _get_inventory_level(inventory_item_id: str) -> int:
-    """Return the availability figure used by the pause check.
-
-    Args:
-        inventory_item_id: The GraphQL global ID of the inventory item to check.
+    Our own share is capped out of ``committed`` rather than subtracted blindly.
+    An order Shopify has not committed yet — this webhook can arrive first —
+    then reads as leniently as it did before, instead of being paused over stock
+    that is in fact its own.
     """
-    return _available(_fetch_inventory_quantities(inventory_item_id))
+    committed_elsewhere = max(0, levels.get("committed", 0) - needed)
+    return _physical_stock(levels) - committed_elsewhere
 
 
 def _check_availability(order_id: str | int) -> bool:
@@ -353,13 +376,13 @@ def _check_availability(order_id: str | int) -> bool:
         len(line_items),
     )
 
-    # Cached per call so a repeated variant costs one lookup and, more
-    # importantly, so the running total below sees the same pool each line
-    # item was measured against.
-    quantities: Dict[str, Dict[str, int]] = {}
-    requested: Dict[str, int] = {}
-    lines_per_item: Dict[str, int] = {}
-    fulfillable = True
+    # Total the order up per inventory item before looking at stock. The same
+    # variant can sit on several lines — bundles, or the same product added
+    # twice — and a line checked on its own passes against the whole pool, so
+    # two lines for the last unit both used to succeed.
+    needed: Dict[str, int] = {}
+    biggest_line: Dict[str, int] = {}
+    lines_for: Dict[str, int] = {}
 
     for position, item in enumerate(line_items, start=1):
         node = item.get("node", {})
@@ -384,122 +407,162 @@ def _check_availability(order_id: str | int) -> bool:
             )
             continue  # No inventory item to check against
 
-        if inventory_item_id not in quantities:
-            quantities[inventory_item_id] = _fetch_inventory_quantities(inventory_item_id)
-        levels = quantities[inventory_item_id]
-        available_quantity = _available(levels)
-        after_commitments = _available_after_commitments(levels)
-
-        previously_requested = requested.get(inventory_item_id, 0)
-        requested[inventory_item_id] = previously_requested + wanted
-        lines_per_item[inventory_item_id] = lines_per_item.get(inventory_item_id, 0) + 1
-
-        line_ok = available_quantity >= wanted
+        needed[inventory_item_id] = needed.get(inventory_item_id, 0) + wanted
+        biggest_line[inventory_item_id] = max(
+            biggest_line.get(inventory_item_id, 0), wanted
+        )
+        lines_for[inventory_item_id] = lines_for.get(inventory_item_id, 0) + 1
         logger.info(
-            "order=%s line=%d title=%r sku=%s item=%s tracked=%s qty=%s "
+            "order=%s line=%d title=%r sku=%s item=%s qty=%s",
+            order.get("name"), position, title, node.get("sku"),
+            inventory_item_id, wanted,
+        )
+
+    fulfillable = True
+    for inventory_item_id, wanted in needed.items():
+        levels = _fetch_inventory_quantities(inventory_item_id)
+        stock = _physical_stock(levels)
+        free = _free_for_order(levels, wanted)
+        item_ok = free >= wanted
+        logger.info(
+            "order=%s item=%s tracked=%s lines=%d needed=%s "
             "on_hand=%s committed=%s reserved=%s damaged=%s safety=%s qc=%s "
-            "available=%s available_after_commitments=%s line_ok=%s",
-            order.get("name"), position, title, node.get("sku"), inventory_item_id,
-            levels.get("tracked"), wanted,
+            "stock=%s free=%s ok=%s",
+            order.get("name"), inventory_item_id, levels.get("tracked"),
+            lines_for[inventory_item_id], wanted,
             levels.get("on_hand"), levels.get("committed"), levels.get("reserved"),
             levels.get("damaged"), levels.get("safety_stock"),
             levels.get("quality_control"),
-            available_quantity, after_commitments, line_ok,
+            stock, free, item_ok,
         )
 
-        if line_ok and after_commitments < wanted:
-            logger.warning(
-                "COMMITTED-BLIND order=%s line=%d title=%r item=%s: passed on "
-                "available=%s but only %s is free once the %s committed to other "
-                "unfulfilled orders is taken out",
-                order.get("name"), position, title, inventory_item_id,
-                available_quantity, after_commitments, levels.get("committed"),
-            )
-
-        if previously_requested and available_quantity < requested[inventory_item_id]:
-            logger.warning(
-                "DUPLICATE-ITEM order=%s line=%d item=%s: %d lines want %s in total "
-                "but only %s is available; each line was checked against the full "
-                "pool on its own",
-                order.get("name"), position, inventory_item_id,
-                lines_per_item[inventory_item_id], requested[inventory_item_id],
-                available_quantity,
-            )
-
-        if not line_ok:
-            fulfillable = False  # Not enough inventory to fulfill this line item
+        if not item_ok:
+            fulfillable = False
+            # The old check passed a line whenever physical stock covered that
+            # line alone, so anything it would have waved through is worth
+            # calling out while the new maths beds in.
+            if stock >= biggest_line[inventory_item_id]:
+                reasons = []
+                if stock >= wanted:
+                    reasons.append(
+                        f"{levels.get('committed')} is committed to other orders"
+                    )
+                if lines_for[inventory_item_id] > 1 and stock < wanted:
+                    reasons.append(
+                        f"{lines_for[inventory_item_id]} lines want {wanted} between them"
+                    )
+                logger.warning(
+                    "NEWLY-CAUGHT order=%s item=%s: needs %s, only %s free (%s) — "
+                    "the previous per-line check would have let this order through",
+                    order.get("name"), inventory_item_id, wanted, free,
+                    " and ".join(reasons) or "aggregated across lines",
+                )
 
     logger.info(
         "order=%s (%s) fulfillable=%s across %d distinct inventory items",
-        order.get("name"), order_gid, fulfillable, len(quantities),
+        order.get("name"), order_gid, fulfillable, len(needed),
     )
     return fulfillable
 
-def _get_shopify_id_from_handle(handle: int) -> str:
-    """Fetch the Shopify order ID from its handle."""
-    query = gql(
-        """
-        query GetOrderByName($name: String!) {
-          orders(first: 5, query: $name) {
-            edges {
-              node {
-                id
-                name
-                createdAt
-                displayFulfillmentStatus
-              }
-            }
+# ``orders(query:)`` reads Shopify's search index, which trails order creation
+# by seconds. This webhook fires seconds after the order exists, so the first
+# look regularly misses an order that is plainly there — the miss that left
+# orders unpaused. Retry over a short window before giving up.
+LOOKUP_ATTEMPTS = int(os.environ.get("ORDER_SYNC_LOOKUP_ATTEMPTS", 4))
+LOOKUP_BACKOFF = float(os.environ.get("ORDER_SYNC_LOOKUP_BACKOFF", 2))
+
+_ORDER_BY_NAME_QUERY = gql(
+    """
+    query GetOrderByName($name: String!) {
+      orders(first: 5, query: $name) {
+        edges {
+          node {
+            id
+            name
+            createdAt
+            displayFulfillmentStatus
           }
         }
-        """
-    )
+      }
+    }
+    """
+)
 
-    variables = {"name": f"name:{handle}"}
 
+def _search_orders_by_name(handle: int) -> List[dict]:
+    """Return the order nodes Shopify's search index holds for this order number."""
     try:
-        result = gql_client.execute(query, variable_values=variables)
+        result = gql_client.execute(
+            _ORDER_BY_NAME_QUERY, variable_values={"name": f"name:{handle}"}
+        )
     except TransportQueryError as exc:  # pragma: no cover - network interaction
         raise RuntimeError(f"Failed to fetch order with handle {handle}: {exc}") from exc
+    return [edge.get("node", {}) for edge in result.get("orders", {}).get("edges", [])]
 
-    orders = result.get("orders", {}).get("edges", [])
-    if not orders:
+
+def _exact_match(handle: int, candidates: List[dict]) -> dict | None:
+    """Return the candidate whose name is exactly this order number.
+
+    ``name:`` is a partial match, so a search for one order number can return
+    several orders. Pick by the same join ``reconcile.py`` uses — the order name
+    without its leading ``#`` — rather than trusting the first hit, which is
+    ordered by Shopify's default sort and can be an unrelated older order.
+    """
+    wanted = str(handle).lstrip("#")
+    matches = [node for node in candidates if (node.get("name") or "").lstrip("#") == wanted]
+    if len(matches) > 1:
+        logger.warning(
+            "AMBIGUOUS-ORDER handle=%s matched %d orders with the same name: %s — "
+            "taking the first",
+            handle, len(matches), [node.get("id") for node in matches],
+        )
+    return matches[0] if matches else None
+
+
+def _get_shopify_id_from_handle(handle: int) -> str:
+    """Fetch the Shopify order ID from its handle."""
+    for attempt in range(1, LOOKUP_ATTEMPTS + 1):
+        candidates = _search_orders_by_name(handle)
+        order_node = _exact_match(handle, candidates)
+        if order_node is not None:
+            if attempt > 1:
+                logger.info(
+                    "handle=%s appeared on attempt %d/%d — the first look raced "
+                    "Shopify's search index",
+                    handle, attempt, LOOKUP_ATTEMPTS,
+                )
+            break
+        if candidates:
+            logger.warning(
+                "WRONG-ORDER handle=%s attempt=%d/%d: search %r matched %s but none "
+                "is the order we were asked about",
+                handle, attempt, LOOKUP_ATTEMPTS, f"name:{handle}",
+                [node.get("name") for node in candidates],
+            )
+        if attempt < LOOKUP_ATTEMPTS:
+            delay = LOOKUP_BACKOFF * (2 ** (attempt - 1))
+            logger.info(
+                "handle=%s unresolved on attempt %d/%d, retrying in %.1fs",
+                handle, attempt, LOOKUP_ATTEMPTS, delay,
+            )
+            time.sleep(delay)
+    else:
+        logger.error(
+            "ORDER-NOT-FOUND handle=%s: search %r never resolved to this order in "
+            "%d attempts, so no stock check ran",
+            handle, f"name:{handle}", LOOKUP_ATTEMPTS,
+        )
         raise RuntimeError(f"Order with handle {handle} not found")
 
-    # ``name:`` is a partial match and the sort order is Shopify's default, so
-    # record what else came back before committing to the first hit.
-    candidates = [edge.get("node", {}) for edge in orders]
-    if len(candidates) > 1:
-        logger.warning(
-            "AMBIGUOUS-ORDER handle=%s matched %d orders: %s — taking the first",
-            handle,
-            len(candidates),
-            [
-                (node.get("name"), node.get("createdAt"),
-                 node.get("displayFulfillmentStatus"))
-                for node in candidates
-            ],
-        )
-
-    order_node = candidates[0]
     shopify_id = order_node.get("id")
     if not shopify_id:
         raise RuntimeError(f"Order with handle {handle} has no ID")
 
-    resolved_name = order_node.get("name") or ""
-    if resolved_name.lstrip("#") != str(handle).lstrip("#"):
-        logger.error(
-            "WRONG-ORDER handle=%s resolved to order=%s (%s) created=%s status=%s — "
-            "the stock check is about to run against the wrong order",
-            handle, resolved_name, shopify_id, order_node.get("createdAt"),
-            order_node.get("displayFulfillmentStatus"),
-        )
-    else:
-        logger.info(
-            "handle=%s resolved to order=%s (%s) created=%s status=%s",
-            handle, resolved_name, shopify_id, order_node.get("createdAt"),
-            order_node.get("displayFulfillmentStatus"),
-        )
-
+    logger.info(
+        "handle=%s resolved to order=%s (%s) created=%s status=%s",
+        handle, order_node.get("name"), shopify_id, order_node.get("createdAt"),
+        order_node.get("displayFulfillmentStatus"),
+    )
     return shopify_id
 
 def handle_order(shipmondo_id: int, handle: int) -> None:
@@ -521,11 +584,12 @@ def handle_order(shipmondo_id: int, handle: int) -> None:
         )
     except Exception:
         # rq files the traceback in the failed registry where nobody reads it;
-        # a missed pause has to be visible in the journal.
+        # a missed pause has to be visible in the journal. retries_left=0 is the
+        # one that actually left the order unpaused.
         logger.exception(
-            "job=%s FAILED shipmondo=%s order=%s decision=none — the order was "
-            "NOT paused",
-            job, shipmondo_id, handle,
+            "job=%s FAILED shipmondo=%s order=%s retries_left=%s decision=none — "
+            "the order was NOT paused",
+            job, shipmondo_id, handle, _retries_left(),
         )
         raise
 

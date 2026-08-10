@@ -36,7 +36,7 @@ import time
 import jwt
 from flask import Flask, Request, Response, abort, jsonify, request
 from valkey import Valkey
-from rq import Queue
+from rq import Queue, Retry
 from shopify import handle_order
 
 try:  # the client fork does not guarantee this alias
@@ -70,6 +70,18 @@ JWT_AUDIENCE = os.environ.get("SHIPMONDO_JWT_AUDIENCE")
 
 # How long an accepted delivery is remembered for replay detection.
 DEDUPE_TTL = int(os.environ.get("WEBHOOK_DEDUPE_TTL", 7 * 24 * 3600))
+
+# Shipmondo only delivers a webhook once as far as we are concerned (the replay
+# cache above drops retries), so a job that dies takes the pause with it. Retry
+# it here instead: pausing is idempotent, and the failures we see are transient
+# — Shopify's search index lagging behind a fresh order, or API throttling.
+# Requires the worker to run with --with-scheduler, as the unit file does.
+JOB_RETRY_INTERVALS = [
+    int(seconds)
+    for seconds in os.environ.get("ORDER_SYNC_JOB_RETRIES", "15 60 300")
+    .replace(",", " ")
+    .split()
+]
 # Webhook bodies are a few hundred bytes; anything larger is not ours.
 MAX_BODY_BYTES = int(os.environ.get("WEBHOOK_MAX_BODY_BYTES", 64 * 1024))
 
@@ -289,7 +301,10 @@ def shipmondo_webhook() -> Response:
     try:
         job = queue.enqueue(handle_order,
                     int(data.get("id")),
-                    int(data.get("order_id")))
+                    int(data.get("order_id")),
+                    retry=Retry(max=len(JOB_RETRY_INTERVALS),
+                                interval=JOB_RETRY_INTERVALS)
+                    if JOB_RETRY_INTERVALS else None)
     except Exception:
         # Let Shipmondo retry: drop the replay marker so the retry is accepted.
         _release_delivery(token, decoded)
