@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+
+{% block title %}Counting{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/counting.css') }}">
+{% endblock %}
+
+{% block page_title %}Counting{% endblock %}
+
+{% block content %}
+      <div class="tool-section no-print">
+        <h2>Bin Count Sheet</h2>
+        <p class="tool-description">
+          List the Shipmondo bins to count. Every SKU stored in those bins is looked
+          up in Shopify and printed as a packing slip with its expected on-hand
+          quantity and a blank column to write the counted figure in.
+        </p>
+
+        <div class="input-group">
+          <label for="bins-input">Shipmondo bins:</label>
+          <textarea
+            id="bins-input"
+            v-model="binInput"
+            rows="4"
+            class="input-code"
+            placeholder="A1-[01-12]&#10;B2-*&#10;C3-07"></textarea>
+          <small class="input-help">
+            One pattern per line, or separated by commas/spaces.
+            <code>*</code> matches anything (<code>A1-*</code>),
+            <code>?</code> one character (<code>A1-0?</code>),
+            <code>[1-12]</code> a number range (<code>A1-[01-12]</code>) and
+            <code>[A-D]</code> a letter range.
+          </small>
+        </div>
+
+        <div class="button-group">
+          <button
+            @click="generateSheet"
+            :disabled="loading || !binInput.trim()"
+            class="btn-action btn-preview">
+            <span v-if="!loading">📋 Generate Count Sheet</span>
+            <span v-else>Fetching inventory...</span>
+          </button>
+
+          <button
+            v-if="sheet"
+            @click="printSheet"
+            class="btn-action btn-apply">
+            🖨️ Print Packing Slip
+          </button>
+
+          <button
+            v-if="sheet"
+            @click="clearSheet"
+            class="btn-action btn-clear">
+            Clear
+          </button>
+        </div>
+
+        <div v-if="error" class="error-message">
+          <p>[[ error ]]</p>
+          <ul v-if="errorDetails.length">
+            <li v-for="detail in errorDetails">[[ detail ]]</li>
+          </ul>
+        </div>
+
+        <div v-if="sheet && sheetWarnings.length" class="info-message">
+          <p v-for="warning in sheetWarnings">[[ warning ]]</p>
+        </div>
+      </div>
+
+      <!-- Packing slip: the only thing that reaches the printer. -->
+      <div v-if="sheet" class="packing-slip">
+        <div class="slip-header">
+          <div class="slip-title">
+            <h2>Stock Count Sheet</h2>
+            <p class="slip-meta">
+              [[ sheet.pattern_count ]] bin pattern[[ sheet.pattern_count === 1 ? '' : 's' ]]:
+              <span class="mono">[[ patternSummary ]]</span>
+            </p>
+            <p class="slip-meta">
+              Printed [[ formatDateTime(sheet.generated_at) ]] ·
+              bins as of [[ formatDateTime(sheet.bins_cache_updated) ]]
+            </p>
+          </div>
+          <div class="slip-summary">
+            <div class="summary-cell">
+              <span class="summary-value">[[ sheet.totals.bins ]]</span>
+              <span class="summary-label">Bins</span>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-value">[[ sheet.totals.skus ]]</span>
+              <span class="summary-label">SKUs</span>
+            </div>
+            <div class="summary-cell">
+              <span class="summary-value">[[ sheet.totals.units ]]</span>
+              <span class="summary-label">Units expected</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-for="group in sheet.bins" :key="group.bin" class="slip-bin">
+          <div class="bin-heading">
+            <span class="bin-name">[[ group.bin ]]</span>
+            <span class="bin-total">
+              [[ group.lines.length ]] SKU[[ group.lines.length === 1 ? '' : 's' ]] ·
+              [[ group.on_hand ]] unit[[ group.on_hand === 1 ? '' : 's' ]] expected
+            </span>
+          </div>
+          <table class="slip-table">
+            <thead>
+              <tr>
+                <th class="col-sku">SKU</th>
+                <th class="col-product">Product</th>
+                <th class="col-barcode">Barcode</th>
+                <th class="col-num">Expected</th>
+                <th class="col-count">Counted</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="line in group.lines" :key="line.sku">
+                <td class="mono">[[ line.sku ]]</td>
+                <td>
+                  <span class="product-title">[[ line.product_title ]]</span>
+                  <span v-if="line.variant_title" class="variant-title">[[ line.variant_title ]]</span>
+                  <span v-if="!line.in_shopify" class="flag">not in Shopify</span>
+                </td>
+                <td class="mono col-barcode">[[ line.barcode ]]</td>
+                <td class="col-num">[[ line.on_hand === null ? '—' : line.on_hand ]]</td>
+                <td class="col-count"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="slip-footer">
+          <span>Counted by: ______________________</span>
+          <span>Date: ______________</span>
+          <span>Signature: ______________________</span>
+        </div>
+      </div>
+{% endblock %}
+
+{% block extra_js %}
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+    <script>
+      const { createApp } = Vue;
+
+      createApp({
+        delimiters: ['[[', ']]'],
+        data() {
+          return {
+            binInput: '',
+            sheet: null,
+            error: null,
+            errorDetails: [],
+            loading: false
+          };
+        },
+        computed: {
+          patternSummary() {
+            if (!this.sheet) return '';
+            const shown = this.sheet.patterns.join(', ');
+            const hidden = this.sheet.pattern_count - this.sheet.patterns.length;
+            return hidden > 0 ? shown + ', … (' + hidden + ' more)' : shown;
+          },
+          sheetWarnings() {
+            if (!this.sheet) return [];
+            const warnings = [];
+            if (this.sheet.unmatched_patterns.length) {
+              warnings.push(
+                'No bin matched: ' + this.sheet.unmatched_patterns.join(', ')
+              );
+            }
+            if (this.sheet.totals.missing_in_shopify) {
+              warnings.push(
+                this.sheet.totals.missing_in_shopify +
+                ' SKU(s) sit in these bins but no longer exist in Shopify; ' +
+                'they are on the slip with no expected quantity.'
+              );
+            }
+            if (this.sheet.pattern_errors.length) {
+              warnings.push('Skipped: ' + this.sheet.pattern_errors.join(' '));
+            }
+            return warnings;
+          }
+        },
+        methods: {
+          async generateSheet() {
+            this.loading = true;
+            this.error = null;
+            this.errorDetails = [];
+            this.sheet = null;
+
+            try {
+              const response = await fetch('/counting/count-sheet/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bins: this.binInput })
+              });
+              const data = await response.json();
+
+              if (!response.ok) {
+                this.error = data.error || 'Failed to build the count sheet.';
+                this.errorDetails = data.unmatched_patterns || [];
+              } else {
+                this.sheet = data;
+              }
+            } catch (err) {
+              this.error = 'An error occurred while building the count sheet.';
+              console.error('Error:', err);
+            } finally {
+              this.loading = false;
+            }
+          },
+          printSheet() {
+            window.print();
+          },
+          clearSheet() {
+            this.sheet = null;
+            this.error = null;
+            this.errorDetails = [];
+          },
+          formatDateTime(isoString) {
+            if (!isoString) return 'unknown';
+            const date = new Date(isoString);
+            return new Intl.DateTimeFormat('default', {
+              dateStyle: 'medium',
+              timeStyle: 'short',
+              timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+            }).format(date);
+          }
+        }
+      }).mount('#app');
+    </script>
+{% endblock %}

@@ -59,6 +59,7 @@ from shopify import (
     reorder_product_images,
     delete_product_image,
     fetch_locations,
+    fetch_on_hand_by_skus,
     create_inventory_transfer,
     set_transfer_items,
     delete_inventory_transfer,
@@ -73,6 +74,8 @@ from shipmondo import (
     clear_bin_location,
     batch_update_bins_with_regex,
     apply_batch_update,
+    expand_bin_patterns,
+    find_items_in_bins,
     update_barcode
 )
 from microsoft365 import (
@@ -82,11 +85,25 @@ from microsoft365 import (
     send_plaintext_email,
     send_template_email,
 )
+import netguard
 import purchase_order
-import requests as _requests
+import security
 import shopify as shopify_module
 import threading
 import yaml
+from security import (
+    LIMIT_EXPENSIVE,
+    LIMIT_MAIL,
+    LIMIT_READ,
+    LIMIT_WRITE,
+    ROLE_CATALOG_WRITE,
+    ROLE_CONFIG_ADMIN,
+    ROLE_INVENTORY_WRITE,
+    ROLE_MAIL_SEND,
+    ROLE_PLACE_ORDER,
+    ROLE_READ,
+    RoutePolicy,
+)
 
 # Configure logging to stdout for systemd/journalctl
 logging.basicConfig(
@@ -101,6 +118,104 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "purchase_orders.db"
 CACHE_DURATION_MINUTES = 30
+
+# Largest uploaded CSV product_tools_compare will parse.
+MAX_CSV_UPLOAD_BYTES = int(os.environ.get("MAX_CSV_UPLOAD_BYTES", 16 * 1024 * 1024))
+# Largest base64 swatch payload accepted from the browser.
+MAX_INLINE_IMAGE_BYTES = int(os.environ.get("MAX_INLINE_IMAGE_BYTES", 8 * 1024 * 1024))
+# Ceilings on caller-supplied list arguments, so one request cannot fan out into
+# thousands of Shopify calls.
+MAX_BATCH_ITEMS = int(os.environ.get("MAX_BATCH_ITEMS", 500))
+# Longest regex a batch bin update may use.
+MAX_REGEX_LENGTH = 200
+# Longest bin-pattern list the counting sheet accepts, and the most SKUs one
+# count sheet may cover — a count sheet longer than this is unusable on paper
+# and turns into hundreds of Shopify lookups.
+MAX_BIN_INPUT_CHARS = 4000
+MAX_COUNT_SHEET_SKUS = 1000
+
+# ── Access policy ─────────────────────────────────────────────────────────────
+#
+# Every route needs an entry here: create_app() refuses to start when one is
+# missing (see security.audit_routes), which is what keeps a newly added
+# endpoint from being published anonymously.  `role` is enforced once
+# OIDC_REQUIRE_ROLES=1; the authentication gate, CSRF check and rate limits
+# always apply.
+
+ROUTE_POLICIES: dict[str, RoutePolicy] = {
+    # Pages
+    "index": RoutePolicy(ROLE_READ, LIMIT_READ, html=True),
+    "purchase_orders": RoutePolicy(ROLE_READ, LIMIT_READ, html=True),
+    "inventory_tools": RoutePolicy(ROLE_READ, LIMIT_READ, html=True),
+    "barcode_scanner": RoutePolicy(ROLE_READ, LIMIT_READ, html=True),
+    "product_tools": RoutePolicy(ROLE_READ, LIMIT_READ, html=True),
+    "mail_tools": RoutePolicy(ROLE_READ, LIMIT_READ, html=True),
+    "counting": RoutePolicy(ROLE_READ, LIMIT_READ, html=True),
+    # Purchase orders
+    "purchase_order_data": RoutePolicy(ROLE_READ, LIMIT_EXPENSIVE),
+    "list_configurations": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "upsert_configuration": RoutePolicy(ROLE_CONFIG_ADMIN, LIMIT_WRITE),
+    "delete_configuration": RoutePolicy(ROLE_CONFIG_ADMIN, LIMIT_WRITE),
+    "purchase_orders_order_methods": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "purchase_orders_locations": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "purchase_orders_place_order": RoutePolicy(ROLE_PLACE_ORDER, LIMIT_EXPENSIVE),
+    "get_ordering_template_route": RoutePolicy(ROLE_CONFIG_ADMIN, LIMIT_READ),
+    "save_ordering_template_route": RoutePolicy(ROLE_CONFIG_ADMIN, LIMIT_WRITE),
+    "delete_ordering_template_route": RoutePolicy(ROLE_CONFIG_ADMIN, LIMIT_WRITE),
+    # Inventory tools
+    "calculate_brand_value": RoutePolicy(ROLE_READ, LIMIT_EXPENSIVE),
+    "shipmondo_cache_status": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "refresh_shipmondo_cache": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
+    "cleanup_sold_out_bins": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
+    "preview_batch_update": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_WRITE),
+    "apply_batch_update_route": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
+    # Counting
+    "counting_count_sheet": RoutePolicy(ROLE_READ, LIMIT_EXPENSIVE),
+    # Barcode scanner
+    "lookup_barcode": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "search_items": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "assign_bin": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_WRITE),
+    "assign_barcode_to_sku": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_WRITE),
+    # Product tools
+    "product_tools_compare": RoutePolicy(ROLE_READ, LIMIT_EXPENSIVE),
+    "product_tools_add_variants": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_color_options": RoutePolicy(ROLE_READ, LIMIT_WRITE),
+    "product_tools_check_colors": RoutePolicy(ROLE_READ, LIMIT_WRITE),
+    "product_tools_generate_swatch": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_EXPENSIVE),
+    "product_tools_create_color": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_check_linked_options": RoutePolicy(ROLE_READ, LIMIT_WRITE),
+    "product_tools_create_option_value": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_taxonomy": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "product_tools_tags": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "product_tools_category_metafields": RoutePolicy(ROLE_READ, LIMIT_WRITE),
+    "product_tools_save_category_metafields": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_translate_description": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_EXPENSIVE),
+    "product_tools_translate_product_data": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_EXPENSIVE),
+    "product_tools_translate_plain_text": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_EXPENSIVE),
+    "product_tools_create_product": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_detect_product_options": RoutePolicy(ROLE_READ, LIMIT_WRITE),
+    "product_tools_create_product_options": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_definition_metaobjects": RoutePolicy(ROLE_READ, LIMIT_WRITE),
+    "product_tools_metaobject_type_fields": RoutePolicy(ROLE_READ, LIMIT_WRITE),
+    "product_tools_get_images": RoutePolicy(ROLE_READ, LIMIT_WRITE),
+    "product_tools_add_images": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_reorder_images": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_delete_image": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_stage_uploads": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_WRITE),
+    "product_tools_helikon_images": RoutePolicy(ROLE_READ, LIMIT_EXPENSIVE),
+    "product_tools_helikon_image_proxy": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "product_tools_helikon_stage_images": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_EXPENSIVE),
+    "product_tools_all_products": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "product_tools_remap_apply": RoutePolicy(ROLE_CATALOG_WRITE, LIMIT_EXPENSIVE),
+    # Mail tools — customer PII and outbound mail are gated behind mail-send.
+    "lookup_order": RoutePolicy(ROLE_MAIL_SEND, LIMIT_WRITE),
+    "send_missed_pickup": RoutePolicy(ROLE_MAIL_SEND, LIMIT_MAIL),
+    "list_email_templates": RoutePolicy(ROLE_MAIL_SEND, LIMIT_READ),
+    "save_email_template_route": RoutePolicy(ROLE_MAIL_SEND, LIMIT_WRITE),
+    "delete_email_template_route": RoutePolicy(ROLE_MAIL_SEND, LIMIT_WRITE),
+    "preview_template": RoutePolicy(ROLE_MAIL_SEND, LIMIT_WRITE),
+    "send_template": RoutePolicy(ROLE_MAIL_SEND, LIMIT_MAIL),
+}
 
 # Global Shipmondo cache with thread lock
 shipmondo_cache = {
@@ -563,6 +678,18 @@ async def _resolve_order_customer(order_number: str) -> tuple[dict | None, Any]:
     return customer, None
 
 
+def _too_many(name: str, value: Any, limit: int = MAX_BATCH_ITEMS) -> Any:
+    """Return a 413 response when a caller-supplied list exceeds ``limit``.
+
+    Each entry in these lists costs at least one Shopify API call, so an
+    unbounded list is a cheap way to tie up the process and burn the shop's
+    rate-limit budget.
+    """
+    if isinstance(value, (list, tuple)) and len(value) > limit:
+        return jsonify({"error": f"'{name}' may contain at most {limit} entries."}), 413
+    return None
+
+
 def _template_variables(customer: dict) -> dict[str, str]:
     """Build the {{ variable }} values a saved email template can reference."""
     return {name: customer.get(name, "") or "" for name in TEMPLATE_VARIABLES}
@@ -672,11 +799,11 @@ def create_app() -> Flask:
     application = Flask(__name__, template_folder="templates", static_folder="static")
     application.config.setdefault("DATABASE", str(DATABASE_PATH))
     application.config.setdefault("OIDC_CLIENT_SECRETS", str(BASE_DIR / "client_secrets.json"))
-    application.config['SECRET_KEY'] = os.environ.get("FLASK_SECRET_KEY")
     application.config["SESSION_TYPE"] = "filesystem"
     application.config['SESSION_PERMANENT'] = True
-    application.config['SESSION_PERMANENT_LIFETIME'] = timedelta(days=7)
-    
+    # Secret-key strength, cookie flags, session lifetime and request-size caps.
+    security.configure(application)
+
     # Configure Flask's logger to use stdout
     if not application.debug:
         stream_handler = logging.StreamHandler(sys.stdout)
@@ -689,7 +816,16 @@ def create_app() -> Flask:
     
     Session(application)
     oidc = OpenIDConnect(application)
-    
+
+    # Fail-closed access control for *every* route.  Registered here, right
+    # after the OIDC extension, so the gate runs after flask-oidc has refreshed
+    # the session token but before any view function.
+    security.install(
+        application,
+        policies=ROUTE_POLICIES,
+        is_authenticated=lambda: oidc.user_loggedin,
+    )
+
     with application.app_context():
         init_db()
 
@@ -1341,7 +1477,11 @@ def create_app() -> Flask:
             
             if not regex_pattern:
                 return jsonify({"error": "Regex pattern is required."}), 400
-            
+            if len(regex_pattern) > MAX_REGEX_LENGTH:
+                return jsonify({
+                    "error": f"The pattern may be at most {MAX_REGEX_LENGTH} characters."
+                }), 400
+
             result = batch_update_bins_with_regex(
                 shipmondo_cache["items"],
                 regex_pattern,
@@ -1371,7 +1511,11 @@ def create_app() -> Flask:
             
             if not regex_pattern:
                 return jsonify({"error": "Regex pattern is required."}), 400
-            
+            if len(regex_pattern) > MAX_REGEX_LENGTH:
+                return jsonify({
+                    "error": f"The pattern may be at most {MAX_REGEX_LENGTH} characters."
+                }), 400
+
             # Get matching items
             match_result = batch_update_bins_with_regex(
                 shipmondo_cache["items"],
@@ -1408,6 +1552,123 @@ def create_app() -> Flask:
         except Exception as exc:
             current_app.logger.exception("Failed to apply batch update", exc_info=exc)
             return jsonify({"error": "Failed to apply batch update."}), 500
+
+    @application.route("/counting/")
+    @oidc.require_login
+    def counting() -> str:
+        """Render the stock counting page."""
+        context = get_user_context()
+        return render_template(
+            "counting.html",
+            **context,
+            active_page="counting"
+        )
+
+    @application.post("/counting/count-sheet/")
+    async def counting_count_sheet() -> Any:
+        """Build a count sheet for the Shipmondo bins matching the given patterns.
+
+        Bins and their SKUs come from the Shipmondo cache; the expected quantity
+        is Shopify's *on-hand*, which is what a counter should physically find in
+        the bin (available stock plus stock already committed to open orders).
+        """
+        payload = request.get_json(silent=True) or {}
+        raw_bins = str(payload.get("bins") or "")
+        if not raw_bins.strip():
+            return jsonify({"error": "Enter at least one bin or bin pattern."}), 400
+        if len(raw_bins) > MAX_BIN_INPUT_CHARS:
+            return jsonify({
+                "error": f"The bin list may be at most {MAX_BIN_INPUT_CHARS} characters."
+            }), 400
+
+        patterns, pattern_errors = expand_bin_patterns(raw_bins)
+        if not patterns:
+            return jsonify({
+                "error": pattern_errors[0] if pattern_errors
+                else "None of those bin patterns could be read."
+            }), 400
+
+        with shipmondo_lock:
+            shipmondo_items = dict(shipmondo_cache["items"])
+            cache_updated = shipmondo_cache["last_updated"]
+        if not shipmondo_items:
+            return jsonify({
+                "error": "The Shipmondo bin cache is empty. Refresh it on the "
+                         "Inventory Tools page and try again."
+            }), 503
+
+        match = find_items_in_bins(shipmondo_items, patterns)
+        bin_items = match["items"]
+        if not bin_items:
+            return jsonify({
+                "error": "No Shipmondo bins matched those patterns.",
+                "unmatched_patterns": match["unmatched_patterns"][:50],
+            }), 404
+        if len(bin_items) > MAX_COUNT_SHEET_SKUS:
+            return jsonify({
+                "error": f"Those bins hold {len(bin_items)} SKUs; a count sheet "
+                         f"covers at most {MAX_COUNT_SHEET_SKUS}. Narrow the patterns."
+            }), 400
+
+        try:
+            stock = await asyncio.to_thread(
+                fetch_on_hand_by_skus, [item["sku"] for item in bin_items]
+            )
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to fetch on-hand inventory for the count sheet", exc_info=exc
+            )
+            return jsonify({"error": "Failed to fetch inventory from Shopify."}), 502
+
+        # One group per bin, in walking order, so the printed sheet follows the
+        # shelves.  find_items_in_bins already sorted by bin then SKU.
+        groups: list[dict] = []
+        by_bin: dict[str, dict] = {}
+        total_units = 0
+        missing_in_shopify = 0
+
+        for item in bin_items:
+            variant = stock.get(item["sku"])
+            if variant is None:
+                missing_in_shopify += 1
+            on_hand = variant["on_hand"] if variant else None
+            total_units += on_hand or 0
+
+            group = by_bin.get(item["bin"])
+            if group is None:
+                group = {"bin": item["bin"], "lines": [], "on_hand": 0}
+                by_bin[item["bin"]] = group
+                groups.append(group)
+            group["on_hand"] += on_hand or 0
+            group["lines"].append({
+                "sku": item["sku"],
+                # Shipmondo's item name is the fallback for SKUs Shopify no
+                # longer has, so the line is still countable.
+                "product_title": (variant or {}).get("product_title") or item["name"],
+                "variant_title": (variant or {}).get("variant_title") or "",
+                "vendor": (variant or {}).get("vendor") or "",
+                "barcode": (variant or {}).get("barcode") or item["barcode"],
+                "on_hand": on_hand,
+                "available": (variant or {}).get("available"),
+                "committed": (variant or {}).get("committed"),
+                "in_shopify": variant is not None,
+            })
+
+        return jsonify({
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "bins_cache_updated": cache_updated,
+            "bins": groups,
+            "totals": {
+                "bins": len(groups),
+                "skus": len(bin_items),
+                "units": total_units,
+                "missing_in_shopify": missing_in_shopify,
+            },
+            "patterns": patterns[:50],
+            "pattern_count": len(patterns),
+            "unmatched_patterns": match["unmatched_patterns"][:50],
+            "pattern_errors": pattern_errors[:10],
+        })
 
     @application.route("/barcode-scanner/")
     @oidc.require_login
@@ -1651,7 +1912,18 @@ def create_app() -> Flask:
                 if not csv_file or csv_file.filename == "":
                     return jsonify({"error": "A CSV file is required."}), 400
 
-                csv_content = csv_file.read().decode("utf-8-sig")
+                # Read one byte past the limit so an oversized upload is
+                # rejected instead of being parsed into memory.
+                raw = csv_file.read(MAX_CSV_UPLOAD_BYTES + 1)
+                if len(raw) > MAX_CSV_UPLOAD_BYTES:
+                    return jsonify({
+                        "error": f"The CSV file may be at most "
+                                 f"{MAX_CSV_UPLOAD_BYTES // (1024 * 1024)} MB."
+                    }), 413
+                try:
+                    csv_content = raw.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    return jsonify({"error": "The CSV file must be UTF-8 encoded."}), 400
                 vendor_products = entire_m.parse_vendor_csv(csv_content)
                 current_app.logger.info(
                     f"Parsed {len(vendor_products)} rows from uploaded CSV"
@@ -1694,6 +1966,8 @@ def create_app() -> Flask:
 
             if not variants or not isinstance(variants, list):
                 return jsonify({"error": "No variants provided."}), 400
+            if (err := _too_many("variants", variants)):
+                return err
 
             # Group variants by Shopify product ID
             by_product: dict[str, list[dict]] = {}
@@ -1757,6 +2031,8 @@ def create_app() -> Flask:
 
             if not product_ids:
                 return jsonify({"error": "product_ids is required."}), 400
+            if (err := _too_many("product_ids", product_ids)):
+                return err
 
             # Try each product ID until one returns a valid definition
             result = None
@@ -1788,6 +2064,10 @@ def create_app() -> Flask:
 
             if not product_ids:
                 return jsonify({"error": "product_ids is required."}), 400
+            if (err := _too_many("product_ids", product_ids)) or (
+                err := _too_many("color_names", color_names)
+            ):
+                return err
             if not color_names:
                 return jsonify({"existing": {}, "missing": [], "on_product": []})
 
@@ -1863,6 +2143,11 @@ def create_app() -> Flask:
                         import base64
                         # data:image/png;base64,XXXX
                         _header, b64data = raw.split(",", 1)
+                        if len(b64data) > 4 * (MAX_INLINE_IMAGE_BYTES // 3) + 4:
+                            return jsonify({
+                                "error": f"The swatch image may be at most "
+                                         f"{MAX_INLINE_IMAGE_BYTES // (1024 * 1024)} MB."
+                            }), 413
                         png_bytes = base64.b64decode(b64data)
                         file_gid = await asyncio.to_thread(
                             upload_swatch_bytes_to_shopify,
@@ -1920,6 +2205,10 @@ def create_app() -> Flask:
 
             if not product_ids:
                 return jsonify({"error": "product_ids is required."}), 400
+            if (err := _too_many("product_ids", product_ids)) or (
+                err := _too_many("variants", variants)
+            ):
+                return err
             if not variants:
                 return jsonify({"options": {}})
 
@@ -2013,6 +2302,8 @@ def create_app() -> Flask:
 
             if not product_id:
                 return jsonify({"error": "product_id is required."}), 400
+            if (err := _too_many("metafield_values", metafield_values)):
+                return err
 
             result = await asyncio.to_thread(
                 set_product_category_metafields, product_id, metafield_values
@@ -2249,6 +2540,8 @@ def create_app() -> Flask:
                 return jsonify({"error": "product_id is required."}), 400
             if not image_urls:
                 return jsonify({"error": "image_urls is required."}), 400
+            if (err := _too_many("image_urls", image_urls)):
+                return err
             result = await asyncio.to_thread(
                 add_product_images, product_id, image_urls, image_alts
             )
@@ -2268,6 +2561,8 @@ def create_app() -> Flask:
                 return jsonify({"error": "product_id is required."}), 400
             if not media_ids:
                 return jsonify({"error": "media_ids is required."}), 400
+            if (err := _too_many("media_ids", media_ids)):
+                return err
             result = await asyncio.to_thread(reorder_product_images, product_id, media_ids)
             return jsonify(result)
         except Exception as exc:
@@ -2285,6 +2580,8 @@ def create_app() -> Flask:
                 return jsonify({"error": "product_id is required."}), 400
             if not media_ids:
                 return jsonify({"error": "media_ids is required."}), 400
+            if (err := _too_many("media_ids", media_ids)):
+                return err
             result = await asyncio.to_thread(delete_product_image, product_id, media_ids)
             return jsonify(result)
         except Exception as exc:
@@ -2299,6 +2596,8 @@ def create_app() -> Flask:
             files = payload.get("files", [])
             if not files:
                 return jsonify({"error": "files is required."}), 400
+            if (err := _too_many("files", files)):
+                return err
             from shopify import create_staged_uploads
             targets = await asyncio.to_thread(create_staged_uploads, files)
             return jsonify({"targets": targets})
@@ -2325,17 +2624,18 @@ def create_app() -> Flask:
     async def product_tools_helikon_image_proxy() -> Any:
         """Proxy a single Helikon image so the browser can display it without basic-auth."""
         filename = request.args.get("filename", "")
-        if not filename or "/" in filename or ".." in filename:
+        if not filename or "/" in filename or "\\" in filename or ".." in filename:
             return jsonify({"error": "Invalid filename."}), 400
         try:
             url = entire_m.helikon_image_url(filename)
             auth = entire_m.helikon_image_basic_auth()
-            resp = await asyncio.to_thread(
-                _requests.get, url, auth=auth, timeout=15
+            content, content_type = await asyncio.to_thread(
+                netguard.fetch_image, url, auth=auth, timeout=15
             )
-            resp.raise_for_status()
-            content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-            return Response(resp.content, content_type=content_type)
+            return Response(content, content_type=content_type)
+        except netguard.UnsafeURLError as exc:
+            current_app.logger.warning("Rejected Helikon image fetch: %s", exc)
+            return jsonify({"error": "Failed to fetch image."}), 502
         except Exception as exc:
             current_app.logger.exception("Failed to proxy Helikon image", exc_info=exc)
             return jsonify({"error": "Failed to fetch image."}), 500
@@ -2351,6 +2651,8 @@ def create_app() -> Flask:
             filenames = payload.get("filenames", [])
             if not filenames:
                 return jsonify({"error": "filenames is required."}), 400
+            if (err := _too_many("filenames", filenames)):
+                return err
             result = await asyncio.to_thread(entire_m.stage_helikon_images, filenames)
             return jsonify(result)
         except Exception as exc:
@@ -2379,6 +2681,10 @@ def create_app() -> Flask:
 
             if not product_ids:
                 return jsonify({"error": "product_ids is required."}), 400
+            if (err := _too_many("product_ids", product_ids)) or (
+                err := _too_many("metafield_values", metafield_values)
+            ):
+                return err
             if not tags_to_add and not tags_to_remove and not new_category_id and not metafield_values:
                 return jsonify({"error": "At least one of tags_to_add, tags_to_remove, category_id, or metafield_values must be provided."}), 400
 
@@ -2625,6 +2931,10 @@ def create_app() -> Flask:
             current_app.logger.exception("Failed to send template email", exc_info=exc)
             return jsonify({"error": "Failed to send email."}), 500
 
+    # Every route is now registered: refuse to start if any of them lacks an
+    # access policy, so a new endpoint can never ship unprotected.
+    security.audit_routes(application, ROUTE_POLICIES)
+
     return application
 
 
@@ -2866,4 +3176,13 @@ if __name__ == "__main__":
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    serve(app, host="0.0.0.0", port=int(os.getenv("WAITRESS_PORT", 8000)), url_scheme='https')
+    # Bind to loopback by default: the service is reached through the
+    # authenticating reverse proxy, never directly.  Set WAITRESS_HOST to
+    # override when the proxy lives on another machine.
+    serve(
+        app,
+        host=os.getenv("WAITRESS_HOST", "127.0.0.1"),
+        port=int(os.getenv("WAITRESS_PORT", 8000)),
+        url_scheme="https",
+        max_request_body_size=security.max_request_bytes(),
+    )

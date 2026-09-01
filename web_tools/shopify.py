@@ -11,7 +11,44 @@ from PIL import Image, ImageDraw
 from gql import Client, gql
 from gql.transport.aiohttp import AIOHTTPTransport
 
+import netguard
+
 _log = logging.getLogger(__name__)
+
+# ── Image-decoding limits ─────────────────────────────────────────────────────
+# Pillow will happily allocate gigabytes for a small, highly compressed file, so
+# cap both the source bytes and the pixel count before decoding anything that
+# came from a request.
+MAX_SWATCH_SOURCE_BYTES = int(os.environ.get("MAX_IMAGE_SOURCE_BYTES", 10 * 1024 * 1024))
+MAX_IMAGE_PIXELS = int(os.environ.get("MAX_IMAGE_PIXELS", 40_000_000))
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
+
+def open_image_safely(data: bytes) -> Image.Image:
+    """Decode image bytes, refusing decompression bombs.
+
+    The header is inspected first so an oversized image is rejected before its
+    pixels are materialised.
+
+    Raises:
+        ValueError: When the data is not a decodable image or is too large.
+    """
+    if len(data) > MAX_SWATCH_SOURCE_BYTES:
+        raise ValueError(
+            f"Image is {len(data)} bytes, over the {MAX_SWATCH_SOURCE_BYTES} byte limit."
+        )
+    try:
+        with Image.open(io.BytesIO(data)) as probe:
+            width, height = probe.size
+    except Exception as exc:
+        raise ValueError(f"Not a readable image: {exc}") from exc
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(
+            f"Image is {width}x{height} pixels, over the {MAX_IMAGE_PIXELS} pixel limit."
+        )
+    image = Image.open(io.BytesIO(data))
+    image.load()
+    return image
 
 # Shopify GraphQL setup
 __SHOPIFY_URL__ = os.environ.get("SHOPIFY_URL")
@@ -314,6 +351,137 @@ def calculate_brand_inventory_value(brand_name: str = None) -> float:
         cursor = page_info["endCursor"]
     
     return total_value
+
+
+# ── On-hand counts by SKU ─────────────────────────────────────────────────────
+#
+# The counting sheet needs the quantity a picker should physically find, which is
+# `on_hand` (available + committed), not `available`.  Shopify has no "fetch these
+# N SKUs" call, so the SKUs are OR-ed into the variant search query in batches.
+
+__ON_HAND_QUERY__ = gql("""
+query ($cursor: String, $query: String!) {
+  productVariants(first: 100, after: $cursor, query: $query) {
+    edges {
+      node {
+        sku
+        title
+        barcode
+        product {
+          title
+          vendor
+        }
+        inventoryItem {
+          tracked
+          inventoryLevels(first: 20) {
+            edges {
+              node {
+                location {
+                  name
+                }
+                quantities(names: ["on_hand", "available", "committed"]) {
+                  name
+                  quantity
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+""")
+
+# SKUs per search query.  Shopify rejects very long query strings, and a wide
+# `OR` chain also costs more query points than several narrow ones.
+SKU_QUERY_BATCH = 40
+
+
+def _sku_query_term(sku: str) -> str:
+    """Quote one SKU for the variant search query."""
+    escaped = sku.replace("\\", "\\\\").replace('"', '\\"')
+    return f'sku:"{escaped}"'
+
+
+def fetch_on_hand_by_skus(skus: list[str]) -> dict[str, dict]:
+    """Return on-hand stock for ``skus``, keyed by SKU.
+
+    Each value is ``{"sku", "variant_title", "product_title", "vendor",
+    "barcode", "tracked", "on_hand", "available", "committed", "locations"}``.
+    Quantities are summed across every location holding the item; ``locations``
+    lists the per-location on-hand split.  SKUs Shopify does not know are absent
+    from the result — the caller decides how to show them.
+    """
+    wanted = {sku for sku in skus if sku}
+    if not wanted:
+        return {}
+
+    _log.info("fetch_on_hand_by_skus: looking up %d SKUs", len(wanted))
+    found: dict[str, dict] = {}
+    ordered = sorted(wanted)
+
+    for start in range(0, len(ordered), SKU_QUERY_BATCH):
+        batch = ordered[start:start + SKU_QUERY_BATCH]
+        query = " OR ".join(_sku_query_term(sku) for sku in batch)
+        cursor = None
+        while True:
+            result = _execute(
+                __ON_HAND_QUERY__, variable_values={"cursor": cursor, "query": query}
+            )
+            connection = result["productVariants"]
+            for edge in connection["edges"]:
+                node = edge["node"]
+                sku = (node.get("sku") or "").strip()
+                # Shopify's search matches on tokens, so a query for "AB-1" can
+                # also return "AB-10"; keep only the SKUs actually asked for.
+                if sku not in wanted or sku in found:
+                    continue
+
+                inventory_item = node.get("inventoryItem") or {}
+                totals = {"on_hand": 0, "available": 0, "committed": 0}
+                locations: list[dict] = []
+                levels = (inventory_item.get("inventoryLevels") or {}).get("edges", [])
+                for level in levels:
+                    level_node = level["node"]
+                    quantities = {
+                        q["name"]: q["quantity"] or 0
+                        for q in level_node.get("quantities", [])
+                    }
+                    for name in totals:
+                        totals[name] += quantities.get(name, 0)
+                    locations.append({
+                        "name": (level_node.get("location") or {}).get("name", ""),
+                        "on_hand": quantities.get("on_hand", 0),
+                    })
+
+                product = node.get("product") or {}
+                found[sku] = {
+                    "sku": sku,
+                    "variant_title": node.get("title") or "",
+                    "product_title": product.get("title") or "",
+                    "vendor": product.get("vendor") or "",
+                    "barcode": node.get("barcode") or "",
+                    "tracked": bool(inventory_item.get("tracked")),
+                    "on_hand": totals["on_hand"],
+                    "available": totals["available"],
+                    "committed": totals["committed"],
+                    "locations": locations,
+                }
+
+            page_info = connection["pageInfo"]
+            if not page_info["hasNextPage"]:
+                break
+            cursor = page_info["endCursor"]
+
+    _log.info(
+        "fetch_on_hand_by_skus: matched %d of %d SKUs", len(found), len(wanted)
+    )
+    return found
 
 
 def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
@@ -2037,18 +2205,23 @@ def generate_diagonal_swatch(
         """Return a *size*×*size* image for one half."""
         if spec.get("type") == "image":
             val = spec.get("value", "")
+            if not isinstance(val, str):
+                raise ValueError("Swatch image value must be a string.")
             if val.startswith("data:"):
                 import base64 as _b64
                 _, b64data = val.split(",", 1)
-                img = Image.open(io.BytesIO(_b64.b64decode(b64data))).convert("RGBA")
-                img = img.resize((size, size), Image.LANCZOS)
-                return img
+                if len(b64data) > 4 * (MAX_SWATCH_SOURCE_BYTES // 3) + 4:
+                    raise ValueError("Inline swatch image is too large.")
+                img = open_image_safely(_b64.b64decode(b64data)).convert("RGBA")
+                return img.resize((size, size), Image.LANCZOS)
             if val.startswith("http"):
-                resp = requests.get(val, timeout=15)
-                resp.raise_for_status()
-                img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-                img = img.resize((size, size), Image.LANCZOS)
-                return img
+                # Caller-supplied URL: only public HTTPS origins, no redirects,
+                # and a hard byte cap before anything is handed to Pillow.
+                content, _mime = netguard.fetch_image(
+                    val, max_bytes=MAX_SWATCH_SOURCE_BYTES, timeout=15
+                )
+                img = open_image_safely(content).convert("RGBA")
+                return img.resize((size, size), Image.LANCZOS)
         # Default: solid colour
         colour = spec.get("value", "#000000")
         img = Image.new("RGBA", (size, size), colour)
@@ -2080,7 +2253,7 @@ def _resize_image(
     Returns *(filename, resized_bytes, mime_type)*.  PNG stays PNG; everything
     else is re-encoded as JPEG at quality 90.
     """
-    img = Image.open(io.BytesIO(image_bytes))
+    img = open_image_safely(image_bytes)
     fmt = (img.format or "JPEG").upper()
     img.thumbnail((max_dim, max_dim), Image.LANCZOS)
     buf = io.BytesIO()

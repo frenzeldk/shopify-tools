@@ -1,0 +1,436 @@
+/* Counting Page Specific Styles */
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+/* Tool Section */
+.tool-section {
+  background-color: white;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.tool-section h2 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: #2c3e50;
+  margin: 0 0 0.5rem;
+}
+
+.tool-description {
+  color: #5a6c7d;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  margin: 0 0 1.25rem;
+}
+
+.input-group {
+  margin-bottom: 1rem;
+}
+
+.input-group label {
+  display: block;
+  font-weight: 500;
+  color: #2c3e50;
+  margin-bottom: 0.4rem;
+}
+
+.input-group textarea {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #d5dde5;
+  border-radius: 4px;
+  font-size: 0.95rem;
+  resize: vertical;
+  transition: border-color 0.2s ease;
+}
+
+.input-group textarea:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.input-code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.input-help {
+  display: block;
+  margin-top: 0.4rem;
+  color: #7f8c8d;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.input-help code {
+  background-color: #eef2f6;
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  font-size: 0.85em;
+}
+
+/* Buttons */
+.button-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.btn-action {
+  padding: 0.65rem 1.2rem;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.btn-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-preview {
+  background-color: #3498db;
+}
+
+.btn-preview:hover:not(:disabled) {
+  background-color: #2980b9;
+}
+
+.btn-apply {
+  background-color: #27ae60;
+}
+
+.btn-apply:hover:not(:disabled) {
+  background-color: #219653;
+}
+
+.btn-clear {
+  background-color: #95a5a6;
+}
+
+.btn-clear:hover:not(:disabled) {
+  background-color: #7f8c8d;
+}
+
+/* Messages */
+.error-message,
+.info-message {
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: 4px;
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.error-message {
+  background-color: #fdecea;
+  border-left: 4px solid #e74c3c;
+  color: #922b21;
+}
+
+.info-message {
+  background-color: #eaf4fd;
+  border-left: 4px solid #3498db;
+  color: #1b4f72;
+}
+
+.error-message p,
+.info-message p {
+  margin: 0 0 0.4rem;
+}
+
+.error-message p:last-child,
+.info-message p:last-child {
+  margin-bottom: 0;
+}
+
+.error-message ul {
+  margin: 0.3rem 0 0;
+  padding-left: 1.2rem;
+}
+
+/* ── Packing slip ──────────────────────────────────────────────────────────
+   Laid out for paper first: wide margins, black on white, and a repeated
+   table head so a bin spanning a page break stays readable. */
+
+.packing-slip {
+  background-color: white;
+  border-radius: 8px;
+  padding: 1.75rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  color: #1a1a1a;
+}
+
+.slip-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  border-bottom: 2px solid #2c3e50;
+  padding-bottom: 0.9rem;
+  margin-bottom: 1.25rem;
+}
+
+.slip-title h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.4rem;
+  color: #2c3e50;
+}
+
+.slip-meta {
+  margin: 0.15rem 0;
+  font-size: 0.85rem;
+  color: #5a6c7d;
+}
+
+.slip-summary {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.summary-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.summary-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.1;
+  color: #2c3e50;
+}
+
+.summary-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #7f8c8d;
+}
+
+.slip-bin {
+  margin-bottom: 1.5rem;
+  /* Keep a bin's heading with at least the start of its table. */
+  break-inside: avoid-page;
+}
+
+.bin-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  background-color: #eef2f6;
+  border-left: 4px solid #2c3e50;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.bin-name {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.bin-total {
+  font-size: 0.85rem;
+  color: #5a6c7d;
+}
+
+.slip-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.slip-table th,
+.slip-table td {
+  border-bottom: 1px solid #d5dde5;
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.slip-table th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #5a6c7d;
+  border-bottom: 1px solid #95a5a6;
+}
+
+.slip-table tbody tr:nth-child(even) {
+  background-color: #fafbfc;
+}
+
+.mono {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  white-space: nowrap;
+}
+
+.col-sku {
+  width: 16%;
+}
+
+.col-barcode {
+  width: 15%;
+}
+
+.col-num,
+.col-count {
+  width: 9%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.slip-table td.col-num {
+  font-weight: 600;
+}
+
+/* Blank box the counter writes the physical figure into. */
+.slip-table td.col-count {
+  border: 1px solid #95a5a6;
+  min-width: 4.5rem;
+  height: 1.9rem;
+}
+
+.slip-table th.col-count {
+  text-align: right;
+}
+
+.product-title {
+  display: block;
+}
+
+.variant-title {
+  display: block;
+  font-size: 0.85em;
+  color: #5a6c7d;
+}
+
+.flag {
+  display: inline-block;
+  margin-top: 0.2rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid #e67e22;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #b9770e;
+}
+
+.slip-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 1rem;
+  border-top: 1px solid #d5dde5;
+  padding-top: 1rem;
+  margin-top: 1.5rem;
+  font-size: 0.9rem;
+  color: #5a6c7d;
+}
+
+/* ── Print ─────────────────────────────────────────────────────────────────
+   Only the slip goes on paper: the chrome, the form and the on-screen
+   messages are all dropped. */
+
+@media print {
+  @page {
+    margin: 14mm;
+  }
+
+  body {
+    background: white;
+  }
+
+  .sidebar,
+  .sidebar-overlay,
+  .mobile-menu-toggle,
+  header,
+  .no-print {
+    display: none !important;
+  }
+
+  .main-wrapper {
+    margin-left: 0 !important;
+    width: 100% !important;
+    min-height: 0;
+  }
+
+  main {
+    padding: 0;
+    max-width: none;
+  }
+
+  .packing-slip {
+    box-shadow: none;
+    border-radius: 0;
+    padding: 0;
+  }
+
+  .slip-table {
+    font-size: 10pt;
+  }
+
+  .slip-table thead {
+    display: table-header-group;
+  }
+
+  .slip-table tr {
+    break-inside: avoid;
+  }
+
+  .slip-bin {
+    break-inside: auto;
+  }
+
+  .bin-heading {
+    break-after: avoid;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .slip-table tbody tr:nth-child(even) {
+    background-color: transparent;
+  }
+
+  .slip-footer {
+    break-inside: avoid;
+  }
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .slip-header {
+    flex-direction: column;
+  }
+
+  .slip-summary {
+    gap: 1.25rem;
+  }
+
+  .summary-cell {
+    align-items: flex-start;
+  }
+
+  .slip-table {
+    font-size: 0.82rem;
+  }
+
+  .col-barcode {
+    display: none;
+  }
+}
