@@ -158,14 +158,16 @@ main {
   padding-left: 1.2rem;
 }
 
+
 /* ── Packing slip ──────────────────────────────────────────────────────────
-   Laid out for paper first: wide margins, black on white, and a repeated
-   table head so a bin spanning a page break stays readable. */
+   Dense by design: a count sheet is walked with a pen, so the priority is
+   lines per page.  One table, a slim heading row per bin, thin rules instead
+   of fills, and no vertical padding beyond what keeps rows legible. */
 
 .packing-slip {
   background-color: white;
   border-radius: 8px;
-  padding: 1.75rem;
+  padding: 1rem 1.1rem;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   color: #1a1a1a;
 }
@@ -173,105 +175,92 @@ main {
 .slip-header {
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 1rem;
-  border-bottom: 2px solid #2c3e50;
-  padding-bottom: 0.9rem;
-  margin-bottom: 1.25rem;
+  align-items: baseline;
+  gap: 0.4rem 0.9rem;
+  border-bottom: 1.5px solid #2c3e50;
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
 }
 
-.slip-title h2 {
-  margin: 0 0 0.35rem;
-  font-size: 1.4rem;
+.slip-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #2c3e50;
+}
+
+.slip-totals {
+  font-size: 0.85rem;
+  font-weight: 600;
   color: #2c3e50;
 }
 
 .slip-meta {
-  margin: 0.15rem 0;
-  font-size: 0.85rem;
-  color: #5a6c7d;
-}
-
-.slip-summary {
-  display: flex;
-  gap: 1.5rem;
-}
-
-.summary-cell {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-}
-
-.summary-value {
-  font-size: 1.5rem;
-  font-weight: 600;
-  line-height: 1.1;
-  color: #2c3e50;
-}
-
-.summary-label {
   font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: #7f8c8d;
 }
 
-.slip-bin {
-  margin-bottom: 1.5rem;
-  /* Keep a bin's heading with at least the start of its table. */
-  break-inside: avoid-page;
+/* Pattern list is the one thing that can run long; let it wrap last. */
+.slip-header .mono {
+  margin-left: auto;
+  white-space: normal;
+  word-break: break-all;
 }
 
-.bin-heading {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 0.75rem;
-  background-color: #eef2f6;
-  border-left: 4px solid #2c3e50;
-  padding: 0.5rem 0.75rem;
-  margin-bottom: 0.35rem;
+.slip-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.slip-table th,
+.slip-table td {
+  padding: 0.16rem 0.4rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.slip-table thead th {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #7f8c8d;
+  border-bottom: 1px solid #95a5a6;
+  padding-bottom: 0.1rem;
+}
+
+.slip-table tbody td {
+  border-bottom: 1px solid #e8edf1;
+}
+
+/* Bin separator: a rule and a bold label, no block of colour to print. */
+.slip-table tr.bin-heading th {
+  border-top: 1.5px solid #2c3e50;
+  border-bottom: 1px solid #d5dde5;
+  padding-top: 0.3rem;
+  padding-bottom: 0.12rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #1a1a1a;
 }
 
 .bin-name {
-  font-size: 1.15rem;
+  font-size: 0.95rem;
   font-weight: 700;
   letter-spacing: 0.02em;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
 .bin-total {
-  font-size: 0.85rem;
-  color: #5a6c7d;
+  margin-left: 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: #7f8c8d;
 }
 
-.slip-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-}
-
-.slip-table th,
-.slip-table td {
-  border-bottom: 1px solid #d5dde5;
-  padding: 0.45rem 0.6rem;
-  text-align: left;
-  vertical-align: top;
-}
-
-.slip-table th {
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #5a6c7d;
-  border-bottom: 1px solid #95a5a6;
-}
-
-.slip-table tbody tr:nth-child(even) {
-  background-color: #fafbfc;
+.slip-table tr.bin-heading th.col-num {
+  font-weight: 700;
+  text-align: right;
 }
 
 .mono {
@@ -280,16 +269,16 @@ main {
 }
 
 .col-sku {
-  width: 16%;
+  width: 15%;
 }
 
 .col-barcode {
-  width: 15%;
+  width: 13%;
 }
 
 .col-num,
 .col-count {
-  width: 9%;
+  width: 7%;
   text-align: right;
   white-space: nowrap;
 }
@@ -300,46 +289,27 @@ main {
 
 /* Blank box the counter writes the physical figure into. */
 .slip-table td.col-count {
-  border: 1px solid #95a5a6;
-  min-width: 4.5rem;
-  height: 1.9rem;
+  border: 1px solid #b3bfc9;
+  height: 1.3rem;
 }
 
-.slip-table th.col-count {
+.slip-table thead th.col-count {
   text-align: right;
 }
 
-.product-title {
-  display: block;
-}
-
 .variant-title {
-  display: block;
-  font-size: 0.85em;
   color: #5a6c7d;
-}
-
-.flag {
-  display: inline-block;
-  margin-top: 0.2rem;
-  padding: 0.05rem 0.4rem;
-  border: 1px solid #e67e22;
-  border-radius: 3px;
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: #b9770e;
 }
 
 .slip-footer {
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.5rem 1rem;
   border-top: 1px solid #d5dde5;
-  padding-top: 1rem;
-  margin-top: 1.5rem;
-  font-size: 0.9rem;
+  padding-top: 0.5rem;
+  margin-top: 0.7rem;
+  font-size: 0.78rem;
   color: #5a6c7d;
 }
 
@@ -349,7 +319,7 @@ main {
 
 @media print {
   @page {
-    margin: 14mm;
+    margin: 10mm;
   }
 
   body {
@@ -381,10 +351,36 @@ main {
     padding: 0;
   }
 
-  .slip-table {
-    font-size: 10pt;
+  .slip-header h2 {
+    font-size: 11pt;
   }
 
+  .slip-totals {
+    font-size: 8.5pt;
+  }
+
+  .slip-meta {
+    font-size: 7pt;
+  }
+
+  .slip-table {
+    font-size: 8pt;
+  }
+
+  .slip-table th,
+  .slip-table td {
+    padding: 0.4mm 1.2mm;
+  }
+
+  .slip-table td.col-count {
+    height: 4.5mm;
+  }
+
+  .bin-name {
+    font-size: 9pt;
+  }
+
+  /* Column heads reprint at the top of every page. */
   .slip-table thead {
     display: table-header-group;
   }
@@ -393,41 +389,26 @@ main {
     break-inside: avoid;
   }
 
-  .slip-bin {
-    break-inside: auto;
-  }
-
-  .bin-heading {
+  /* Never strand a bin label at the foot of a page. */
+  .slip-table tr.bin-heading {
     break-after: avoid;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-
-  .slip-table tbody tr:nth-child(even) {
-    background-color: transparent;
+    break-inside: avoid;
   }
 
   .slip-footer {
     break-inside: avoid;
+    font-size: 8pt;
   }
 }
 
 /* Responsive */
 @media (max-width: 768px) {
-  .slip-header {
-    flex-direction: column;
-  }
-
-  .slip-summary {
-    gap: 1.25rem;
-  }
-
-  .summary-cell {
-    align-items: flex-start;
+  .slip-header .mono {
+    margin-left: 0;
   }
 
   .slip-table {
-    font-size: 0.82rem;
+    font-size: 0.76rem;
   }
 
   .col-barcode {

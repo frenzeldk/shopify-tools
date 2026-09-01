@@ -1625,34 +1625,47 @@ def create_app() -> Flask:
         groups: list[dict] = []
         by_bin: dict[str, dict] = {}
         total_units = 0
+        counted_skus = 0
         missing_in_shopify = 0
+        skipped_empty = 0
 
         for item in bin_items:
             variant = stock.get(item["sku"])
+            # Only stock Shopify still knows about and says is non-empty is worth
+            # walking to.  Both counts are reported back so a bin full of skipped
+            # SKUs reads as stale Shipmondo data rather than a short sheet.
             if variant is None:
                 missing_in_shopify += 1
-            on_hand = variant["on_hand"] if variant else None
-            total_units += on_hand or 0
+                continue
+            on_hand = variant["on_hand"]
+            if on_hand == 0:
+                skipped_empty += 1
+                continue
+            total_units += on_hand
+            counted_skus += 1
 
             group = by_bin.get(item["bin"])
             if group is None:
                 group = {"bin": item["bin"], "lines": [], "on_hand": 0}
                 by_bin[item["bin"]] = group
                 groups.append(group)
-            group["on_hand"] += on_hand or 0
+            group["on_hand"] += on_hand
             group["lines"].append({
                 "sku": item["sku"],
-                # Shipmondo's item name is the fallback for SKUs Shopify no
-                # longer has, so the line is still countable.
-                "product_title": (variant or {}).get("product_title") or item["name"],
-                "variant_title": (variant or {}).get("variant_title") or "",
-                "vendor": (variant or {}).get("vendor") or "",
-                "barcode": (variant or {}).get("barcode") or item["barcode"],
+                "product_title": variant["product_title"],
+                "variant_title": variant["variant_title"],
+                "vendor": variant["vendor"],
+                "barcode": variant["barcode"] or item["barcode"],
                 "on_hand": on_hand,
-                "available": (variant or {}).get("available"),
-                "committed": (variant or {}).get("committed"),
-                "in_shopify": variant is not None,
+                "available": variant["available"],
+                "committed": variant["committed"],
             })
+
+        if not groups:
+            return jsonify({
+                "error": f"None of the {len(bin_items)} SKUs in those bins has "
+                         "stock in Shopify; there is nothing to count."
+            }), 404
 
         return jsonify({
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1660,8 +1673,9 @@ def create_app() -> Flask:
             "bins": groups,
             "totals": {
                 "bins": len(groups),
-                "skus": len(bin_items),
+                "skus": counted_skus,
                 "units": total_units,
+                "skipped_empty": skipped_empty,
                 "missing_in_shopify": missing_in_shopify,
             },
             "patterns": patterns[:50],

@@ -73,71 +73,51 @@
       <!-- Packing slip: the only thing that reaches the printer. -->
       <div v-if="sheet" class="packing-slip">
         <div class="slip-header">
-          <div class="slip-title">
-            <h2>Stock Count Sheet</h2>
-            <p class="slip-meta">
-              [[ sheet.pattern_count ]] bin pattern[[ sheet.pattern_count === 1 ? '' : 's' ]]:
-              <span class="mono">[[ patternSummary ]]</span>
-            </p>
-            <p class="slip-meta">
-              Printed [[ formatDateTime(sheet.generated_at) ]] ·
-              bins as of [[ formatDateTime(sheet.bins_cache_updated) ]]
-            </p>
-          </div>
-          <div class="slip-summary">
-            <div class="summary-cell">
-              <span class="summary-value">[[ sheet.totals.bins ]]</span>
-              <span class="summary-label">Bins</span>
-            </div>
-            <div class="summary-cell">
-              <span class="summary-value">[[ sheet.totals.skus ]]</span>
-              <span class="summary-label">SKUs</span>
-            </div>
-            <div class="summary-cell">
-              <span class="summary-value">[[ sheet.totals.units ]]</span>
-              <span class="summary-label">Units expected</span>
-            </div>
-          </div>
+          <h2>Stock Count Sheet</h2>
+          <span class="slip-totals">
+            [[ sheet.totals.bins ]] bins · [[ sheet.totals.skus ]] SKUs ·
+            [[ sheet.totals.units ]] units
+          </span>
+          <span class="slip-meta mono">[[ patternSummary ]]</span>
+          <span class="slip-meta">[[ formatDateTime(sheet.generated_at) ]]</span>
         </div>
 
-        <div v-for="group in sheet.bins" :key="group.bin" class="slip-bin">
-          <div class="bin-heading">
-            <span class="bin-name">[[ group.bin ]]</span>
-            <span class="bin-total">
-              [[ group.lines.length ]] SKU[[ group.lines.length === 1 ? '' : 's' ]] ·
-              [[ group.on_hand ]] unit[[ group.on_hand === 1 ? '' : 's' ]] expected
-            </span>
-          </div>
-          <table class="slip-table">
-            <thead>
-              <tr>
-                <th class="col-sku">SKU</th>
-                <th class="col-product">Product</th>
-                <th class="col-barcode">Barcode</th>
-                <th class="col-num">Expected</th>
-                <th class="col-count">Counted</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="line in group.lines" :key="line.sku">
-                <td class="mono">[[ line.sku ]]</td>
-                <td>
-                  <span class="product-title">[[ line.product_title ]]</span>
-                  <span v-if="line.variant_title" class="variant-title">[[ line.variant_title ]]</span>
-                  <span v-if="!line.in_shopify" class="flag">not in Shopify</span>
-                </td>
-                <td class="mono col-barcode">[[ line.barcode ]]</td>
-                <td class="col-num">[[ line.on_hand === null ? '—' : line.on_hand ]]</td>
-                <td class="col-count"></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <!-- One table, one tbody per bin: the column head then repeats itself
+             on every printed page instead of once per bin. -->
+        <table class="slip-table">
+          <thead>
+            <tr>
+              <th class="col-sku">SKU</th>
+              <th class="col-product">Product</th>
+              <th class="col-barcode">Barcode</th>
+              <th class="col-num">Exp.</th>
+              <th class="col-count">Counted</th>
+            </tr>
+          </thead>
+          <tbody v-for="group in sheet.bins" :key="group.bin">
+            <tr class="bin-heading">
+              <th colspan="3">
+                <span class="bin-name">[[ group.bin ]]</span>
+                <span class="bin-total">[[ group.lines.length ]] SKU[[ group.lines.length === 1 ? '' : 's' ]]</span>
+              </th>
+              <th class="col-num">[[ group.on_hand ]]</th>
+              <th class="col-count"></th>
+            </tr>
+            <tr v-for="line in group.lines" :key="line.sku">
+              <td class="mono col-sku">[[ line.sku ]]</td>
+              <td class="col-product">[[ line.product_title ]]<span
+                v-if="line.variant_title" class="variant-title"> · [[ line.variant_title ]]</span></td>
+              <td class="mono col-barcode">[[ line.barcode ]]</td>
+              <td class="col-num">[[ line.on_hand ]]</td>
+              <td class="col-count"></td>
+            </tr>
+          </tbody>
+        </table>
 
         <div class="slip-footer">
-          <span>Counted by: ______________________</span>
-          <span>Date: ______________</span>
-          <span>Signature: ______________________</span>
+          <span>Counted by: _____________________</span>
+          <span>Date: ____________</span>
+          <span>Signature: _____________________</span>
         </div>
       </div>
 {% endblock %}
@@ -173,11 +153,18 @@
                 'No bin matched: ' + this.sheet.unmatched_patterns.join(', ')
               );
             }
+            if (this.sheet.totals.skipped_empty) {
+              warnings.push(
+                this.sheet.totals.skipped_empty +
+                ' SKU(s) in these bins are empty in Shopify and were left off ' +
+                'the slip.'
+              );
+            }
             if (this.sheet.totals.missing_in_shopify) {
               warnings.push(
                 this.sheet.totals.missing_in_shopify +
-                ' SKU(s) sit in these bins but no longer exist in Shopify; ' +
-                'they are on the slip with no expected quantity.'
+                ' SKU(s) in these bins no longer exist in Shopify and were left ' +
+                'off the slip — the bin data for them is stale.'
               );
             }
             if (this.sheet.pattern_errors.length) {
