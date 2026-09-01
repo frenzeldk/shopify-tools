@@ -93,11 +93,11 @@
               <th class="col-num">Exp.</th>
             </tr>
           </thead>
-          <tbody v-for="group in sheet.bins" :key="group.bin">
+          <tbody v-for="group in binGroups" :key="group.bin">
             <tr class="bin-heading">
               <th colspan="4"><span class="bin-name">[[ group.bin ]]</span></th>
             </tr>
-            <tr v-for="line in group.lines" :key="line.sku">
+            <tr v-for="line in group.lines" :key="line.sku" :class="{ 'row-alt': line.alt }">
               <td class="mono col-sku">[[ line.sku ]]</td>
               <td class="col-product">[[ line.product_title ]]<span
                 v-if="line.variant_title" class="variant-title"> · [[ line.variant_title ]]</span></td>
@@ -132,6 +132,18 @@
           };
         },
         computed: {
+          // The print stripe has to alternate across the whole sheet: bins are
+          // separate <tbody> elements and their headings are hidden on paper, so
+          // a CSS :nth-child stripe would restart at every bin and collide at
+          // the seams.  Parity is therefore counted here, once, over all rows.
+          binGroups() {
+            if (!this.sheet) return [];
+            let row = 0;
+            return this.sheet.bins.map(group => ({
+              bin: group.bin,
+              lines: group.lines.map(line => ({ ...line, alt: row++ % 2 === 1 }))
+            }));
+          },
           patternSummary() {
             if (!this.sheet) return '';
             const shown = this.sheet.patterns.join(', ');

@@ -362,6 +362,15 @@ main {
     break-inside: avoid;
   }
 
+  /* Banded rows so the eye keeps its place across a dense sheet.  Kept very
+     light so 8pt text stays crisp on a laser printer, and forced on because
+     browsers drop backgrounds from printed output by default. */
+  .slip-table tbody tr.row-alt td {
+    background-color: #eef1f4;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
   /* Bin labels are a screen-only aid; paper gets an unbroken list. */
   .slip-table tr.bin-heading {
     display: none;
