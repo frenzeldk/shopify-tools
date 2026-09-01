@@ -223,6 +223,20 @@ class FetchOnHandBySkus(unittest.TestCase):
         result = shopify.fetch_on_hand_by_skus(["SKU-1"])
         self.assertEqual(list(result), ["SKU-1"])
 
+    def test_placeholder_variant_title_is_dropped(self):
+        # A product without options has one variant Shopify names "Default
+        # Title"; that is noise on a count sheet.
+        variant = self._variant("SKU-1", 7, 5, 2)
+        variant["node"]["title"] = "Default Title"
+        self._stub(lambda q: [variant])
+        self.assertEqual(shopify.fetch_on_hand_by_skus(["SKU-1"])["SKU-1"]["variant_title"], "")
+
+    def test_real_variant_titles_are_kept(self):
+        self._stub(lambda q: [self._variant("SKU-1", 7, 5, 2)])
+        self.assertEqual(
+            shopify.fetch_on_hand_by_skus(["SKU-1"])["SKU-1"]["variant_title"], "Green / M"
+        )
+
     def test_unknown_skus_are_simply_absent(self):
         self._stub(lambda q: [self._variant("SKU-1", 7, 5, 2)])
         result = shopify.fetch_on_hand_by_skus(["SKU-1", "SKU-GONE"])

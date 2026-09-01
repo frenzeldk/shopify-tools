@@ -401,6 +401,10 @@ query ($cursor: String, $query: String!) {
 # `OR` chain also costs more query points than several narrow ones.
 SKU_QUERY_BATCH = 40
 
+# What Shopify calls the sole variant of a product without options.  It carries
+# no information, so it is reported as no variant title at all.
+_PLACEHOLDER_VARIANT_TITLE = "Default Title"
+
 
 def _sku_query_term(sku: str) -> str:
     """Quote one SKU for the variant search query."""
@@ -460,9 +464,12 @@ def fetch_on_hand_by_skus(skus: list[str]) -> dict[str, dict]:
                     })
 
                 product = node.get("product") or {}
+                variant_title = node.get("title") or ""
+                if variant_title == _PLACEHOLDER_VARIANT_TITLE:
+                    variant_title = ""
                 found[sku] = {
                     "sku": sku,
-                    "variant_title": node.get("title") or "",
+                    "variant_title": variant_title,
                     "product_title": product.get("title") or "",
                     "vendor": product.get("vendor") or "",
                     "barcode": node.get("barcode") or "",

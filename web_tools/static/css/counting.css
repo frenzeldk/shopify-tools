@@ -233,7 +233,7 @@ main {
   border-bottom: 1px solid #e8edf1;
 }
 
-/* Bin separator: a rule and a bold label, no block of colour to print. */
+/* Bin separator on screen; hidden in print (see the print block below). */
 .slip-table tr.bin-heading th {
   border-top: 1.5px solid #2c3e50;
   border-bottom: 1px solid #d5dde5;
@@ -251,18 +251,6 @@ main {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
-.bin-total {
-  margin-left: 0.5rem;
-  font-size: 0.72rem;
-  font-weight: 400;
-  color: #7f8c8d;
-}
-
-.slip-table tr.bin-heading th.col-num {
-  font-weight: 700;
-  text-align: right;
-}
-
 .mono {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   white-space: nowrap;
@@ -276,8 +264,7 @@ main {
   width: 13%;
 }
 
-.col-num,
-.col-count {
+.col-num {
   width: 7%;
   text-align: right;
   white-space: nowrap;
@@ -285,16 +272,6 @@ main {
 
 .slip-table td.col-num {
   font-weight: 600;
-}
-
-/* Blank box the counter writes the physical figure into. */
-.slip-table td.col-count {
-  border: 1px solid #b3bfc9;
-  height: 1.3rem;
-}
-
-.slip-table thead th.col-count {
-  text-align: right;
 }
 
 .variant-title {
@@ -372,10 +349,6 @@ main {
     padding: 0.4mm 1.2mm;
   }
 
-  .slip-table td.col-count {
-    height: 4.5mm;
-  }
-
   .bin-name {
     font-size: 9pt;
   }
@@ -389,10 +362,9 @@ main {
     break-inside: avoid;
   }
 
-  /* Never strand a bin label at the foot of a page. */
+  /* Bin labels are a screen-only aid; paper gets an unbroken list. */
   .slip-table tr.bin-heading {
-    break-after: avoid;
-    break-inside: avoid;
+    display: none;
   }
 
   .slip-footer {

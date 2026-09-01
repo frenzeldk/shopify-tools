@@ -1646,10 +1646,9 @@ def create_app() -> Flask:
 
             group = by_bin.get(item["bin"])
             if group is None:
-                group = {"bin": item["bin"], "lines": [], "on_hand": 0}
+                group = {"bin": item["bin"], "lines": []}
                 by_bin[item["bin"]] = group
                 groups.append(group)
-            group["on_hand"] += on_hand
             group["lines"].append({
                 "sku": item["sku"],
                 "product_title": variant["product_title"],
