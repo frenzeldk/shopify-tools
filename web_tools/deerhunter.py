@@ -1,25 +1,28 @@
 """
-Bulk create Deerhunter products from a CSV file downloaded via FTP.
+Bulk create Deerhunter products from a CSV file downloaded via FTPS.
 """
 import os
 import csv
 import io
-import ftplib
 from typing import List, Dict
+
+import secure_ftp
 
 _FTP_HOST = os.environ.get("FTP_HOST")
 _FTP_USERNAME = os.environ.get("FTP_USERNAME")
 _FTP_PASSWORD = os.environ.get("FTP_PASSWORD")
 _FTP_REMOTE_PATH = os.environ.get("FTP_REMOTE_PATH")
+_FTP_PORT = int(os.environ.get("FTP_PORT", 21))
+_FTP_TLS_VERIFY = (os.environ.get("FTP_TLS_VERIFY", "1").strip().lower()
+                   in ("1", "true", "yes", "on"))
 
 def _fetch_csv_from_ftp(host: str, username: str, password: str, remote_path: str) -> List[Dict]:
-    """Download a CSV file via FTP and return its contents as a list of dicts."""
-    buffer = io.BytesIO()
-    with ftplib.FTP(host) as ftp:
-        ftp.login(user=username, passwd=password)
-        ftp.retrbinary(f"RETR {remote_path}", buffer.write)
-    buffer.seek(0)
-    lines = buffer.read().decode("utf-8").splitlines(keepends=True)
+    """Download a CSV file over FTPS and return its contents as a list of dicts."""
+    raw = secure_ftp.fetch_bytes(
+        host, username, password, remote_path,
+        port=_FTP_PORT, verify=_FTP_TLS_VERIFY,
+    )
+    lines = raw.decode("utf-8").splitlines(keepends=True)
     reader = csv.DictReader(io.StringIO("".join(lines[1:])), delimiter=";", quotechar='"')
     return list(reader)
 

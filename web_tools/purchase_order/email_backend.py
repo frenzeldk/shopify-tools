@@ -10,13 +10,13 @@ Body templates use $-style placeholders:
 """
 from __future__ import annotations
 
-import os
 from datetime import date
 from string import Template
 from typing import Callable
 
-from . import config as cfg
+from . import config as cfg, security
 from .common import OrderError, build_order_workbook, make_order_number
+from .templates import safe_attachment_name
 
 
 def _format_order_lines(items: list[dict]) -> str:
@@ -58,7 +58,12 @@ def place_order(
     company = cfg.defaults().get("company_name", "")
     prefix = cfg.defaults().get("order_number_prefix", "WT")
 
-    to_email = (os.environ.get(ecfg.get("to_env") or "") or ecfg.get("to") or "").strip()
+    to_env = ecfg.get("to_env") or ""
+    try:
+        to_from_env = security.resolve_env(to_env) if to_env else ""
+    except security.PolicyError as exc:
+        raise OrderError(str(exc), status=exc.status) from exc
+    to_email = (to_from_env or ecfg.get("to") or "").strip()
     if not to_email:
         env_hint = f" (set the {ecfg.get('to_env')} environment variable)" if ecfg.get("to_env") else ""
         raise OrderError(f"No ordering email address configured for {vendor}{env_hint}.", status=400)
@@ -80,7 +85,11 @@ def place_order(
     attachments = None
     att = ecfg.get("attachment") or {}
     if att.get("enabled", True):
-        filename = (att.get("filename") or "PO_{order_number}.xlsx").format(**fmt)
+        # Re-sanitised after formatting: a placeholder value could otherwise
+        # reintroduce a separator into an already-validated template name.
+        filename = safe_attachment_name(
+            (att.get("filename") or "PO_{order_number}.xlsx").format(**fmt)
+        )
         attachments = [(build_order_workbook(items, columns), filename)]
 
     result = {

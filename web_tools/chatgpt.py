@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 
 _OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
+# Cost controls: every call here is billable, so bound both what we send and
+# what we ask the model to generate.
+MAX_OUTPUT_TOKENS = int(os.environ.get("OPENAI_MAX_OUTPUT_TOKENS", 4000))
+MAX_INPUT_CHARS = int(os.environ.get("OPENAI_MAX_INPUT_CHARS", 40000))
+_REQUEST_TIMEOUT = int(os.environ.get("OPENAI_TIMEOUT", 90))
+
+
+def _bounded(text: str) -> str:
+    """Truncate model input to the configured character budget."""
+    if len(text) <= MAX_INPUT_CHARS:
+        return text
+    logger.warning(
+        "Truncating model input from %d to %d characters", len(text), MAX_INPUT_CHARS
+    )
+    return text[:MAX_INPUT_CHARS]
+
 # Initialise the client once (reads OPENAI_API_KEY from env automatically)
 _client: OpenAI | None = None
 
@@ -98,11 +114,11 @@ def fetch_and_translate_vendor_page(url: str, product_name: str = "") -> dict:
         response = _get_client().responses.create(
             model=_OPENAI_MODEL,
             instructions=_SYSTEM_PROMPT,
-            input=user_message,
+            input=_bounded(user_message),
             temperature=0.3,
-            max_output_tokens=10000,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
             store=False,
-            timeout=90,
+            timeout=_REQUEST_TIMEOUT,
         )
 
         translated = _strip_markdown_fences((response.output_text or "").strip())
@@ -151,11 +167,11 @@ def translate_plain_text(text: str, product_name: str = "") -> dict:
         response = _get_client().responses.create(
             model=_OPENAI_MODEL,
             instructions=_SYSTEM_PROMPT,
-            input=user_message,
+            input=_bounded(user_message),
             temperature=0.3,
-            max_output_tokens=10000,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
             store=False,
-            timeout=90,
+            timeout=_REQUEST_TIMEOUT,
         )
 
         translated = _strip_markdown_fences((response.output_text or "").strip())
@@ -224,11 +240,11 @@ def translate_product_data(product_fields: dict) -> dict:
         response = _get_client().responses.create(
             model=_OPENAI_MODEL,
             instructions=_SYSTEM_PROMPT,
-            input=user_message,
+            input=_bounded(user_message),
             temperature=0.3,
-            max_output_tokens=10000,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
             store=False,
-            timeout=90,
+            timeout=_REQUEST_TIMEOUT,
         )
 
         translated = _strip_markdown_fences((response.output_text or "").strip())

@@ -1,8 +1,10 @@
 import os
+import re
 import shutil
 import tempfile
 import logging
 from html import escape
+from pathlib import Path
 from O365 import Account
 from flask import render_template
 from jinja2 import TemplateError
@@ -135,6 +137,40 @@ def send_template_email(
         return False, str(exc)
 
 
+# Anything outside this set is dropped from a staged attachment filename, so a
+# caller-influenced name can never be interpreted as a path by os.path.join.
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9 ._+#()\[\]-]")
+
+
+def _stage_attachment(tmp_dir: str, filename: str, content: bytes) -> str:
+    """Write ``content`` into ``tmp_dir`` under a sanitised basename.
+
+    The name is reduced to a bare basename, stripped of anything a filesystem
+    could read as a directory, drive or device, and the resolved path is
+    verified to still sit inside ``tmp_dir`` before the file is created
+    exclusively with owner-only permissions.
+
+    Raises:
+        ValueError: When the name cannot be reduced to a safe basename or the
+            resolved path escapes ``tmp_dir``.
+    """
+    base = os.path.basename(str(filename or "").replace("\\", "/").strip())
+    base = _UNSAFE_FILENAME_CHARS.sub("_", base).lstrip(".").strip()
+    if not base:
+        raise ValueError(f"Refusing to write attachment with unusable name {filename!r}")
+    base = base[:128]
+
+    directory = Path(tmp_dir).resolve()
+    path = (directory / base).resolve()
+    if path.parent != directory:
+        raise ValueError(f"Refusing to write attachment outside {tmp_dir}: {filename!r}")
+
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(content)
+    return str(path)
+
+
 def send_plaintext_email(
     to_email: str,
     subject: str,
@@ -173,9 +209,7 @@ def send_plaintext_email(
             # O365 attaches by file path, so stage the bytes on disk first.
             tmp_dir = tempfile.mkdtemp(prefix="o365_attach_")
             for content, filename in attachments:
-                path = os.path.join(tmp_dir, filename)
-                with open(path, "wb") as handle:
-                    handle.write(content)
+                path = _stage_attachment(tmp_dir, filename, content)
                 msg.attachments.add(path)
 
         msg.send()

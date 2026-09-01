@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from . import api_backend, config as _config, email_backend
+from . import api_backend, config as _config, email_backend, security
 from .common import (
     OrderError,
     build_order_workbook,
@@ -119,6 +119,10 @@ def place_order(
     norm_items = normalize_items(items)
     if not norm_items:
         raise OrderError("No items with a valid SKU and positive quantity.", status=400)
+    try:
+        security.check_item_count(norm_items)
+    except security.PolicyError as exc:
+        raise OrderError(str(exc), status=exc.status) from exc
     norm_columns = normalize_columns(columns)
 
     if method == "email":

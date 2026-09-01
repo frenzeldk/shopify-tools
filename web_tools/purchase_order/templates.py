@@ -6,18 +6,71 @@ owns the validation/normalisation of a template before it is persisted.
 """
 from __future__ import annotations
 
+import re
+
+from . import security
 from .common import OrderError
 
 # API types accepted by the api_backend dispatcher.
 _OPENAPI_TYPES = ("openapi", "rest", "swagger", "openapi3")
 _DEFAULT_ATTACHMENT_NAME = "PO_{order_number}.xlsx"
 
+# An attachment name is a display name only — never a path.  Anything that a
+# filesystem could interpret as a directory, a drive, a stream or a terminator
+# is rejected outright rather than silently rewritten, so a template author
+# gets told what is wrong instead of quietly getting a different file.
+_ATTACHMENT_MAX_LEN = 128
+_ATTACHMENT_FORBIDDEN = ("/", "\\", "\x00", ":")
+_WINDOWS_RESERVED = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+# Placeholders may only be substituted with these characters, so a formatted
+# name cannot grow a separator that the template itself did not contain.
+_ATTACHMENT_SAFE = re.compile(r"^[A-Za-z0-9 ._{}()\[\]#+-]+$")
+
+
+def safe_attachment_name(name: str) -> str:
+    """Return ``name`` if it is a safe bare filename, else raise.
+
+    Rejects absolute paths, any separator, traversal segments, NUL/control
+    characters, Windows drive and device names, and over-long names.
+    """
+    candidate = (name or "").strip()
+    if not candidate:
+        raise OrderError("An attachment filename is required.", status=400)
+    if len(candidate) > _ATTACHMENT_MAX_LEN:
+        raise OrderError(
+            f"The attachment filename may be at most {_ATTACHMENT_MAX_LEN} characters.",
+            status=400,
+        )
+    if any(ch in candidate for ch in _ATTACHMENT_FORBIDDEN) or any(ch < " " for ch in candidate):
+        raise OrderError(
+            "The attachment filename must be a plain filename without path "
+            "separators, drive letters or control characters.",
+            status=400,
+        )
+    if candidate in (".", "..") or candidate.startswith("."):
+        raise OrderError("The attachment filename must not start with a dot.", status=400)
+    if not _ATTACHMENT_SAFE.match(candidate):
+        raise OrderError(
+            "The attachment filename may only contain letters, digits, spaces and "
+            "the characters . _ - + # ( ) [ ] { }.",
+            status=400,
+        )
+    if candidate.rsplit(".", 1)[0].lower() in _WINDOWS_RESERVED:
+        raise OrderError("That attachment filename is reserved.", status=400)
+    return candidate
+
 
 def _normalize_attachment(att: dict | None) -> dict:
     att = att or {}
     return {
         "enabled": bool(att.get("enabled", True)),
-        "filename": (str(att.get("filename") or "").strip() or _DEFAULT_ATTACHMENT_NAME),
+        "filename": safe_attachment_name(
+            str(att.get("filename") or "").strip() or _DEFAULT_ATTACHMENT_NAME
+        ),
     }
 
 
@@ -52,6 +105,11 @@ def validate_template(name: str, data: dict) -> dict:
             raise OrderError(
                 "Email templates need a recipient address (or a recipient env var).", status=400
             )
+        if to_env:
+            try:
+                security.check_env_name(to_env)
+            except security.PolicyError as exc:
+                raise OrderError(str(exc), status=exc.status) from exc
         subject = (str(email.get("subject") or "")).strip()
         if not subject:
             raise OrderError("An email subject is required.", status=400)
@@ -82,6 +140,12 @@ def validate_template(name: str, data: dict) -> dict:
                 raise OrderError("GraphQL API templates need place_order.mutation.", status=400)
         elif not place.get("path"):
             raise OrderError("OpenAPI templates need place_order.path.", status=400)
+        # An API template chooses a destination and reads credentials, so it is
+        # held to the outbound policy before it is ever stored.
+        try:
+            security.validate_api_template(api)
+        except security.PolicyError as exc:
+            raise OrderError(str(exc), status=exc.status) from exc
         out["api"] = api
         return out
 

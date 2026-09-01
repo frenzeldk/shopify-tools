@@ -17,6 +17,7 @@ Public surface used by app.py:
   - parse_vendor_csv(csv_content)      — parse the Helikon-Tex CSV export
   - fetch_vendor_products()            — API-backed replacement for parse_vendor_csv
   - get_products(skus)
+  - get_stocks(skus)                   — HTTPS replacement for the SOAP stock feed
   - EntireMAPIError                    — raised on API/business errors
 
 Vendor *ordering* (addresses, stock/price checks, place order) is no longer
@@ -37,6 +38,8 @@ from typing import Any, Iterable
 
 import requests
 
+import netguard
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,9 +49,24 @@ _HELIKON_BASE_URL = os.environ.get("HELIKON_BASE_URL")
 _HELIKON_AUTH = (os.environ.get("HELIKON_USER"), os.environ.get("HELIKON_PASSWORD"))
 _helikon_listing_cache: list[str] | None = None
 
+# Portal filenames are plain basenames; anything else would let a caller steer
+# the request off the configured base URL.
+_SAFE_IMAGE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
+# The directory index is HTML; cap it so a hostile/broken portal cannot exhaust
+# memory here.
+_LISTING_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _safe_image_filename(filename: str) -> str:
+    """Validate a portal image filename; raise ``ValueError`` when unusable."""
+    name = (filename or "").strip()
+    if not _SAFE_IMAGE_NAME.match(name) or ".." in name:
+        raise ValueError(f"Invalid Helikon image filename: {filename!r}")
+    return name
+
 
 def helikon_image_url(filename: str) -> str:
-    return _HELIKON_BASE_URL + filename
+    return _HELIKON_BASE_URL + _safe_image_filename(filename)
 
 
 def helikon_image_basic_auth() -> tuple[str | None, str | None]:
@@ -60,7 +78,10 @@ def get_helikon_listing() -> list[str]:
     global _helikon_listing_cache
     if _helikon_listing_cache is not None:
         return _helikon_listing_cache
-    resp = requests.get(_HELIKON_BASE_URL, auth=_HELIKON_AUTH, timeout=30)
+    resp = netguard.request(
+        "GET", _HELIKON_BASE_URL, auth=_HELIKON_AUTH, timeout=30,
+        max_bytes=_LISTING_MAX_BYTES,
+    )
     resp.raise_for_status()
     filenames = re.findall(
         r'href="([^"?/][^"]*\.(?:jpg|jpeg|png|webp))"',
@@ -113,12 +134,10 @@ def stage_helikon_images(filenames: list[str]) -> dict[str, str | None]:
 
     result: dict[str, str | None] = {}
     for fname in filenames:
-        url = _HELIKON_BASE_URL + fname
         try:
-            resp = requests.get(url, auth=_HELIKON_AUTH, timeout=30)
-            resp.raise_for_status()
-            mime = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-            resource_url = staged_upload_with_fallback(fname, resp.content, mime)
+            url = helikon_image_url(fname)
+            content, mime = netguard.fetch_image(url, auth=_HELIKON_AUTH, timeout=30)
+            resource_url = staged_upload_with_fallback(fname, content, mime)
             result[fname] = resource_url
         except Exception as exc:
             logger.warning("stage_helikon_images: failed to upload %s: %s", fname, exc)
@@ -129,6 +148,11 @@ def stage_helikon_images(filenames: list[str]) -> dict[str, str | None]:
 # ── Entire-M B2B API client ───────────────────────────────────────────────────
 
 _API_BASE_URL = (os.environ.get("ENTIRE_M_BASE_URL") or "https://api-sandbox.entirem.com").rstrip("/")
+if not _API_BASE_URL.startswith("https://"):
+    raise RuntimeError(
+        "ENTIRE_M_BASE_URL must be an https:// URL — vendor credentials and stock "
+        "data may not travel in cleartext."
+    )
 _API_CLIENT_ID = os.environ.get("ENTIRE_M_CLIENT_ID")
 _API_CLIENT_SECRET = os.environ.get("ENTIRE_M_CLIENT_SECRET")
 _API_LANGUAGE = os.environ.get("ENTIRE_M_LANGUAGE", "EN")
@@ -283,6 +307,38 @@ def get_products(skus: Iterable[str], language: str | None = None) -> list[dict]
             break
         page += 1
     return out
+
+
+def get_stocks(skus: Iterable[str], *, batch_size: int = 500) -> dict[str, float]:
+    """POST /api/v1/stocks — return ``{sku: available quantity}``.
+
+    This is the HTTPS replacement for the legacy cleartext SOAP stock feed used
+    by ``vendor_sync/entirem_sync.py``.  Unknown SKUs are simply absent from the
+    result, so callers can treat "missing" and "out of stock" separately.
+    """
+    wanted = [s for s in dict.fromkeys(skus) if s]
+    stock: dict[str, float] = {}
+    for start in range(0, len(wanted), batch_size):
+        batch = wanted[start:start + batch_size]
+        payload = _request(
+            "POST",
+            "/api/v1/stocks",
+            json_body={"items": [{"sku": s} for s in batch]},
+        )
+        value = _pick(payload, "value")
+        rows = value if isinstance(value, list) else (
+            _pick(value, "stocks", "items", default=[]) if isinstance(value, dict) else []
+        )
+        for row in rows or []:
+            sku = _pick(row, "sku")
+            quantity = _pick(row, "quantity", "onStock", "available")
+            if not sku or quantity is None:
+                continue
+            try:
+                stock[str(sku)] = float(quantity)
+            except (TypeError, ValueError):
+                continue
+    return stock
 
 
 # ── Vendor catalog (drop-in replacement for the legacy Helikon CSV export) ────

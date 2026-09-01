@@ -14,13 +14,12 @@ currency live in config, so a new B2B vendor of the same shape needs no code.
 """
 from __future__ import annotations
 
-import os
 import threading
 from typing import Any
 
 import requests
 
-from . import config as cfg
+from . import config as cfg, security
 from .common import (
     OrderError,
     dig,
@@ -41,10 +40,13 @@ class RestClient:
     def __init__(self, vendor: str, api: dict):
         self.vendor = vendor
         self.api = api
+        base_url_env = api.get("base_url_env")
         self.base_url = (
-            os.environ.get(api.get("base_url_env") or "") or api.get("base_url") or ""
+            (security.resolve_env(base_url_env) if base_url_env else "")
+            or api.get("base_url")
+            or ""
         ).rstrip("/")
-        self.timeout = api.get("timeout", 60)
+        self.timeout = security.clamp_timeout(api.get("timeout", 30))
         self.envelope = api.get("envelope") or {}
         self.auth = api.get("auth") or {}
         self._lock = threading.Lock()
@@ -59,7 +61,7 @@ class RestClient:
                 f"{self.vendor} API credentials not configured (check the login env vars).",
                 status=400,
             )
-        resp = requests.request(
+        resp = security.safe_request(
             login.get("method", "POST"),
             f"{self.base_url}{login['path']}",
             json=body,
@@ -84,7 +86,7 @@ class RestClient:
                 self._cached_token = self._login()
                 return self._cached_token
         if atype == "bearer":
-            return os.environ.get(self.auth.get("token_env") or "", "")
+            return security.resolve_env(self.auth.get("token_env") or "", "")
         return None
 
     def _headers(self, token: str | None) -> dict:
@@ -102,8 +104,8 @@ class RestClient:
     def _basic(self):
         if self.auth.get("type") == "basic":
             return (
-                os.environ.get(self.auth.get("username_env") or "", ""),
-                os.environ.get(self.auth.get("password_env") or "", ""),
+                security.resolve_env(self.auth.get("username_env") or "", ""),
+                security.resolve_env(self.auth.get("password_env") or "", ""),
             )
         return None
 
@@ -115,7 +117,7 @@ class RestClient:
         resp = None
         for attempt in (1, 2):
             token = self._token(force=(attempt == 2))
-            resp = requests.request(
+            resp = security.safe_request(
                 method, url, json=json_body, params=params,
                 headers=self._headers(token), auth=basic, timeout=self.timeout,
             )
@@ -251,6 +253,11 @@ def _step_price_minimum(client: RestClient, step: dict, orderable: list[dict], b
         if int(dig(payload, paginate.get("pages_left_path") or ["value", "pagesLeft"]) or 0) <= 0:
             break
         page += 1
+        if page > security.max_pages():
+            raise OrderError(
+                f"{client.vendor} price lookup exceeded {security.max_pages()} pages; aborting.",
+                status=502,
+            )
 
     _validate_minimum(step, orderable, blocked, price_map)
 
@@ -379,17 +386,20 @@ class GraphQLClient:
     def __init__(self, vendor: str, api: dict):
         self.vendor = vendor
         self.api = api
+        base_url_env = api.get("base_url_env")
         self.endpoint = (
-            os.environ.get(api.get("base_url_env") or "") or api.get("base_url") or ""
+            (security.resolve_env(base_url_env) if base_url_env else "")
+            or api.get("base_url")
+            or ""
         ).rstrip("/")
-        self.timeout = api.get("timeout", 60)
+        self.timeout = security.clamp_timeout(api.get("timeout", 30))
         self.auth = api.get("auth") or {}
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         atype = self.auth.get("type", "none")
         if atype == "bearer":
-            token = os.environ.get(self.auth.get("token_env") or "", "")
+            token = security.resolve_env(self.auth.get("token_env") or "", "")
             headers[self.auth.get("header", "Authorization")] = f"{self.auth.get('scheme', 'Bearer')} {token}".strip()
         elif atype == "header":
             ctx = {"fmt": {}, "refs": {}, "items": []}
@@ -400,13 +410,14 @@ class GraphQLClient:
     def _basic(self):
         if self.auth.get("type") == "basic":
             return (
-                os.environ.get(self.auth.get("username_env") or "", ""),
-                os.environ.get(self.auth.get("password_env") or "", ""),
+                security.resolve_env(self.auth.get("username_env") or "", ""),
+                security.resolve_env(self.auth.get("password_env") or "", ""),
             )
         return None
 
     def execute(self, query: str, variables: dict) -> dict:
-        resp = requests.post(
+        resp = security.safe_request(
+            "POST",
             self.endpoint,
             json={"query": query, "variables": variables},
             headers=self._headers(),
@@ -491,8 +502,14 @@ def place_order(
 ) -> dict:
     api = vcfg.get("api") or {}
     api_type = (api.get("type") or "openapi").lower()
-    if api_type in ("openapi", "rest", "swagger", "openapi3"):
-        return place_order_rest(vendor, vcfg, items, columns, order_number=order_number)
-    if api_type == "graphql":
-        return place_order_graphql(vendor, vcfg, items, columns, order_number=order_number)
+    try:
+        # Re-check the stored template against the current outbound policy: it
+        # was validated when saved, but the allowlists may have changed since.
+        security.validate_api_template(api)
+        if api_type in ("openapi", "rest", "swagger", "openapi3"):
+            return place_order_rest(vendor, vcfg, items, columns, order_number=order_number)
+        if api_type == "graphql":
+            return place_order_graphql(vendor, vcfg, items, columns, order_number=order_number)
+    except security.PolicyError as exc:
+        raise OrderError(str(exc), status=exc.status) from exc
     raise OrderError(f"Unknown API type '{api_type}' for {vendor}.", status=500)
