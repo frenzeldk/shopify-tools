@@ -638,6 +638,44 @@ class BuildCountSheet(unittest.TestCase):
             "skipped_empty": 0, "missing_in_shopify": 0,
         })
 
+    def test_a_stale_bin_counted_into_becomes_countable(self):
+        # Someone found stock on a shelf whose SKU Shopify has lost and counted
+        # it in; it is stock, so it belongs on the sheet and in the export.
+        sheet = self._sheet([self._row(
+            "SKU-1", "A1-01", 4, source=local_inventory.SOURCE_BIN_ONLY
+        )])
+        line = sheet["bins"][0]["lines"][0]
+        self.assertFalse(line["hidden"])
+        self.assertIsNone(line["hidden_reason"])
+        self.assertEqual(sheet["totals"], {
+            "bins": 1, "skus": 1, "units": 4,
+            "skipped_empty": 0, "missing_in_shopify": 0,
+        })
+
+    def test_a_stale_bin_emptied_again_goes_back_to_hidden(self):
+        sheet = self._sheet([self._row(
+            "SKU-1", "A1-01", 0, source=local_inventory.SOURCE_BIN_ONLY
+        )])
+        self.assertEqual(
+            sheet["bins"][0]["lines"][0]["hidden_reason"], counting_sheet.HIDDEN_MISSING
+        )
+
+    def test_the_row_keeps_saying_where_it_came_from(self):
+        # Visible or not, the page needs the origin to mark a row Shopify does
+        # not know.
+        sheet = self._sheet([self._row(
+            "SKU-1", "A1-01", 4, source=local_inventory.SOURCE_BIN_ONLY
+        )])
+        self.assertEqual(
+            sheet["bins"][0]["lines"][0]["source"], local_inventory.SOURCE_BIN_ONLY
+        )
+
+    def test_oversold_stock_is_still_worth_walking_to(self):
+        # A negative on-hand comes from Shopify, not from this page; the shelf
+        # still has to be looked at.
+        sheet = self._sheet([self._row("SKU-1", "A1-01", -3)])
+        self.assertFalse(sheet["bins"][0]["lines"][0]["hidden"])
+
     def test_a_hand_added_product_with_no_stock_is_hidden_as_empty(self):
         sheet = self._sheet([
             self._row("LOCAL-1", "A1-01", 0, source=local_inventory.SOURCE_LOCAL)
@@ -848,6 +886,46 @@ class AddProduct(unittest.TestCase):
         self.assertEqual(row["on_hand"], 5)
         self.assertEqual(row["source"], local_inventory.SOURCE_LOCAL)
 
+
+
+class ParseQuantity(unittest.TestCase):
+    """The one quantity validator behind both the add form and a counted edit."""
+
+    def test_a_whole_number_passes(self):
+        self.assertEqual(local_inventory.parse_quantity(7), 7)
+
+    def test_a_numeric_string_passes(self):
+        self.assertEqual(local_inventory.parse_quantity("  7 "), 7)
+
+    def test_zero_passes(self):
+        self.assertEqual(local_inventory.parse_quantity(0), 0)
+
+    def test_a_negative_quantity_is_refused(self):
+        # Stock on a shelf cannot be negative; the page clamps its input at
+        # zero, so one only arrives from something that is not the page.
+        with self.assertRaises(local_inventory.ProductError):
+            local_inventory.parse_quantity(-1)
+
+    def test_a_fraction_is_refused(self):
+        with self.assertRaises(local_inventory.ProductError):
+            local_inventory.parse_quantity(1.5)
+
+    def test_a_boolean_is_refused(self):
+        with self.assertRaises(local_inventory.ProductError):
+            local_inventory.parse_quantity(True)
+
+    def test_nonsense_is_refused(self):
+        with self.assertRaises(local_inventory.ProductError):
+            local_inventory.parse_quantity("seven")
+
+    def test_an_absurd_quantity_is_refused(self):
+        with self.assertRaises(local_inventory.ProductError):
+            local_inventory.parse_quantity(local_inventory.MAX_LOCAL_QUANTITY + 1)
+
+    def test_the_label_names_the_field_in_the_message(self):
+        with self.assertRaises(local_inventory.ProductError) as caught:
+            local_inventory.parse_quantity(-1, "Quantity")
+        self.assertIn("Quantity", str(caught.exception))
 
 
 class UpdateBins(unittest.TestCase):

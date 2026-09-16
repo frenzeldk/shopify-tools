@@ -11,11 +11,12 @@ from typing import Any
 
 from local_inventory import SOURCE_BIN_ONLY
 
-#: Why a line is hidden by default.  ``missing`` is a SKU the last inventory
-#: fetch could not find in Shopify, so its bin data is stale; ``empty`` is a
-#: SKU with no stock.  Neither is worth a walk, but both stay on the sheet as
-#: hidden rows: the page's toggle reveals them, and a hidden row can still have
-#: its quantity corrected.
+#: Why an empty line is hidden by default.  ``missing`` is a SKU the last
+#: inventory fetch could not find in Shopify, so its bin data is stale;
+#: ``empty`` is any other SKU with nothing on the shelf.  Neither is worth a
+#: walk, but both stay on the sheet as hidden rows: the page's toggle reveals
+#: them, and a hidden row can still have its quantity corrected — which makes
+#: it countable, and drops the hidden mark.
 HIDDEN_MISSING = "missing"
 HIDDEN_EMPTY = "empty"
 
@@ -46,7 +47,7 @@ def build_count_sheet(
 
     Returns ``{"bins": [{"bin", "lines"}], "totals": {...}}``.  The totals count
     only the countable lines, so they describe the walk itself; the hidden lines
-    are carried on the sheet and counted separately.
+    are carried on the sheet and counted separately, per reason.
     """
     groups: list[dict] = []
     by_bin: dict[str, dict] = {}
@@ -60,19 +61,20 @@ def build_count_sheet(
         # from the inventory row the match was built from.
         row = inventory[item["sku"]]
 
+        # Stock decides first: a row with a quantity is worth walking to
+        # whatever its origin, including a stale bin someone has since counted
+        # stock into and a product added by hand.  Only a row with nothing on it
+        # is hidden, and then its origin says why.
         hidden_reason = None
-        # Only a stale bin counts as missing.  A product added by hand is not in
-        # Shopify either, but it was typed in here deliberately, so it is
-        # countable stock like any other.
-        if row["source"] == SOURCE_BIN_ONLY:
-            hidden_reason = HIDDEN_MISSING
-            missing_in_shopify += 1
-        elif row["on_hand"] == 0:
-            hidden_reason = HIDDEN_EMPTY
-            skipped_empty += 1
-        else:
+        if row["on_hand"] != 0:
             total_units += row["on_hand"]
             counted_skus += 1
+        elif row["source"] == SOURCE_BIN_ONLY:
+            hidden_reason = HIDDEN_MISSING
+            missing_in_shopify += 1
+        else:
+            hidden_reason = HIDDEN_EMPTY
+            skipped_empty += 1
 
         group = by_bin.get(item["bin"])
         if group is None:

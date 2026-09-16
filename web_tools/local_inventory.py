@@ -460,7 +460,16 @@ def _optional_text(value: Any, label: str) -> str:
     return text
 
 
-def _whole_number(value: Any, label: str) -> int:
+def parse_quantity(value: Any, label: str = "Amount") -> int:
+    """Read a hand-entered quantity, or raise :class:`ProductError`.
+
+    Stock counted onto a shelf is a whole number and cannot be negative, so a
+    negative figure is refused here; the page clamps its input at zero, so one
+    only arrives from a caller that is not the page.
+
+    Raises:
+        ProductError: When the value is not a whole number in range.
+    """
     # A bool is an int in Python and a float would be truncated in silence;
     # both mean the caller sent something other than a count.
     if isinstance(value, bool) or isinstance(value, float):
@@ -513,7 +522,7 @@ def add_product(db_path: str, fields: dict) -> dict:
         "variant_title": _required_text(fields.get("variant_title"), "Variant"),
         "barcode": _optional_text(fields.get("barcode"), "Barcode"),
         "bin": _optional_text(fields.get("bin"), "Bin"),
-        "on_hand": _whole_number(fields.get("on_hand"), "Amount"),
+        "on_hand": parse_quantity(fields.get("on_hand"), "Amount"),
         "unit_cost": _money(fields.get("unit_cost"), "Cost"),
         "source": SOURCE_LOCAL,
         # Nothing is committed to an order for stock Shopify does not know

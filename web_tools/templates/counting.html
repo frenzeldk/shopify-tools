@@ -144,7 +144,14 @@
           </div>
           <div class="input-group">
             <label for="add-amount">Amount</label>
-            <input id="add-amount" type="number" step="1" min="0" v-model="addForm.on_hand" required>
+            <input
+              id="add-amount"
+              type="number"
+              step="1"
+              min="0"
+              v-model="addForm.on_hand"
+              @change="clampAmount"
+              required>
           </div>
           <div class="input-group">
             <label for="add-cost">Cost <small>(per item)</small></label>
@@ -308,7 +315,8 @@
               <td class="mono col-sku">[[ line.sku ]]</td>
               <td class="col-product">[[ line.product_title ]]<span
                 v-if="line.variant_title" class="variant-title"> · [[ line.variant_title ]]</span><span
-                v-if="line.hidden" class="row-tag no-print">[[ hiddenLabel(line) ]]</span></td>
+                v-if="line.hidden || line.source === 'bin_only'"
+                class="row-tag no-print">[[ rowTag(line) ]]</span></td>
               <td class="mono col-barcode">[[ line.barcode ]]</td>
               <td class="col-num" :class="{ 'qty-modified': line.locally_modified }">
                 [[ line.on_hand ]]<span
@@ -322,12 +330,13 @@
                 <input
                   type="number"
                   step="1"
+                  min="0"
                   class="qty-input"
                   :class="{ 'qty-input-saved': line.saveState === 'saved', 'qty-input-error': line.saveState === 'error' }"
                   :value="line.on_hand"
                   :disabled="line.saveState === 'saving'"
                   @keyup.enter="$event.target.blur()"
-                  @change="saveQuantity(line, $event.target.value)">
+                  @change="saveQuantity(line, $event.target)">
                 <span v-if="line.saveState === 'saving'" class="save-state">…</span>
                 <span v-else-if="line.saveState === 'saved'" class="save-state save-state-ok">✓</span>
                 <span v-else-if="line.saveState === 'error'" class="save-state save-state-bad">!</span>
@@ -563,6 +572,14 @@
               this.addForm.saving = false;
             }
           },
+          // An amount cannot be negative here either: the spinner stops at
+          // zero and a typed minus is corrected as the field is left.
+          clampAmount() {
+            const parsed = Number.parseInt(this.addForm.on_hand, 10);
+            if (Number.isFinite(parsed) && parsed < 0) {
+              this.addForm.on_hand = '0';
+            }
+          },
           resetAddForm() {
             Object.assign(this.addForm, EMPTY_PRODUCT);
           },
@@ -686,12 +703,22 @@
           // Shopify.  The row is updated from the server's copy so the
           // "changed locally" marker and the recomputed available figure match
           // what was stored.
-          async saveQuantity(line, rawValue) {
-            const quantity = Number.parseInt(rawValue, 10);
+          async saveQuantity(line, input) {
+            const field = input && typeof input === 'object' ? input : null;
+            let quantity = Number.parseInt(field ? field.value : input, 10);
             if (!Number.isFinite(quantity)) {
               line.saveState = 'error';
               this.quantityError = 'Enter a whole number for ' + line.sku + '.';
               return;
+            }
+            // Stock on a shelf cannot be negative: min="0" stops the spinner
+            // there, and a typed minus is corrected to zero in the field too,
+            // so the input never shows a figure that was not stored.
+            if (quantity < 0) {
+              quantity = 0;
+            }
+            if (field && field.value !== String(quantity)) {
+              field.value = String(quantity);
             }
             if (quantity === line.on_hand) {
               line.saveState = null;
@@ -721,13 +748,13 @@
                 locally_modified: data.item.locally_modified,
                 saveState: 'saved'
               });
-              // A SKU that was hidden for being empty is countable once it has
-              // stock, and vice versa; keep the row's own reason in step.  A
-              // stale bin stays missing whatever quantity is typed.
-              if (line.source !== 'bin_only') {
-                line.hidden = line.on_hand === 0;
-                line.hidden_reason = line.hidden ? 'empty' : null;
-              }
+              // Same rule as the server's: a row with stock is countable
+              // whatever its origin — including a stale bin someone has just
+              // counted stock into — and only an empty row is hidden, its
+              // origin saying why.
+              line.hidden = line.on_hand === 0;
+              line.hidden_reason = !line.hidden ? null
+                : (line.source === 'bin_only' ? 'missing' : 'empty');
               this.loadStatus();
             } catch (err) {
               line.saveState = 'error';
@@ -735,7 +762,10 @@
               console.error('Error:', err);
             }
           },
-          hiddenLabel(line) {
+          // A stale bin keeps its mark once it has stock, so a row Shopify
+          // does not know never looks like ordinary stock.
+          rowTag(line) {
+            if (line.source === 'bin_only') return 'not in Shopify';
             return line.hidden_reason === 'missing' ? 'not in Shopify' : 'empty';
           },
           // Semicolon-separated, like the purchase-order export, so the file

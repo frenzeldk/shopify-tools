@@ -1832,21 +1832,15 @@ def create_app() -> Flask:
         if not sku:
             return jsonify({"error": "A SKU is required."}), 400
 
-        raw_quantity = payload.get("on_hand")
-        if isinstance(raw_quantity, bool) or isinstance(raw_quantity, float):
-            # A float would be silently truncated and a bool would read as 0/1;
-            # both are a client bug, not a quantity.
-            return jsonify({"error": "The quantity must be a whole number."}), 400
+        # The same validator the add form uses, so a counted quantity and a new
+        # product's amount cannot disagree about what a quantity is.  Negative
+        # stock is refused; the page clamps its input at zero.
         try:
-            quantity = int(str(raw_quantity).strip())
-        except (TypeError, ValueError):
-            return jsonify({"error": "The quantity must be a whole number."}), 400
-        if abs(quantity) > local_inventory.MAX_LOCAL_QUANTITY:
-            return jsonify({
-                "error": "The quantity must be between "
-                         f"-{local_inventory.MAX_LOCAL_QUANTITY} and "
-                         f"{local_inventory.MAX_LOCAL_QUANTITY}."
-            }), 400
+            quantity = local_inventory.parse_quantity(
+                payload.get("on_hand"), "Quantity"
+            )
+        except local_inventory.ProductError as exc:
+            return jsonify({"error": str(exc)}), 400
 
         try:
             row = local_inventory.set_on_hand(inventory_db_path(), sku, quantity)
