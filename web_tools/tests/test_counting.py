@@ -1055,5 +1055,269 @@ class UpdateBins(unittest.TestCase):
 
 
 
+class ParseProductCsv(unittest.TestCase):
+    """Reading an uploaded file: headings, delimiters and file-level refusals."""
+
+    HEADER = "Vendor;Product;Variant;SKU;Barcode;Amount;Cost;Bin"
+    ROW = "ACME;Vinterjakke;Sort / M;ACME-001;5701;7;149.50;A1-01"
+
+    def test_a_row_is_read_field_by_field(self):
+        rows = local_inventory.parse_product_csv(f"{self.HEADER}\n{self.ROW}\n")
+        self.assertEqual(rows, [{
+            "vendor": "ACME",
+            "product_title": "Vinterjakke",
+            "variant_title": "Sort / M",
+            "sku": "ACME-001",
+            "barcode": "5701",
+            "on_hand": "7",
+            "unit_cost": "149.50",
+            "bin": "A1-01",
+            "line": 2,
+        }])
+
+    def test_the_line_number_matches_the_spreadsheet(self):
+        rows = local_inventory.parse_product_csv(
+            f"{self.HEADER}\n{self.ROW}\n{self.ROW}\n"
+        )
+        self.assertEqual([row["line"] for row in rows], [2, 3])
+
+    def test_commas_tabs_and_semicolons_all_work(self):
+        for delimiter in (";", ",", "\t"):
+            with self.subTest(delimiter=delimiter):
+                header = self.HEADER.replace(";", delimiter)
+                row = self.ROW.replace(";", delimiter).replace("Sort / M", "M")
+                rows = local_inventory.parse_product_csv(f"{header}\n{row}\n")
+                self.assertEqual(rows[0]["sku"], "ACME-001")
+
+    def test_headings_are_matched_loosely(self):
+        # "Cost pr. item" is how the user asked for the column; the export
+        # writes "Cost per item".  Both are the same heading here.
+        header = "VENDOR;Product Name;variant;sku;Amount;Cost pr. item"
+        rows = local_inventory.parse_product_csv(
+            f"{header}\nACME;Jakke;M;A-1;2;5\n"
+        )
+        self.assertEqual(rows[0]["product_title"], "Jakke")
+        self.assertEqual(rows[0]["unit_cost"], "5")
+
+    def test_a_byte_order_mark_is_not_part_of_the_first_heading(self):
+        # Spreadsheets write one, and this page's own export does too.
+        rows = local_inventory.parse_product_csv(
+            f"\ufeff{self.HEADER}\n{self.ROW}\n"
+        )
+        self.assertEqual(rows[0]["vendor"], "ACME")
+
+    def test_the_optional_columns_may_be_absent(self):
+        rows = local_inventory.parse_product_csv(
+            "Vendor;Product;Variant;SKU;Amount;Cost\nACME;Jakke;M;A-1;2;5\n"
+        )
+        self.assertEqual((rows[0]["barcode"], rows[0]["bin"]), ("", ""))
+
+    def test_unknown_columns_are_ignored(self):
+        rows = local_inventory.parse_product_csv(
+            f"{self.HEADER};Total cost\n{self.ROW};1046.50\n"
+        )
+        self.assertEqual(rows[0]["sku"], "ACME-001")
+
+    def test_blank_lines_are_not_rows(self):
+        rows = local_inventory.parse_product_csv(
+            f"{self.HEADER}\n{self.ROW}\n\n;;;;;;;\n"
+        )
+        self.assertEqual(len(rows), 1)
+
+    def test_an_empty_file_is_refused(self):
+        with self.assertRaises(local_inventory.ProductError):
+            local_inventory.parse_product_csv("   \n")
+
+    def test_a_file_without_rows_is_refused(self):
+        with self.assertRaises(local_inventory.ProductError) as caught:
+            local_inventory.parse_product_csv(f"{self.HEADER}\n")
+        self.assertIn("no product rows", str(caught.exception))
+
+    def test_missing_columns_are_named(self):
+        with self.assertRaises(local_inventory.ProductError) as caught:
+            local_inventory.parse_product_csv("SKU;Amount\nA-1;2\n")
+        message = str(caught.exception)
+        for label in ("Vendor", "Product", "Variant", "Cost"):
+            self.assertIn(label, message)
+
+    def test_too_many_rows_is_refused(self):
+        body = "\n".join(
+            f"ACME;Jakke;M;SKU-{i};;1;5;" for i in range(local_inventory.MAX_IMPORT_ROWS + 1)
+        )
+        with self.assertRaises(local_inventory.ProductError) as caught:
+            local_inventory.parse_product_csv(f"{self.HEADER}\n{body}\n")
+        self.assertIn(str(local_inventory.MAX_IMPORT_ROWS), str(caught.exception))
+
+
+class ImportProducts(unittest.TestCase):
+    """A CSV import replaces the products it names, and only those."""
+
+    HEADER = "Vendor;Product;Variant;SKU;Barcode;Amount;Cost;Bin"
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.db = str(Path(directory.name) / "inventory.db")
+        local_inventory.init_schema(self.db)
+
+    def _import(self, *lines):
+        rows = local_inventory.parse_product_csv(
+            self.HEADER + "\n" + "\n".join(lines) + "\n"
+        )
+        return local_inventory.import_products(self.db, rows)
+
+    def _fetched(self, *variants, bins=None):
+        local_inventory.replace_all(self.db, local_inventory.merge_rows(
+            list(variants), bins or {}
+        ))
+
+    def test_a_new_sku_is_added_as_the_form_would_add_it(self):
+        report = self._import("ACME;Vinterjakke;Sort / M;ACME-001;5701;7;149,50;A1-01")
+        self.assertEqual((report["added"], report["replaced"]), (1, 0))
+        row = local_inventory.get(self.db, "ACME-001")
+        self.assertEqual(row["vendor"], "ACME")
+        self.assertEqual(row["bin"], "A1-01")
+        self.assertEqual(row["on_hand"], 7)
+        # A comma decimal is what a Danish spreadsheet writes.
+        self.assertEqual(row["unit_cost"], 149.5)
+        self.assertEqual(row["source"], local_inventory.SOURCE_LOCAL)
+
+    def test_a_colliding_sku_is_overwritten_by_the_file(self):
+        self._fetched(_variant_row("SKU-1", 9, unit_cost=12.5,
+                                   product_title="Old", vendor="Old vendor"))
+        report = self._import("ACME;New title;Sort / M;SKU-1;;6;149.50;")
+        self.assertEqual((report["replaced"], report["added"]), (1, 0))
+        row = local_inventory.get(self.db, "SKU-1")
+        self.assertEqual(row["vendor"], "ACME")
+        self.assertEqual(row["product_title"], "New title")
+        self.assertEqual(row["variant_title"], "Sort / M")
+        self.assertEqual(row["on_hand"], 6)
+        self.assertEqual(row["unit_cost"], 149.5)
+
+    def test_a_counted_quantity_is_overwritten_when_the_file_names_it(self):
+        # What the warning prompt is for.
+        self._fetched(_variant_row("SKU-1", 9))
+        local_inventory.set_on_hand(self.db, "SKU-1", 4)
+        self._import("ACME;Jakke;M;SKU-1;;6;5;")
+        self.assertEqual(local_inventory.get(self.db, "SKU-1")["on_hand"], 6)
+
+    def test_skus_the_file_does_not_mention_are_untouched(self):
+        self._fetched(
+            _variant_row("SKU-1", 9, unit_cost=12.5),
+            _variant_row("SKU-2", 4, unit_cost=5, product_title="Neighbour"),
+            bins={"SKU-2": {"bin": "A1-02"}},
+        )
+        self._import("ACME;Jakke;M;SKU-1;;6;5;")
+        row = local_inventory.get(self.db, "SKU-2")
+        self.assertEqual(
+            (row["on_hand"], row["unit_cost"], row["product_title"], row["bin"]),
+            (4, 5.0, "Neighbour", "A1-02"),
+        )
+
+    def test_a_hand_added_product_the_file_ignores_survives(self):
+        local_inventory.add_product(self.db, {
+            "vendor": "A", "product_title": "P", "variant_title": "V",
+            "sku": "LOCAL-1", "on_hand": 3, "unit_cost": 1, "bin": "C3-01",
+        })
+        self._import("ACME;Jakke;M;A-1;;2;5;")
+        self.assertEqual(local_inventory.get(self.db, "LOCAL-1")["on_hand"], 3)
+
+    def test_a_replaced_row_keeps_what_the_file_cannot_know(self):
+        # Where the SKU came from, and the stock promised to open orders.
+        self._fetched(_variant_row("SKU-1", 9, available=7, committed=2))
+        self._import("ACME;Jakke;M;SKU-1;;10;5;")
+        row = local_inventory.get(self.db, "SKU-1")
+        self.assertEqual(row["source"], local_inventory.SOURCE_SHOPIFY)
+        self.assertEqual((row["available"], row["committed"]), (8, 2))
+        self.assertEqual(row["synced_on_hand"], 9)
+
+    def test_a_replaced_quantity_reads_as_changed_locally(self):
+        self._fetched(_variant_row("SKU-1", 9))
+        self._import("ACME;Jakke;M;SKU-1;;6;5;")
+        self.assertTrue(local_inventory.get(self.db, "SKU-1")["locally_modified"])
+        self.assertEqual(local_inventory.status(self.db)["locally_modified"], 1)
+
+    def test_a_blank_bin_keeps_the_bin_the_product_has(self):
+        # A spreadsheet without bins must not empty them; a row with no bin is
+        # invisible to every count sheet.
+        self._fetched(_variant_row("SKU-1", 9), bins={"SKU-1": {"bin": "A1-01"}})
+        self._import("ACME;Jakke;M;SKU-1;;6;5;")
+        self.assertEqual(local_inventory.get(self.db, "SKU-1")["bin"], "A1-01")
+
+    def test_a_bin_in_the_file_wins(self):
+        self._fetched(_variant_row("SKU-1", 9), bins={"SKU-1": {"bin": "A1-01"}})
+        self._import("ACME;Jakke;M;SKU-1;;6;5;B2-07")
+        self.assertEqual(local_inventory.get(self.db, "SKU-1")["bin"], "B2-07")
+
+    def test_a_blank_barcode_keeps_the_barcode_the_product_has(self):
+        self._fetched(_variant_row("SKU-1", 9, barcode="111"))
+        self._import("ACME;Jakke;M;SKU-1;;6;5;")
+        self.assertEqual(local_inventory.get(self.db, "SKU-1")["barcode"], "111")
+
+    def test_the_report_counts_rows_with_no_bin(self):
+        # They are stored, but no count sheet can reach them.
+        report = self._import("ACME;Jakke;M;A-1;;2;5;", "ACME;Jakke;L;A-2;;3;5;B2-07")
+        self.assertEqual(report["without_bin"], 1)
+        self.assertEqual(report["units"], 5)
+
+    def test_one_bad_row_refuses_the_whole_file(self):
+        # An import that overwrites products should either happen or not.
+        self._fetched(_variant_row("SKU-1", 9))
+        report = self._import(
+            "ACME;Jakke;M;SKU-1;;99;5;", ";Jakke;M;A-2;;2;5;", "ACME;Jakke;M;A-3;;2;5;"
+        )
+        self.assertEqual((report["added"], report["replaced"]), (0, 0))
+        self.assertEqual(report["error_count"], 1)
+        self.assertEqual(list(local_inventory.load_all(self.db)), ["SKU-1"])
+        self.assertEqual(local_inventory.get(self.db, "SKU-1")["on_hand"], 9)
+
+    def test_a_refused_row_is_reported_with_its_line(self):
+        report = self._import("ACME;Jakke;M;A-1;;2;5;", ";Jakke;M;A-2;;2;5;")
+        self.assertEqual(report["errors"][0]["line"], 3)
+        self.assertIn("Vendor", report["errors"][0]["message"])
+
+    def test_a_negative_amount_refuses_the_file(self):
+        report = self._import("ACME;Jakke;M;A-1;;-2;5;")
+        self.assertEqual((report["added"], report["error_count"]), (0, 1))
+
+    def test_a_sku_twice_in_the_file_refuses_it(self):
+        # Which of the two rows is the stock cannot be guessed.
+        report = self._import("ACME;First;M;A-1;;2;5;", "ACME;Second;M;A-1;;9;5;")
+        self.assertEqual(report["added"], 0)
+        self.assertIn("already on line 2", report["errors"][0]["message"])
+
+    def test_the_reported_error_list_is_capped_but_counted(self):
+        rows = [
+            f";Jakke;M;SKU-{i};;1;5;"
+            for i in range(local_inventory.MAX_IMPORT_ERRORS + 10)
+        ]
+        report = self._import(*rows)
+        self.assertEqual(len(report["errors"]), local_inventory.MAX_IMPORT_ERRORS)
+        self.assertEqual(report["error_count"], len(rows))
+
+    def test_an_import_does_not_claim_the_database_was_refilled(self):
+        # It touches the products it names, so the fetch and bin timestamps
+        # still describe the last fetch.
+        self._fetched(_variant_row("SKU-1", 9), bins={"SKU-1": {"bin": "A1-01"}})
+        before = local_inventory.status(self.db)
+        self._import("ACME;Jakke;M;A-1;;2;5;A1-02")
+        after = local_inventory.status(self.db)
+        self.assertEqual(after["last_synced"], before["last_synced"])
+        self.assertEqual(after["bins_updated"], before["bins_updated"])
+        self.assertEqual(after["last_sync_source"], "shopify")
+
+    def test_an_imported_product_reaches_a_count_sheet(self):
+        self._import("ACME;Vinterjakke;Sort / M;ACME-001;5701;7;149.50;A1-01")
+        inventory = local_inventory.load_all(self.db)
+        match = shipmondo.find_items_in_bins(
+            counting_sheet.bin_index(inventory), ["A1-*"]
+        )
+        sheet = counting_sheet.build_count_sheet(inventory, match["items"])
+        line = sheet["bins"][0]["lines"][0]
+        self.assertEqual(line["sku"], "ACME-001")
+        self.assertFalse(line["hidden"])
+        self.assertEqual(line["unit_cost"], 149.5)
+
+
 if __name__ == "__main__":
     unittest.main()

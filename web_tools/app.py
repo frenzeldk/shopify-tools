@@ -182,6 +182,7 @@ ROUTE_POLICIES: dict[str, RoutePolicy] = {
     "counting_refresh_bins": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
     "counting_set_quantity": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_WRITE),
     "counting_add_product": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_WRITE),
+    "counting_import_csv": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
     # Barcode scanner
     "lookup_barcode": RoutePolicy(ROLE_READ, LIMIT_READ),
     "search_items": RoutePolicy(ROLE_READ, LIMIT_READ),
@@ -1889,6 +1890,63 @@ def create_app() -> Flask:
             return jsonify({"error": "Failed to add the product locally."}), 500
 
         return jsonify({"success": True, "item": item}), 201
+
+    @application.post("/counting/import-csv/")
+    def counting_import_csv() -> Any:
+        """Replace the local inventory database with the products in a CSV file.
+
+        Destructive: the file becomes the whole contents of the database, so
+        fetched rows, counted quantities and hand-added products are all
+        replaced.  The page confirms first.  Rows are held to the same
+        per-field rules as Add Product, and one bad row refuses the whole file
+        rather than leaving a half-replaced database.
+        """
+        csv_file = request.files.get("csv_file")
+        if not csv_file or csv_file.filename == "":
+            return jsonify({"error": "A CSV file is required."}), 400
+
+        # Read one byte past the limit so an oversized upload is rejected
+        # instead of being parsed into memory.
+        raw = csv_file.read(MAX_CSV_UPLOAD_BYTES + 1)
+        if len(raw) > MAX_CSV_UPLOAD_BYTES:
+            return jsonify({
+                "error": f"The CSV file may be at most "
+                         f"{MAX_CSV_UPLOAD_BYTES // (1024 * 1024)} MB."
+            }), 413
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                # What Excel writes on a Danish Windows install; worth accepting
+                # rather than sending the user back to re-save the file.
+                text = raw.decode("cp1252")
+            except UnicodeDecodeError:
+                return jsonify({
+                    "error": "The CSV file must be UTF-8 or Windows-1252 encoded."
+                }), 400
+
+        try:
+            rows = local_inventory.parse_product_csv(text)
+            report = local_inventory.import_products(inventory_db_path(), rows)
+        except local_inventory.ProductError as exc:
+            # A problem with the file as a whole; the database was not touched.
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to import products from CSV", exc_info=exc
+            )
+            return jsonify({"error": "Failed to import the CSV file."}), 500
+
+        if report["error_count"]:
+            # Bad rows: nothing was written, so this is a refusal rather than a
+            # partial success, and it gets a 4xx to match.
+            return jsonify({
+                "error": f"{report['error_count']} row(s) could not be read, so "
+                         "nothing was changed. Fix them and import again.",
+                **report,
+            }), 400
+
+        return jsonify({"success": True, **report})
 
     @application.post("/counting/count-sheet/")
     def counting_count_sheet() -> Any:

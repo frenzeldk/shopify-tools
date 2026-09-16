@@ -258,6 +258,31 @@ main {
   margin-top: 0.25rem;
 }
 
+.import-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.import-row input[type="file"] {
+  flex: 1 1 18rem;
+  padding: 0.5rem;
+  border: 1px dashed #d5dde5;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+/* The per-line complaints from an import; kept scrollable so a messy file
+   cannot push the rest of the page off screen. */
+.info-message ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
 /* ── Show-hidden toggle ───────────────────────────────────────────────────── */
 
 .toggle-row {

@@ -191,6 +191,72 @@
         </div>
       </div>
 
+      <!-- Bulk version of the form above, for a spreadsheet of products. -->
+      <div class="tool-section no-print">
+        <h2>Import Products from CSV</h2>
+        <p class="tool-description">
+          Matched on SKU: a product already in the local database is
+          <strong>replaced</strong> by the file's version, including a quantity
+          counted here, and a SKU the database does not hold is added. Products
+          the file says nothing about are left alone, and nothing is created in
+          or sent to Shopify.
+        </p>
+        <p class="tool-description">
+          The file needs a header row with <code>Vendor</code>,
+          <code>Product</code>, <code>Variant</code>, <code>SKU</code>,
+          <code>Amount</code> and <code>Cost</code>, and may also carry
+          <code>Barcode</code> and <code>Bin</code> — left blank, those two keep
+          whatever the product already has. Semicolons, commas or tabs all work,
+          and a comma decimal in Cost is understood. If one row cannot be read,
+          nothing is changed at all.
+        </p>
+
+        <div class="import-row">
+          <input
+            type="file"
+            accept=".csv,.txt"
+            ref="importInput"
+            @change="onImportFileSelected">
+          <button
+            @click="askToImport"
+            :disabled="importState.running || !importState.file"
+            class="btn-action btn-danger">
+            <span v-if="!importState.running">⬆️ Import CSV and Replace Matching SKUs</span>
+            <span v-else>Importing…</span>
+          </button>
+        </div>
+
+        <div v-if="importState.error" class="error-message">
+          <p>[[ importState.error ]]</p>
+        </div>
+
+        <div v-if="importState.errors.length" class="error-message">
+          <p v-if="importState.errorCount > importState.errors.length">
+            Showing the first [[ importState.errors.length ]] of
+            [[ importState.errorCount ]] problems.
+          </p>
+          <ul>
+            <li v-for="problem in importState.errors">
+              Line [[ problem.line ]]: [[ problem.message ]]
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="importState.report" class="info-message">
+          <p>
+            [[ importState.report.rows ]] row(s) imported —
+            [[ importState.report.replaced ]] existing product(s) replaced,
+            [[ importState.report.added ]] added,
+            [[ importState.report.units ]] units in total.
+          </p>
+          <p v-if="importState.report.without_bin">
+            [[ importState.report.without_bin ]] of them have no bin, so no
+            count sheet can find them. Give them one in Shipmondo and use
+            “Update Bins from Shipmondo” above, or re-import with a Bin column.
+          </p>
+        </div>
+      </div>
+
       <div class="tool-section no-print">
         <h2>Bin Count Sheet</h2>
         <p class="tool-description">
@@ -352,6 +418,42 @@
         </div>
       </div>
 
+      <!-- Warning prompt for the destructive import. -->
+      <div v-if="importPrompt" class="modal-overlay no-print" @click.self="importPrompt = false">
+        <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="import-warning-title">
+          <h3 id="import-warning-title">⚠️ Replace the products in this file?</h3>
+          <p>
+            Every row of
+            <strong>[[ importState.file && importState.file.name ]]</strong>
+            whose SKU is already in the local database
+            <strong>overwrites that product</strong> — its vendor, product name,
+            variant, amount and cost all come from the file. This cannot be
+            undone.
+          </p>
+          <p v-if="inventory.locally_modified > 0" class="modal-warning">
+            [[ inventory.locally_modified ]] SKU(s) have a locally changed
+            quantity. Any of them the file mentions will be overwritten by its
+            figure.
+          </p>
+          <p v-if="sheet" class="modal-warning">
+            A count sheet is open on screen. Regenerate it after the import.
+          </p>
+          <p class="modal-note">
+            SKUs the file does not mention are left exactly as they are. Rows
+            with a new SKU are added as hand-added products, which a full
+            inventory fetch would later delete.
+          </p>
+          <div class="button-group modal-actions">
+            <button @click="importPrompt = false" class="btn-action btn-clear">
+              Cancel
+            </button>
+            <button @click="confirmImport" class="btn-action btn-danger">
+              Replace the database
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Warning prompt for the destructive fetch. -->
       <div v-if="refreshPrompt" class="modal-overlay no-print" @click.self="refreshPrompt = false">
         <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="refresh-warning-title">
@@ -416,6 +518,7 @@
         job: null,
         last_result: null,
         last_synced: null,
+        last_sync_source: null,
         is_refreshing: false,
         last_error: null
       };
@@ -433,6 +536,11 @@
             showHidden: false,
             inventory: { ...EMPTY_STATUS },
             addForm: { ...EMPTY_PRODUCT, open: false, saving: false, error: null, added: null },
+            importState: {
+              file: null, running: false, error: null,
+              errors: [], errorCount: 0, report: null
+            },
+            importPrompt: false,
             refreshPrompt: false,
             refreshNotice: null,
             statusTimer: null
@@ -632,6 +740,58 @@
             return 'Inventory fetch finished: ' + result.skus + ' SKUs stored, ' +
               result.with_bins + ' with a bin. Regenerate any count sheet to see ' +
               'the new quantities.';
+          },
+          onImportFileSelected(event) {
+            const files = event.target.files;
+            this.importState.file = files && files.length ? files[0] : null;
+            this.clearImportResult();
+          },
+          clearImportResult() {
+            this.importState.error = null;
+            this.importState.errors = [];
+            this.importState.errorCount = 0;
+            this.importState.report = null;
+          },
+          askToImport() {
+            if (!this.importState.file) return;
+            this.clearImportResult();
+            this.importPrompt = true;
+          },
+          async confirmImport() {
+            this.importPrompt = false;
+            if (!this.importState.file) return;
+            this.importState.running = true;
+            this.clearImportResult();
+            try {
+              const form = new FormData();
+              form.append('csv_file', this.importState.file);
+              // No Content-Type header: the browser sets the multipart
+              // boundary, and setting it by hand breaks the upload.
+              const response = await fetch('/counting/import-csv/', {
+                method: 'POST',
+                body: form
+              });
+              const data = await response.json();
+              if (!response.ok) {
+                this.importState.error = data.error || 'Failed to import the CSV file.';
+                // A refused file leaves the database alone, and the rows it
+                // complained about are worth listing.
+                this.importState.errors = data.errors || [];
+                this.importState.errorCount = data.error_count || 0;
+                return;
+              }
+              this.importState.report = data;
+              // The file has been applied; clear it so the same import cannot
+              // be fired twice by accident.
+              this.importState.file = null;
+              if (this.$refs.importInput) this.$refs.importInput.value = '';
+              this.loadStatus();
+            } catch (err) {
+              this.importState.error = 'An error occurred while importing the file.';
+              console.error('Error:', err);
+            } finally {
+              this.importState.running = false;
+            }
           },
           async loadStatus() {
             try {

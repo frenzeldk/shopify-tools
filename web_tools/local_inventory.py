@@ -21,7 +21,10 @@ built while a fetch is writing.
 """
 from __future__ import annotations
 
+import csv
+import io
 import logging
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -37,6 +40,40 @@ MAX_LOCAL_COST = 1_000_000.0
 
 #: Longest text a hand-typed field may carry.
 MAX_FIELD_CHARS = 200
+
+#: Most data rows one CSV import may carry.  An import replaces the whole
+#: database, so the ceiling has to clear a full catalogue; the upload size limit
+#: bites long before this does.
+MAX_IMPORT_ROWS = 50_000
+
+#: Most row errors reported back from an import.  A file with thousands of bad
+#: rows has a structural problem, and listing them all helps nobody.
+MAX_IMPORT_ERRORS = 50
+
+# Accepted CSV column headings, per field.  Matching is case- and
+# punctuation-insensitive (see _normalise_heading), and the names this page's
+# own export writes are included so a file derived from it needs no renaming.
+_CSV_HEADINGS: dict[str, tuple[str, ...]] = {
+    "vendor": ("vendor", "brand"),
+    "product_title": ("product", "product name", "product title", "name"),
+    "variant_title": ("variant", "variant title", "variation"),
+    "sku": ("sku",),
+    "barcode": ("barcode", "ean", "gtin"),
+    "on_hand": ("amount", "quantity", "qty", "count", "on hand", "stock"),
+    "unit_cost": (
+        "cost", "cost per item", "cost pr item", "unit cost", "cost price",
+    ),
+    "bin": ("bin", "bin location", "location"),
+}
+
+#: Columns a file must have; the rest may be left out.
+_REQUIRED_CSV_FIELDS = (
+    "vendor", "product_title", "variant_title", "sku", "on_hand", "unit_cost",
+)
+
+#: Delimiters an uploaded file may use.  Danish spreadsheets write `;`, which
+#: is also what this page's export uses; `,` and tab come from everything else.
+_CSV_DELIMITERS = (";", ",", "\t")
 
 # Where a row came from.  Three origins, because they mean different things on a
 # count sheet: SHOPIFY rows are the catalogue, BIN_ONLY rows are bins Shipmondo
@@ -497,6 +534,65 @@ def _money(value: Any, label: str) -> float:
     return number
 
 
+def _validated_product(fields: dict) -> dict:
+    """Check one hand-supplied product and return the row to store.
+
+    Shared by the add form and the CSV import so a typed product and an
+    imported one cannot be held to different rules.
+
+    Raises:
+        ProductError: When a field is missing, unreadable or out of range.
+    """
+    row = {
+        "sku": _required_text(fields.get("sku"), "SKU"),
+        "vendor": _required_text(fields.get("vendor"), "Vendor"),
+        "product_title": _required_text(fields.get("product_title"), "Product name"),
+        "variant_title": _required_text(fields.get("variant_title"), "Variant"),
+        "barcode": _optional_text(fields.get("barcode"), "Barcode"),
+        "bin": _optional_text(fields.get("bin"), "Bin"),
+        "on_hand": parse_quantity(fields.get("on_hand"), "Amount"),
+        "unit_cost": _money(fields.get("unit_cost"), "Cost"),
+        "source": SOURCE_LOCAL,
+        # Nothing is committed to an order for stock Shopify does not know
+        # about, so the whole quantity is available.
+        "tracked": True,
+        "synced_on_hand": 0,
+    }
+    row["available"] = row["on_hand"]
+    row["committed"] = 0
+    return row
+
+
+def _insert_product(conn: sqlite3.Connection, row: dict) -> None:
+    conn.execute(
+        f"INSERT INTO local_inventory ({', '.join(_COLUMNS)}) "
+        f"VALUES ({', '.join('?' * len(_COLUMNS))})",
+        (
+            row["sku"],
+            row["product_title"],
+            row["variant_title"],
+            row["vendor"],
+            row["barcode"],
+            row["bin"],
+            1,
+            row["source"],
+            row["unit_cost"],
+            row["on_hand"],
+            row["available"],
+            row["committed"],
+            row["synced_on_hand"],
+            _now(),
+        ),
+    )
+
+
+def _duplicate_error(sku: str) -> ProductError:
+    return ProductError(
+        f"{sku} is already in the local inventory database; correct its "
+        "quantity on a count sheet instead."
+    )
+
+
 def add_product(db_path: str, fields: dict) -> dict:
     """Add one hand-typed product to the local database and return its row.
 
@@ -514,67 +610,240 @@ def add_product(db_path: str, fields: dict) -> dict:
         ProductError: When a field is missing, unreadable or out of range, or
             when the SKU is already in the database.
     """
-    sku = _required_text(fields.get("sku"), "SKU")
-    row = {
-        "sku": sku,
-        "vendor": _required_text(fields.get("vendor"), "Vendor"),
-        "product_title": _required_text(fields.get("product_title"), "Product name"),
-        "variant_title": _required_text(fields.get("variant_title"), "Variant"),
-        "barcode": _optional_text(fields.get("barcode"), "Barcode"),
-        "bin": _optional_text(fields.get("bin"), "Bin"),
-        "on_hand": parse_quantity(fields.get("on_hand"), "Amount"),
-        "unit_cost": _money(fields.get("unit_cost"), "Cost"),
-        "source": SOURCE_LOCAL,
-        # Nothing is committed to an order for stock Shopify does not know
-        # about, so the whole quantity is available.
-        "tracked": True,
-        "synced_on_hand": 0,
-    }
-    row["available"] = row["on_hand"]
-    row["committed"] = 0
-
+    row = _validated_product(fields)
     conn = _connect(db_path)
     try:
         with conn:
             existing = conn.execute(
-                "SELECT source FROM local_inventory WHERE sku = ?", (sku,)
+                "SELECT source FROM local_inventory WHERE sku = ?", (row["sku"],)
             ).fetchone()
             if existing is not None:
-                raise ProductError(
-                    f"{sku} is already in the local inventory database; correct "
-                    "its quantity on a count sheet instead."
-                )
-            conn.execute(
-                f"INSERT INTO local_inventory ({', '.join(_COLUMNS)}) "
-                f"VALUES ({', '.join('?' * len(_COLUMNS))})",
-                (
-                    row["sku"],
-                    row["product_title"],
-                    row["variant_title"],
-                    row["vendor"],
-                    row["barcode"],
-                    row["bin"],
-                    1,
-                    row["source"],
-                    row["unit_cost"],
-                    row["on_hand"],
-                    row["available"],
-                    row["committed"],
-                    row["synced_on_hand"],
-                    _now(),
-                ),
-            )
+                raise _duplicate_error(row["sku"])
+            _insert_product(conn, row)
             stored = conn.execute(
-                "SELECT * FROM local_inventory WHERE sku = ?", (sku,)
+                "SELECT * FROM local_inventory WHERE sku = ?", (row["sku"],)
             ).fetchone()
     finally:
         conn.close()
 
     logger.info(
         "local_inventory.add_product: added %s (%d units, bin %r)",
-        sku, row["on_hand"], row["bin"],
+        row["sku"], row["on_hand"], row["bin"],
     )
     return _row_to_dict(stored)
+
+
+def _normalise_heading(heading: str) -> str:
+    """Fold a column heading to its comparable form.
+
+    ``"Cost pr. item"``, ``"cost_pr_item"`` and ``"COST PR ITEM"`` are the same
+    heading as far as an import is concerned.
+    """
+    text = (heading or "").strip().lower().lstrip("\ufeff")
+    text = re.sub(r"[._/\\-]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _sniff_delimiter(header_line: str) -> str:
+    """Pick the delimiter that splits the header into the most columns."""
+    return max(_CSV_DELIMITERS, key=header_line.count)
+
+
+def parse_product_csv(text: str) -> list[dict]:
+    """Read a product CSV into one dict of raw field values per data row.
+
+    Field values are returned as written, for :func:`import_products` to
+    validate, so a row's complaint can name the line it came from.  Each dict
+    carries a ``line`` — the line number in the file, so it matches what the
+    user sees in a spreadsheet.
+
+    Raises:
+        ProductError: For a problem with the file rather than with a row: no
+            header, missing columns, or more rows than an import may carry.
+    """
+    stripped = text.lstrip("\ufeff").strip()
+    if not stripped:
+        raise ProductError("That file is empty.")
+
+    delimiter = _sniff_delimiter(stripped.splitlines()[0])
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    try:
+        header = next(reader)
+    except StopIteration:
+        raise ProductError("That file is empty.") from None
+
+    # Heading → field, first column of a repeated heading winning.
+    columns: dict[int, str] = {}
+    by_heading = {
+        heading: field
+        for field, headings in _CSV_HEADINGS.items()
+        for heading in headings
+    }
+    for index, heading in enumerate(header):
+        field = by_heading.get(_normalise_heading(heading))
+        if field and field not in columns.values():
+            columns[index] = field
+
+    missing = [f for f in _REQUIRED_CSV_FIELDS if f not in columns.values()]
+    if missing:
+        labels = {
+            "vendor": "Vendor", "product_title": "Product", "variant_title": "Variant",
+            "sku": "SKU", "on_hand": "Amount", "unit_cost": "Cost",
+        }
+        raise ProductError(
+            "The file is missing these columns: "
+            + ", ".join(labels[f] for f in missing)
+            + ". Expected a header row with Vendor, Product, Variant, SKU, "
+              "Amount and Cost, plus optional Barcode and Bin."
+        )
+
+    rows: list[dict] = []
+    for line, values in enumerate(reader, start=2):
+        # A spreadsheet's trailing blank lines are not errors.
+        if not any((value or "").strip() for value in values):
+            continue
+        if len(rows) >= MAX_IMPORT_ROWS:
+            raise ProductError(
+                f"That file holds more than {MAX_IMPORT_ROWS} rows; split it up."
+            )
+        row = {field: "" for field in _CSV_HEADINGS}
+        for index, field in columns.items():
+            if index < len(values):
+                row[field] = values[index]
+        row["line"] = line
+        rows.append(row)
+
+    if not rows:
+        raise ProductError("That file has a header but no product rows.")
+    return rows
+
+
+def import_products(db_path: str, rows: Iterable[dict]) -> dict:
+    """Store the products in a CSV file, replacing the ones whose SKU collides.
+
+    Row by row, keyed on SKU: a SKU the database does not hold is added exactly
+    as the add form adds it, and a SKU it does hold is *replaced* by the file's
+    version — vendor, product, variant, amount and cost all come from the file,
+    including over a quantity counted here.  Rows the file says nothing about
+    are left alone, so an import is a targeted overwrite rather than a reload.
+
+    Two fields are treated as "not specified" when the file leaves them blank,
+    rather than as "delete this": ``Barcode`` and ``Bin``.  A spreadsheet that
+    simply does not carry bins would otherwise empty them, and a row with no
+    bin cannot be found by any count sheet.
+
+    A replaced row keeps what the file cannot know: where the SKU came from,
+    the stock Shopify has committed to open orders, and the quantity the last
+    fetch reported — so ``available`` is recomputed against ``committed`` and
+    the row reads as a locally changed quantity, exactly as a count-sheet edit
+    would.
+
+    The file is validated in full before anything is written, and a single bad
+    row refuses all of it: an import that overwrites products should either
+    happen or not, not land halfway.  When that happens nothing is touched and
+    the offending lines are reported.
+
+    Returns ``{"rows", "added", "replaced", "units", "without_bin", "errors",
+    "error_count"}``, with ``added`` and ``replaced`` both zero when the file
+    was refused.
+    """
+    rows = list(rows)
+    validated: list[dict] = []
+    errors: list[dict] = []
+    seen: dict[str, int | None] = {}
+
+    for raw in rows:
+        line = raw.get("line")
+        try:
+            row = _validated_product(raw)
+        except ProductError as exc:
+            errors.append({"line": line, "message": str(exc)})
+            continue
+        first = seen.get(row["sku"])
+        if first is not None:
+            # Two rows for one SKU have no agreed answer; the file has to say
+            # which one is meant.
+            errors.append({
+                "line": line,
+                "message": f"{row['sku']} is already on line {first} of this file.",
+            })
+            continue
+        seen[row["sku"]] = line
+        validated.append(row)
+
+    if errors:
+        logger.info(
+            "local_inventory.import_products: refused a %d-row file with %d bad "
+            "rows; nothing was changed",
+            len(rows), len(errors),
+        )
+        return {
+            "rows": len(rows),
+            "added": 0,
+            "replaced": 0,
+            "units": 0,
+            "without_bin": 0,
+            "errors": errors[:MAX_IMPORT_ERRORS],
+            "error_count": len(errors),
+        }
+
+    added = replaced = units = without_bin = 0
+    now = _now()
+    conn = _connect(db_path)
+    try:
+        with conn:
+            for row in validated:
+                existing = conn.execute(
+                    "SELECT bin, barcode, committed FROM local_inventory WHERE sku = ?",
+                    (row["sku"],),
+                ).fetchone()
+                units += row["on_hand"]
+
+                if existing is None:
+                    _insert_product(conn, row)
+                    added += 1
+                    if not row["bin"]:
+                        without_bin += 1
+                    continue
+
+                bin_name = row["bin"] or existing["bin"]
+                conn.execute(
+                    "UPDATE local_inventory SET vendor = ?, product_title = ?, "
+                    "variant_title = ?, barcode = ?, bin = ?, on_hand = ?, "
+                    "available = ?, unit_cost = ?, updated_at = ? WHERE sku = ?",
+                    (
+                        row["vendor"],
+                        row["product_title"],
+                        row["variant_title"],
+                        row["barcode"] or existing["barcode"],
+                        bin_name,
+                        row["on_hand"],
+                        row["on_hand"] - existing["committed"],
+                        row["unit_cost"],
+                        now,
+                        row["sku"],
+                    ),
+                )
+                replaced += 1
+                if not bin_name:
+                    without_bin += 1
+    finally:
+        conn.close()
+
+    logger.info(
+        "local_inventory.import_products: %d rows — %d added, %d replaced, "
+        "%d with no bin",
+        len(rows), added, replaced, without_bin,
+    )
+    return {
+        "rows": len(rows),
+        "added": added,
+        "replaced": replaced,
+        "units": units,
+        "without_bin": without_bin,
+        "errors": [],
+        "error_count": 0,
+    }
 
 
 def status(db_path: str) -> dict:
