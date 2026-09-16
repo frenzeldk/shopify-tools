@@ -9,16 +9,192 @@
 {% block page_title %}Counting{% endblock %}
 
 {% block content %}
+      <!-- Local inventory database: the only source the count sheet reads. -->
+      <div class="tool-section no-print">
+        <h2>Local Inventory Database</h2>
+        <p class="tool-description">
+          Count sheets and quantity edits run entirely off this local copy of the
+          inventory — nothing here touches Shopify. Fetching a fresh copy
+          replaces every row, including quantities counted here.
+        </p>
+
+        <div v-if="inventory.is_refreshing" class="info-message">
+          <strong v-if="inventory.job === 'bins'">⏳ Updating bins from Shipmondo…</strong>
+          <strong v-else>⏳ Fetching the full inventory…</strong>
+          <span v-if="inventory.job === 'bins'">
+            Only bins that differ will change.
+          </span>
+          <span v-else>
+            This walks the whole catalogue and can take a few minutes.
+          </span>
+          The status below updates on its own.
+        </div>
+
+        <div v-if="inventory.last_error" class="error-message">
+          <p>The last inventory fetch failed: [[ inventory.last_error ]]</p>
+        </div>
+
+        <div class="db-status">
+          <div class="status-item">
+            <span class="status-label">Last fetched</span>
+            <span class="status-value">[[ formatDateTime(inventory.last_synced) ]]</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Bins updated</span>
+            <span class="status-value">[[ formatDateTime(inventory.bins_updated) ]]</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">SKUs</span>
+            <span class="status-value">[[ inventory.total_skus ]]</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">With a bin</span>
+            <span class="status-value">[[ inventory.with_bins ]]</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Units</span>
+            <span class="status-value">[[ inventory.units ]]</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Changed locally</span>
+            <span
+              class="status-value"
+              :class="{ 'status-value-flagged': inventory.locally_modified > 0 }"
+            >[[ inventory.locally_modified ]]</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Added locally</span>
+            <span
+              class="status-value"
+              :class="{ 'status-value-flagged': inventory.added_locally > 0 }"
+            >[[ inventory.added_locally ]]</span>
+          </div>
+        </div>
+
+        <div class="button-group">
+          <!-- Bins are Shipmondo's data and move on their own; updating them
+               touches nothing else, so it needs no warning. -->
+          <button
+            @click="refreshBins"
+            :disabled="inventory.is_refreshing"
+            class="btn-action btn-preview">
+            <span v-if="!(inventory.is_refreshing && inventory.job === 'bins')">
+              🔄 Update Bins from Shipmondo
+            </span>
+            <span v-else>⏳ Updating bins…</span>
+          </button>
+
+          <button
+            @click="askToRefresh"
+            :disabled="inventory.is_refreshing"
+            class="btn-action btn-danger">
+            <span v-if="!(inventory.is_refreshing && inventory.job === 'inventory')">
+              ⬇️ Fetch Full Inventory from Shopify
+            </span>
+            <span v-else>⏳ Fetching…</span>
+          </button>
+        </div>
+        <small class="input-help">
+          Bins come from Shipmondo; product data, quantities and cost come from
+          Shopify. The bin update writes bins only — counted quantities, costs
+          and hand-added products are left as they are.
+        </small>
+
+        <div v-if="refreshNotice" class="info-message">
+          <p>[[ refreshNotice ]]</p>
+        </div>
+      </div>
+
+      <!-- Hand-typed stock: things on a shelf that the shop has no record of. -->
+      <div class="tool-section no-print">
+        <div class="section-head">
+          <h2>Add Product</h2>
+          <button @click="addForm.open = !addForm.open" class="btn-action btn-clear">
+            <span v-if="!addForm.open">＋ Add a product</span>
+            <span v-else>Close</span>
+          </button>
+        </div>
+        <p class="tool-description">
+          Adds a product to the local inventory database only — nothing is
+          created in Shopify. Use it for stock the shop has no record of. A full
+          inventory fetch replaces the whole database, so products added here do
+          not survive one.
+        </p>
+
+        <form v-if="addForm.open" class="add-grid" @submit.prevent="addProduct">
+          <div class="input-group">
+            <label for="add-vendor">Vendor</label>
+            <input id="add-vendor" type="text" v-model="addForm.vendor" required>
+          </div>
+          <div class="input-group">
+            <label for="add-product">Product Name</label>
+            <input id="add-product" type="text" v-model="addForm.product_title" required>
+          </div>
+          <div class="input-group">
+            <label for="add-variant">Variant</label>
+            <input id="add-variant" type="text" v-model="addForm.variant_title" required>
+          </div>
+          <div class="input-group">
+            <label for="add-sku">SKU</label>
+            <input id="add-sku" type="text" v-model="addForm.sku" class="input-code" required>
+          </div>
+          <div class="input-group">
+            <label for="add-barcode">Barcode <small>(optional)</small></label>
+            <input id="add-barcode" type="text" v-model="addForm.barcode" class="input-code">
+          </div>
+          <div class="input-group">
+            <label for="add-amount">Amount</label>
+            <input id="add-amount" type="number" step="1" min="0" v-model="addForm.on_hand" required>
+          </div>
+          <div class="input-group">
+            <label for="add-cost">Cost <small>(per item)</small></label>
+            <input id="add-cost" type="number" step="0.01" min="0" v-model="addForm.unit_cost" required>
+          </div>
+          <!-- Not one of the required fields, but without a bin no count sheet
+               can reach the row: bins are what a sheet is built from. -->
+          <div class="input-group">
+            <label for="add-bin">Bin <small>(optional — needed to appear on a count sheet)</small></label>
+            <input id="add-bin" type="text" v-model="addForm.bin" class="input-code">
+          </div>
+
+          <div class="button-group add-actions">
+            <button type="submit" :disabled="addForm.saving" class="btn-action btn-preview">
+              <span v-if="!addForm.saving">Add to local database</span>
+              <span v-else>Adding…</span>
+            </button>
+            <button type="button" @click="resetAddForm" class="btn-action btn-clear">
+              Clear fields
+            </button>
+          </div>
+        </form>
+
+        <div v-if="addForm.error" class="error-message">
+          <p>[[ addForm.error ]]</p>
+        </div>
+
+        <div v-if="addForm.added" class="info-message">
+          <p>
+            Added [[ addForm.added.sku ]] — [[ addForm.added.product_title ]] ·
+            [[ addForm.added.variant_title ]], [[ addForm.added.on_hand ]] units.
+            <span v-if="addForm.added.bin">Bin [[ addForm.added.bin ]].</span>
+            <span v-else>
+              It has no bin, so no count sheet will show it until one is set.
+            </span>
+          </p>
+        </div>
+      </div>
+
       <div class="tool-section no-print">
         <h2>Bin Count Sheet</h2>
         <p class="tool-description">
-          List the Shipmondo bins to count. Every SKU stored in those bins is looked
-          up in Shopify and printed as a packing slip with its expected on-hand
-          quantity and a blank column to write the counted figure in.
+          List the bins to count. Every SKU stored in those bins is read from the
+          local inventory database and printed as a packing slip with its
+          expected on-hand quantity and a blank column to write the counted
+          figure in.
         </p>
 
         <div class="input-group">
-          <label for="bins-input">Shipmondo bins:</label>
+          <label for="bins-input">Bins:</label>
           <textarea
             id="bins-input"
             v-model="binInput"
@@ -40,7 +216,7 @@
             :disabled="loading || !binInput.trim()"
             class="btn-action btn-preview">
             <span v-if="!loading">📋 Generate Count Sheet</span>
-            <span v-else>Fetching inventory...</span>
+            <span v-else>Reading local inventory...</span>
           </button>
 
           <button
@@ -52,17 +228,43 @@
 
           <button
             v-if="sheet"
+            @click="exportCsv"
+            :disabled="!shownTotals.bins"
+            class="btn-action btn-export">
+            ⬇️ Export CSV
+          </button>
+
+          <button
+            v-if="sheet"
             @click="clearSheet"
             class="btn-action btn-clear">
             Clear
           </button>
         </div>
 
+        <label v-if="sheet" class="toggle-row">
+          <input type="checkbox" v-model="showHidden">
+          <span>
+            Show hidden SKUs
+            <small>([[ hiddenCount ]] empty or missing from Shopify)</small>
+          </span>
+        </label>
+
+        <p v-if="sheet" class="input-help">
+          The CSV export covers the same lines the sheet shows below — SKU,
+          barcode, product, amount, cost per item and the line total — so the
+          toggle above and any corrected quantity are reflected in it.
+        </p>
+
         <div v-if="error" class="error-message">
           <p>[[ error ]]</p>
           <ul v-if="errorDetails.length">
             <li v-for="detail in errorDetails">[[ detail ]]</li>
           </ul>
+        </div>
+
+        <div v-if="quantityError" class="error-message">
+          <p>[[ quantityError ]]</p>
         </div>
 
         <div v-if="sheet && sheetWarnings.length" class="info-message">
@@ -75,9 +277,10 @@
         <div class="slip-header">
           <h2>Stock Count Sheet</h2>
           <span class="slip-totals">
-            [[ sheet.totals.bins ]] bins · [[ sheet.totals.skus ]] SKUs ·
-            [[ sheet.totals.units ]] units
+            [[ shownTotals.bins ]] bins · [[ shownTotals.skus ]] SKUs ·
+            [[ shownTotals.units ]] units
           </span>
+          <span class="slip-meta">inventory fetched [[ formatDateTime(sheet.inventory_synced_at) ]]</span>
           <span class="slip-meta mono">[[ patternSummary ]]</span>
           <span class="slip-meta">[[ formatDateTime(sheet.generated_at) ]]</span>
         </div>
@@ -91,18 +294,44 @@
               <th class="col-product">Product</th>
               <th class="col-barcode">Barcode</th>
               <th class="col-num">Exp.</th>
+              <th class="col-edit no-print">Set locally</th>
             </tr>
           </thead>
           <tbody v-for="group in binGroups" :key="group.bin">
             <tr class="bin-heading">
-              <th colspan="4"><span class="bin-name">[[ group.bin ]]</span></th>
+              <th colspan="5"><span class="bin-name">[[ group.bin ]]</span></th>
             </tr>
-            <tr v-for="line in group.lines" :key="line.sku" :class="{ 'row-alt': line.alt }">
+            <tr
+              v-for="line in group.lines"
+              :key="line.sku"
+              :class="{ 'row-alt': line.alt, 'row-hidden': line.hidden }">
               <td class="mono col-sku">[[ line.sku ]]</td>
               <td class="col-product">[[ line.product_title ]]<span
-                v-if="line.variant_title" class="variant-title"> · [[ line.variant_title ]]</span></td>
+                v-if="line.variant_title" class="variant-title"> · [[ line.variant_title ]]</span><span
+                v-if="line.hidden" class="row-tag no-print">[[ hiddenLabel(line) ]]</span></td>
               <td class="mono col-barcode">[[ line.barcode ]]</td>
-              <td class="col-num">[[ line.on_hand ]]</td>
+              <td class="col-num" :class="{ 'qty-modified': line.locally_modified }">
+                [[ line.on_hand ]]<span
+                  v-if="line.locally_modified"
+                  class="qty-was no-print"
+                  :title="'Shopify said ' + line.synced_on_hand + ' at the last fetch'">*</span>
+              </td>
+              <!-- Local-only edit: saves to the inventory database, never to
+                   Shopify, and is dropped from the printed sheet. -->
+              <td class="col-edit no-print">
+                <input
+                  type="number"
+                  step="1"
+                  class="qty-input"
+                  :class="{ 'qty-input-saved': line.saveState === 'saved', 'qty-input-error': line.saveState === 'error' }"
+                  :value="line.on_hand"
+                  :disabled="line.saveState === 'saving'"
+                  @keyup.enter="$event.target.blur()"
+                  @change="saveQuantity(line, $event.target.value)">
+                <span v-if="line.saveState === 'saving'" class="save-state">…</span>
+                <span v-else-if="line.saveState === 'saved'" class="save-state save-state-ok">✓</span>
+                <span v-else-if="line.saveState === 'error'" class="save-state save-state-bad">!</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -113,12 +342,74 @@
           <span>Signature: _____________________</span>
         </div>
       </div>
+
+      <!-- Warning prompt for the destructive fetch. -->
+      <div v-if="refreshPrompt" class="modal-overlay no-print" @click.self="refreshPrompt = false">
+        <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="refresh-warning-title">
+          <h3 id="refresh-warning-title">⚠️ Replace the local inventory?</h3>
+          <p>
+            This fetches every variant from Shopify and <strong>overwrites the
+            whole local inventory database</strong>. Quantities changed here are
+            replaced by Shopify's figures and cannot be recovered.
+          </p>
+          <p v-if="inventory.locally_modified > 0" class="modal-warning">
+            [[ inventory.locally_modified ]] SKU(s) have been changed locally
+            since the last fetch. Those changes will be lost.
+          </p>
+          <p v-if="inventory.added_locally > 0" class="modal-warning">
+            [[ inventory.added_locally ]] product(s) were added by hand. Shopify
+            has no record of them, so they will be deleted, not refreshed.
+          </p>
+          <p v-if="sheet" class="modal-warning">
+            A count sheet is open on screen. Regenerate it after the fetch to see
+            Shopify's quantities.
+          </p>
+          <p class="modal-note">
+            The fetch walks the whole catalogue and can take a few minutes. If
+            you only need current bins, use “Update Bins from Shipmondo”
+            instead — it changes nothing else.
+          </p>
+          <div class="button-group modal-actions">
+            <button @click="refreshPrompt = false" class="btn-action btn-clear">
+              Cancel
+            </button>
+            <button @click="confirmRefresh" class="btn-action btn-danger">
+              Overwrite local inventory
+            </button>
+          </div>
+        </div>
+      </div>
 {% endblock %}
 
 {% block extra_js %}
     <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
     <script>
       const { createApp } = Vue;
+
+      const CSV_HEADERS = [
+        'SKU', 'Barcode', 'Product', 'Amount', 'Cost per item', 'Total cost'
+      ];
+
+      // The add-product fields, kept apart from the form's own state so
+      // clearing the fields cannot clear the panel's messages.
+      const EMPTY_PRODUCT = {
+        vendor: '', product_title: '', variant_title: '', sku: '',
+        barcode: '', on_hand: '', unit_cost: '', bin: ''
+      };
+
+      const EMPTY_STATUS = {
+        total_skus: 0,
+        units: 0,
+        with_bins: 0,
+        locally_modified: 0,
+        added_locally: 0,
+        bins_updated: null,
+        job: null,
+        last_result: null,
+        last_synced: null,
+        is_refreshing: false,
+        last_error: null
+      };
 
       createApp({
         delimiters: ['[[', ']]'],
@@ -128,21 +419,55 @@
             sheet: null,
             error: null,
             errorDetails: [],
-            loading: false
+            quantityError: null,
+            loading: false,
+            showHidden: false,
+            inventory: { ...EMPTY_STATUS },
+            addForm: { ...EMPTY_PRODUCT, open: false, saving: false, error: null, added: null },
+            refreshPrompt: false,
+            refreshNotice: null,
+            statusTimer: null
           };
         },
         computed: {
-          // The print stripe has to alternate across the whole sheet: bins are
-          // separate <tbody> elements and their headings are hidden on paper, so
-          // a CSS :nth-child stripe would restart at every bin and collide at
-          // the seams.  Parity is therefore counted here, once, over all rows.
+          // Lines the toggle lets through, grouped by bin.  The print stripe has
+          // to alternate across the whole sheet: bins are separate <tbody>
+          // elements and their headings are hidden on paper, so a CSS
+          // :nth-child stripe would restart at every bin and collide at the
+          // seams.  Parity is therefore counted here, once, over all shown rows.
           binGroups() {
             if (!this.sheet) return [];
             let row = 0;
-            return this.sheet.bins.map(group => ({
-              bin: group.bin,
-              lines: group.lines.map(line => ({ ...line, alt: row++ % 2 === 1 }))
-            }));
+            const groups = [];
+            for (const group of this.sheet.bins) {
+              const lines = group.lines
+                .filter(line => this.showHidden || !line.hidden)
+                .map(line => ({ ...line, alt: row++ % 2 === 1 }));
+              // A bin whose every SKU is hidden drops off the sheet entirely.
+              if (lines.length) groups.push({ bin: group.bin, lines });
+            }
+            return groups;
+          },
+          // Totals follow what is actually on the sheet, so they stay true as
+          // the toggle opens and as quantities are corrected.
+          shownTotals() {
+            const groups = this.binGroups;
+            let skus = 0;
+            let units = 0;
+            for (const group of groups) {
+              for (const line of group.lines) {
+                skus += 1;
+                units += line.on_hand;
+              }
+            }
+            return { bins: groups.length, skus, units };
+          },
+          hiddenCount() {
+            if (!this.sheet) return 0;
+            return this.sheet.bins.reduce(
+              (total, group) => total + group.lines.filter(line => line.hidden).length,
+              0
+            );
           },
           patternSummary() {
             if (!this.sheet) return '';
@@ -161,15 +486,22 @@
             if (this.sheet.totals.skipped_empty) {
               warnings.push(
                 this.sheet.totals.skipped_empty +
-                ' SKU(s) in these bins are empty in Shopify and were left off ' +
-                'the slip.'
+                ' SKU(s) in these bins are empty in the local inventory' +
+                (this.showHidden ? ' and are shown as hidden rows.'
+                                 : ' and were left off the slip.')
               );
             }
             if (this.sheet.totals.missing_in_shopify) {
               warnings.push(
                 this.sheet.totals.missing_in_shopify +
-                ' SKU(s) in these bins no longer exist in Shopify and were left ' +
-                'off the slip — the bin data for them is stale.'
+                ' SKU(s) in these bins did not exist in Shopify at the last ' +
+                'fetch — the bin data for them is stale.'
+              );
+            }
+            if (!this.shownTotals.bins) {
+              warnings.push(
+                'Every SKU in these bins is hidden; tick “Show hidden SKUs” to ' +
+                'see them.'
               );
             }
             if (this.sheet.pattern_errors.length) {
@@ -179,10 +511,149 @@
           }
         },
         methods: {
+          async addProduct() {
+            this.addForm.error = null;
+            this.addForm.added = null;
+            // The server validates every field and its messages name the
+            // field; this only catches what the browser can see, so a
+            // half-filled form never becomes a request.
+            const missing = [
+              ['Vendor', this.addForm.vendor],
+              ['Product Name', this.addForm.product_title],
+              ['Variant', this.addForm.variant_title],
+              ['SKU', this.addForm.sku],
+              ['Amount', this.addForm.on_hand],
+              ['Cost', this.addForm.unit_cost]
+            ].filter(([, value]) => String(value).trim() === '').map(([label]) => label);
+            if (missing.length) {
+              this.addForm.error = 'These fields are required: ' + missing.join(', ') + '.';
+              return;
+            }
+
+            this.addForm.saving = true;
+            try {
+              const response = await fetch('/counting/add-product/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  vendor: this.addForm.vendor,
+                  product_title: this.addForm.product_title,
+                  variant_title: this.addForm.variant_title,
+                  sku: this.addForm.sku,
+                  barcode: this.addForm.barcode,
+                  bin: this.addForm.bin,
+                  on_hand: this.addForm.on_hand,
+                  unit_cost: this.addForm.unit_cost
+                })
+              });
+              const data = await response.json();
+              if (!response.ok) {
+                this.addForm.error = data.error || 'Failed to add the product.';
+                return;
+              }
+              this.addForm.added = data.item;
+              // Cleared on success only, so a rejected form can be corrected
+              // instead of retyped.
+              this.resetAddForm();
+              this.loadStatus();
+            } catch (err) {
+              this.addForm.error = 'An error occurred while adding the product.';
+              console.error('Error:', err);
+            } finally {
+              this.addForm.saving = false;
+            }
+          },
+          resetAddForm() {
+            Object.assign(this.addForm, EMPTY_PRODUCT);
+          },
+          async refreshBins() {
+            this.refreshNotice = null;
+            await this.startJob('/counting/refresh-bins/', 'Failed to start the bin update.');
+          },
+          async startJob(url, failureMessage) {
+            try {
+              const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+              });
+              const data = await response.json();
+              if (!response.ok) {
+                this.refreshNotice = null;
+                this.inventory.last_error = data.error || data.message || failureMessage;
+              } else {
+                this.inventory.is_refreshing = true;
+                this.inventory.last_error = null;
+                this.refreshNotice = data.message;
+              }
+            } catch (err) {
+              this.inventory.last_error = failureMessage;
+              console.error('Error:', err);
+            }
+            this.scheduleStatus(2000);
+          },
+          // What the job that just finished actually did.  Built from the
+          // server's own counts so the page never guesses.
+          jobNotice(result) {
+            if (!result) return null;
+            if (result.job === 'bins') {
+              const parts = [
+                result.updated + ' bin(s) changed',
+                result.cleared + ' cleared',
+                result.unchanged + ' already correct'
+              ];
+              let notice = 'Bin update finished: ' + parts.join(', ') + '.';
+              if (result.missing_locally) {
+                notice += ' ' + result.missing_locally + ' SKU(s) in Shipmondo are ' +
+                  'not in the local database — those need a full inventory fetch.';
+              }
+              if (result.updated || result.cleared) {
+                notice += ' Regenerate any count sheet to pick up the new bins.';
+              }
+              return notice;
+            }
+            return 'Inventory fetch finished: ' + result.skus + ' SKUs stored, ' +
+              result.with_bins + ' with a bin. Regenerate any count sheet to see ' +
+              'the new quantities.';
+          },
+          async loadStatus() {
+            try {
+              const response = await fetch('/counting/inventory-status/');
+              if (!response.ok) return;
+              const data = await response.json();
+              const wasRefreshing = this.inventory.is_refreshing;
+              this.inventory = data;
+              if (wasRefreshing && !data.is_refreshing) {
+                // On failure the error says what happened; leaving the "started"
+                // line above it would read as though it had also succeeded.
+                this.refreshNotice =
+                  data.last_error ? null : this.jobNotice(data.last_result);
+              }
+              this.scheduleStatus(data.is_refreshing ? 3000 : 60000);
+            } catch (err) {
+              console.error('Error loading inventory status:', err);
+              this.scheduleStatus(15000);
+            }
+          },
+          scheduleStatus(delay) {
+            if (this.statusTimer) clearTimeout(this.statusTimer);
+            this.statusTimer = setTimeout(() => this.loadStatus(), delay);
+          },
+          askToRefresh() {
+            this.refreshNotice = null;
+            this.refreshPrompt = true;
+          },
+          async confirmRefresh() {
+            this.refreshPrompt = false;
+            await this.startJob(
+              '/counting/refresh-inventory/', 'Failed to start the inventory fetch.'
+            );
+          },
           async generateSheet() {
             this.loading = true;
             this.error = null;
             this.errorDetails = [];
+            this.quantityError = null;
             this.sheet = null;
 
             try {
@@ -197,6 +668,11 @@
                 this.error = data.error || 'Failed to build the count sheet.';
                 this.errorDetails = data.unmatched_patterns || [];
               } else {
+                // saveState rides along on every line so each row can report
+                // its own save without a lookup table beside the sheet.
+                data.bins.forEach(group => group.lines.forEach(line => {
+                  line.saveState = null;
+                }));
                 this.sheet = data;
               }
             } catch (err) {
@@ -206,6 +682,124 @@
               this.loading = false;
             }
           },
+          // Local only: this writes to the inventory database and never to
+          // Shopify.  The row is updated from the server's copy so the
+          // "changed locally" marker and the recomputed available figure match
+          // what was stored.
+          async saveQuantity(line, rawValue) {
+            const quantity = Number.parseInt(rawValue, 10);
+            if (!Number.isFinite(quantity)) {
+              line.saveState = 'error';
+              this.quantityError = 'Enter a whole number for ' + line.sku + '.';
+              return;
+            }
+            if (quantity === line.on_hand) {
+              line.saveState = null;
+              return;
+            }
+
+            line.saveState = 'saving';
+            this.quantityError = null;
+            try {
+              const response = await fetch('/counting/set-quantity/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sku: line.sku, on_hand: quantity })
+              });
+              const data = await response.json();
+              if (!response.ok) {
+                line.saveState = 'error';
+                this.quantityError =
+                  data.error || 'Failed to save the quantity for ' + line.sku + '.';
+                return;
+              }
+              Object.assign(line, {
+                on_hand: data.item.on_hand,
+                available: data.item.available,
+                committed: data.item.committed,
+                synced_on_hand: data.item.synced_on_hand,
+                locally_modified: data.item.locally_modified,
+                saveState: 'saved'
+              });
+              // A SKU that was hidden for being empty is countable once it has
+              // stock, and vice versa; keep the row's own reason in step.  A
+              // stale bin stays missing whatever quantity is typed.
+              if (line.source !== 'bin_only') {
+                line.hidden = line.on_hand === 0;
+                line.hidden_reason = line.hidden ? 'empty' : null;
+              }
+              this.loadStatus();
+            } catch (err) {
+              line.saveState = 'error';
+              this.quantityError = 'Failed to save the quantity for ' + line.sku + '.';
+              console.error('Error:', err);
+            }
+          },
+          hiddenLabel(line) {
+            return line.hidden_reason === 'missing' ? 'not in Shopify' : 'empty';
+          },
+          // Semicolon-separated, like the purchase-order export, so the file
+          // opens straight into a spreadsheet here.  Built in the browser from
+          // the rows on screen: the export is the list the user is looking at,
+          // toggle and local corrections included.
+          exportCsv() {
+            const rows = [CSV_HEADERS.slice()];
+            for (const group of this.binGroups) {
+              for (const line of group.lines) {
+                const cost = line.unit_cost;
+                // A SKU Shopify holds no cost for is left blank rather than
+                // exported as free.
+                const hasCost = cost !== null && cost !== undefined;
+                rows.push([
+                  line.sku,
+                  line.barcode,
+                  this.productLabel(line),
+                  String(line.on_hand),
+                  // The cost goes out at the precision Shopify holds it at, so
+                  // the file loses nothing and the line total is exactly the
+                  // product of the two columns beside it.  Only the derived
+                  // total is rounded, which also keeps float artefacts
+                  // (4 × 1.005) out of the file.
+                  hasCost ? String(cost) : '',
+                  hasCost ? (cost * line.on_hand).toFixed(2) : ''
+                ]);
+              }
+            }
+
+            const csv = rows.map(row => row.map(this.csvField).join(';')).join('\r\n');
+            // The BOM is what makes a spreadsheet read the file as UTF-8, so
+            // Danish product titles survive the round trip.
+            this.downloadFile(
+              new Blob(['\ufeff' + csv + '\r\n'], { type: 'text/csv;charset=utf-8' }),
+              'count-sheet-' + this.fileStamp() + '.csv'
+            );
+          },
+          csvField(value) {
+            const text = value === null || value === undefined ? '' : String(value);
+            return /[";\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+          },
+          productLabel(line) {
+            return line.variant_title
+              ? line.product_title + ' · ' + line.variant_title
+              : line.product_title;
+          },
+          fileStamp() {
+            const pad = n => String(n).padStart(2, '0');
+            const now = new Date();
+            return [
+              now.getFullYear(), pad(now.getMonth() + 1), pad(now.getDate())
+            ].join('') + '-' + pad(now.getHours()) + pad(now.getMinutes());
+          },
+          downloadFile(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+          },
           printSheet() {
             window.print();
           },
@@ -213,9 +807,10 @@
             this.sheet = null;
             this.error = null;
             this.errorDetails = [];
+            this.quantityError = null;
           },
           formatDateTime(isoString) {
-            if (!isoString) return 'unknown';
+            if (!isoString) return 'never';
             const date = new Date(isoString);
             return new Intl.DateTimeFormat('default', {
               dateStyle: 'medium',
@@ -223,6 +818,13 @@
               timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
             }).format(date);
           }
+        },
+        mounted() {
+          // Status only — the inventory itself is never fetched on load.
+          this.loadStatus();
+        },
+        unmounted() {
+          if (this.statusTimer) clearTimeout(this.statusTimer);
         }
       }).mount('#app');
     </script>

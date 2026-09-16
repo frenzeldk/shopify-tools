@@ -59,7 +59,7 @@ from shopify import (
     reorder_product_images,
     delete_product_image,
     fetch_locations,
-    fetch_on_hand_by_skus,
+    fetch_all_on_hand,
     create_inventory_transfer,
     set_transfer_items,
     delete_inventory_transfer,
@@ -85,6 +85,8 @@ from microsoft365 import (
     send_plaintext_email,
     send_template_email,
 )
+import counting_sheet
+import local_inventory
 import netguard
 import purchase_order
 import security
@@ -117,6 +119,9 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "purchase_orders.db"
+# The Counting page's inventory store.  Its own file: a full refresh rewrites
+# every row, and that must not lock the configuration database.
+INVENTORY_DATABASE_PATH = BASE_DIR / "local_inventory.db"
 CACHE_DURATION_MINUTES = 30
 
 # Largest uploaded CSV product_tools_compare will parse.
@@ -169,8 +174,14 @@ ROUTE_POLICIES: dict[str, RoutePolicy] = {
     "cleanup_sold_out_bins": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
     "preview_batch_update": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_WRITE),
     "apply_batch_update_route": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
-    # Counting
-    "counting_count_sheet": RoutePolicy(ROLE_READ, LIMIT_EXPENSIVE),
+    # Counting — the count sheet and the quantity edits only touch the local
+    # inventory database; only the full fetch reaches out to Shopify.
+    "counting_count_sheet": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "counting_inventory_status": RoutePolicy(ROLE_READ, LIMIT_READ),
+    "counting_refresh_inventory": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
+    "counting_refresh_bins": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_EXPENSIVE),
+    "counting_set_quantity": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_WRITE),
+    "counting_add_product": RoutePolicy(ROLE_INVENTORY_WRITE, LIMIT_WRITE),
     # Barcode scanner
     "lookup_barcode": RoutePolicy(ROLE_READ, LIMIT_READ),
     "search_items": RoutePolicy(ROLE_READ, LIMIT_READ),
@@ -256,6 +267,157 @@ locations_cache = {
     "is_refreshing": False
 }
 locations_lock = threading.Lock()
+
+# Counting's local inventory database is only ever written when a user asks for
+# it, so its state is a job status rather than a cache: the page polls this to
+# know whether a job is still running, what the last one did and whether it
+# failed.  One job at a time — a full fetch and a bin update both write the
+# table, and interleaving them would leave bins from one and rows from the
+# other.
+local_inventory_state = {
+    "is_refreshing": False,
+    "job": None,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+    "last_result": None,
+}
+local_inventory_lock = threading.Lock()
+
+JOB_INVENTORY = "inventory"
+JOB_BINS = "bins"
+
+
+def _claim_local_inventory_job(job: str) -> bool:
+    """Take the single inventory-writing slot, or report it busy."""
+    with local_inventory_lock:
+        if local_inventory_state["is_refreshing"]:
+            logger.info("Local inventory job %r already running; skipping %r",
+                        local_inventory_state["job"], job)
+            return False
+        local_inventory_state.update(
+            is_refreshing=True,
+            job=job,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            last_error=None,
+            last_result=None,
+        )
+    return True
+
+
+def _release_local_inventory_job(result: dict | None, error: str | None) -> None:
+    with local_inventory_lock:
+        local_inventory_state.update(
+            is_refreshing=False,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            last_result=result,
+            last_error=error,
+        )
+
+
+def _shipmondo_bin_index() -> dict[str, dict]:
+    """Bins, names and barcodes from the Shipmondo cache, keyed by SKU."""
+    with shipmondo_lock:
+        return {
+            sku: {
+                "bin": item.get("bin", ""),
+                "name": item.get("name", ""),
+                "barcode": item.get("barcode", ""),
+            }
+            for sku, item in shipmondo_cache["items"].items()
+        }
+
+
+def refresh_local_inventory(db_path: str) -> None:
+    """Replace the local inventory database with Shopify's current inventory.
+
+    Destructive and deliberate: it overwrites every locally edited quantity and
+    deletes hand-added products, which is why nothing calls it automatically —
+    no scheduled job, no startup fetch — and the page asks for confirmation
+    first.
+
+    Bins come from the Shipmondo cache, since Shopify holds none, so a count
+    sheet needs nothing but the local database afterwards.  Runs in a worker
+    thread; progress is reported through ``local_inventory_state``.
+    """
+    if not _claim_local_inventory_job(JOB_INVENTORY):
+        return
+
+    result: dict | None = None
+    error: str | None = None
+    try:
+        # An empty bin cache would store the whole catalogue as unbinned, and
+        # nothing could then be found by bin; fill it first.
+        with shipmondo_lock:
+            have_bins = bool(shipmondo_cache["items"])
+        if not have_bins:
+            logger.info("Shipmondo cache empty before inventory fetch; filling it")
+            fetch_and_cache_shipmondo_items()
+
+        variants = fetch_all_on_hand()
+        stored = local_inventory.replace_all(
+            db_path, local_inventory.merge_rows(variants, _shipmondo_bin_index())
+        )
+        result = {"job": JOB_INVENTORY, **stored}
+        logger.info(
+            "Local inventory refreshed: %d SKUs, %d with bins, %d units",
+            stored["skus"], stored["with_bins"], stored["units"],
+        )
+    except Exception as exc:
+        logger.error("Local inventory refresh failed: %s", exc, exc_info=True)
+        error = str(exc)
+    finally:
+        _release_local_inventory_job(result, error)
+
+
+def refresh_local_bins(db_path: str) -> None:
+    """Fetch bins from Shipmondo and apply only the ones that differ.
+
+    Bins are Shipmondo's data and change on their own schedule — a shelf gets
+    re-organised without any product data changing — so they are refreshable on
+    their own.  Nothing but the ``bin`` column is written: counted quantities,
+    costs and hand-added products come through untouched, which is what makes
+    this safe to run mid-count.
+
+    The fetch is live rather than the cached copy, since the point is to pick up
+    a change just made in Shipmondo; the cache is updated with it in passing.
+    """
+    if not _claim_local_inventory_job(JOB_BINS):
+        return
+
+    result: dict | None = None
+    error: str | None = None
+    try:
+        items = fetch_all_shipmondo_items()
+        if not items:
+            # An empty result is an API problem, not an empty warehouse, and
+            # applying it would clear every bin in the database.
+            raise RuntimeError(
+                "Shipmondo returned no items; bins were left as they are."
+            )
+
+        with shipmondo_lock:
+            shipmondo_cache["items"] = items
+            shipmondo_cache["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        applied = local_inventory.update_bins(db_path, _shipmondo_bin_index())
+        result = {
+            "job": JOB_BINS,
+            "shipmondo_items": len(items),
+            **applied,
+        }
+        logger.info(
+            "Local bins updated from Shipmondo: %d changed, %d cleared, "
+            "%d unchanged, %d Shipmondo SKUs not in the database",
+            applied["updated"], applied["cleared"], applied["unchanged"],
+            applied["missing_locally"],
+        )
+    except Exception as exc:
+        logger.error("Local bin update failed: %s", exc, exc_info=True)
+        error = str(exc)
+    finally:
+        _release_local_inventory_job(result, error)
+
 
 def fetch_and_cache_shipmondo_items():
     """Fetch all Shipmondo items and update the global cache."""
@@ -410,6 +572,11 @@ def close_db(_exception: BaseException | None = None) -> None:
         db.close()
 
 
+def inventory_db_path() -> str:
+    """Path of the Counting page's local inventory database."""
+    return current_app.config.get("INVENTORY_DATABASE", str(INVENTORY_DATABASE_PATH))
+
+
 def init_db() -> None:
     """Ensure the tables required for configuration storage exist."""
     database_path = Path(current_app.config.get("DATABASE", str(DATABASE_PATH)))
@@ -478,6 +645,13 @@ def init_db() -> None:
             """
         )
         conn.commit()
+
+    # Counting's inventory store: its own file, so create the schema separately.
+    # Creating the table is not the same as filling it — that only ever happens
+    # when a user presses Fetch Full Inventory.
+    inventory_path = Path(inventory_db_path())
+    inventory_path.parent.mkdir(parents=True, exist_ok=True)
+    local_inventory.init_schema(str(inventory_path))
 
 
 def load_ordering_templates(db_path: str) -> dict[str, dict]:
@@ -798,6 +972,7 @@ def create_app() -> Flask:
     """Application factory for the web tools service."""
     application = Flask(__name__, template_folder="templates", static_folder="static")
     application.config.setdefault("DATABASE", str(DATABASE_PATH))
+    application.config.setdefault("INVENTORY_DATABASE", str(INVENTORY_DATABASE_PATH))
     application.config.setdefault("OIDC_CLIENT_SECRETS", str(BASE_DIR / "client_secrets.json"))
     application.config["SESSION_TYPE"] = "filesystem"
     application.config['SESSION_PERMANENT'] = True
@@ -1564,13 +1739,176 @@ def create_app() -> Flask:
             active_page="counting"
         )
 
-    @application.post("/counting/count-sheet/")
-    async def counting_count_sheet() -> Any:
-        """Build a count sheet for the Shipmondo bins matching the given patterns.
+    def _busy_response() -> Any | None:
+        """A 409 while the other inventory job still holds the single slot."""
+        with local_inventory_lock:
+            if not local_inventory_state["is_refreshing"]:
+                return None
+            running = local_inventory_state["job"]
+        message = (
+            "A bin update is already running." if running == JOB_BINS
+            else "An inventory fetch is already running."
+        )
+        return jsonify({
+            "success": False,
+            "message": message,
+            "job": running,
+            "is_refreshing": True,
+        }), 409
 
-        Bins and their SKUs come from the Shipmondo cache; the expected quantity
-        is Shopify's *on-hand*, which is what a counter should physically find in
+    def _start_inventory_job(worker, thread_name: str) -> None:
+        threading.Thread(
+            target=worker,
+            args=(inventory_db_path(),),
+            name=thread_name,
+            daemon=True,
+        ).start()
+
+    @application.get("/counting/inventory-status/")
+    def counting_inventory_status() -> Any:
+        """Report what the local inventory database currently holds."""
+        status = local_inventory.status(inventory_db_path())
+        with local_inventory_lock:
+            status.update(
+                is_refreshing=local_inventory_state["is_refreshing"],
+                job=local_inventory_state["job"],
+                refresh_started_at=local_inventory_state["started_at"],
+                refresh_finished_at=local_inventory_state["finished_at"],
+                last_error=local_inventory_state["last_error"],
+                last_result=local_inventory_state["last_result"],
+            )
+        return jsonify(status)
+
+    @application.post("/counting/refresh-inventory/")
+    def counting_refresh_inventory() -> Any:
+        """Start a full Shopify inventory fetch, replacing every local row.
+
+        Never called on startup or on a schedule, and confirmed in the browser
+        first: it discards every locally edited quantity, which is a count in
+        progress if one is under way.
+        """
+        busy = _busy_response()
+        if busy is not None:
+            return busy
+
+        # A full catalogue walk takes minutes, so it runs detached and the page
+        # polls /counting/inventory-status/ for the outcome.
+        _start_inventory_job(refresh_local_inventory, "local-inventory-refresh")
+        return jsonify({
+            "success": True,
+            "message": "Inventory fetch started; local quantities are being replaced.",
+            "is_refreshing": True,
+        })
+
+    @application.post("/counting/refresh-bins/")
+    def counting_refresh_bins() -> Any:
+        """Fetch bins from Shipmondo and apply only the ones that differ.
+
+        Bins are Shipmondo's data, so they can move without anything in the
+        catalogue changing.  Only the bin column is written — quantities, costs
+        and hand-added products are left alone — so this needs no confirmation
+        and is safe to run in the middle of a count.
+        """
+        busy = _busy_response()
+        if busy is not None:
+            return busy
+
+        _start_inventory_job(refresh_local_bins, "local-bins-refresh")
+        return jsonify({
+            "success": True,
+            "message": "Bin update started; only differing bins will change.",
+            "is_refreshing": True,
+        })
+
+    @application.post("/counting/set-quantity/")
+    def counting_set_quantity() -> Any:
+        """Set one SKU's on-hand quantity in the local database only.
+
+        Shopify is deliberately not told: counting corrects the local sheet, and
+        pushing a corrected figure back to the shop is a separate decision.
+        """
+        payload = request.get_json(silent=True) or {}
+        sku = str(payload.get("sku") or "").strip()
+        if not sku:
+            return jsonify({"error": "A SKU is required."}), 400
+
+        raw_quantity = payload.get("on_hand")
+        if isinstance(raw_quantity, bool) or isinstance(raw_quantity, float):
+            # A float would be silently truncated and a bool would read as 0/1;
+            # both are a client bug, not a quantity.
+            return jsonify({"error": "The quantity must be a whole number."}), 400
+        try:
+            quantity = int(str(raw_quantity).strip())
+        except (TypeError, ValueError):
+            return jsonify({"error": "The quantity must be a whole number."}), 400
+        if abs(quantity) > local_inventory.MAX_LOCAL_QUANTITY:
+            return jsonify({
+                "error": "The quantity must be between "
+                         f"-{local_inventory.MAX_LOCAL_QUANTITY} and "
+                         f"{local_inventory.MAX_LOCAL_QUANTITY}."
+            }), 400
+
+        try:
+            row = local_inventory.set_on_hand(inventory_db_path(), sku, quantity)
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to set local quantity for %s", sku, exc_info=exc
+            )
+            return jsonify({"error": "Failed to save the quantity locally."}), 500
+
+        if row is None:
+            return jsonify({
+                "error": f"{sku} is not in the local inventory database."
+            }), 404
+        return jsonify({"success": True, "item": row})
+
+    @application.post("/counting/add-product/")
+    def counting_add_product() -> Any:
+        """Add a hand-typed product to the local inventory database.
+
+        For stock the shop has no record of.  Local only — no product is
+        created in Shopify — and a full inventory fetch replaces the table, so
+        the page warns that hand-added rows do not survive one.
+        """
+        payload = request.get_json(silent=True) or {}
+        fields = {
+            "vendor": payload.get("vendor"),
+            "product_title": payload.get("product_title"),
+            "variant_title": payload.get("variant_title"),
+            "sku": payload.get("sku"),
+            "barcode": payload.get("barcode"),
+            "bin": payload.get("bin"),
+            "on_hand": payload.get("on_hand"),
+            "unit_cost": payload.get("unit_cost"),
+        }
+
+        try:
+            item = local_inventory.add_product(inventory_db_path(), fields)
+        except local_inventory.ProductError as exc:
+            # The store validates; its messages name the field, so they are
+            # safe and useful to show as they are.
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to add a product to the local inventory", exc_info=exc
+            )
+            return jsonify({"error": "Failed to add the product locally."}), 500
+
+        return jsonify({"success": True, "item": item}), 201
+
+    @application.post("/counting/count-sheet/")
+    def counting_count_sheet() -> Any:
+        """Build a count sheet for the bins matching the given patterns.
+
+        Everything comes from the local inventory database — bins and the
+        expected quantity alike — so a sheet can be built, and its quantities
+        corrected, without Shopify or Shipmondo being reachable.  The expected
+        figure is *on-hand*, which is what a counter should physically find in
         the bin (available stock plus stock already committed to open orders).
+
+        SKUs that are empty, or that Shopify no longer knows, are marked
+        ``hidden`` rather than dropped: the page's show-hidden toggle decides
+        whether they reach the sheet, and a hidden row can still be corrected.
         """
         payload = request.get_json(silent=True) or {}
         raw_bins = str(payload.get("bins") or "")
@@ -1588,20 +1926,28 @@ def create_app() -> Flask:
                 else "None of those bin patterns could be read."
             }), 400
 
-        with shipmondo_lock:
-            shipmondo_items = dict(shipmondo_cache["items"])
-            cache_updated = shipmondo_cache["last_updated"]
-        if not shipmondo_items:
-            return jsonify({
-                "error": "The Shipmondo bin cache is empty. Refresh it on the "
-                         "Inventory Tools page and try again."
-            }), 503
+        try:
+            inventory = local_inventory.load_all(inventory_db_path())
+        except Exception as exc:
+            current_app.logger.exception(
+                "Failed to read the local inventory database", exc_info=exc
+            )
+            return jsonify({"error": "Failed to read the local inventory database."}), 500
 
-        match = find_items_in_bins(shipmondo_items, patterns)
+        if not inventory:
+            return jsonify({
+                "error": "The local inventory database is empty. Use "
+                         "“Fetch Full Inventory” above to fill it."
+            }), 503
+        status = local_inventory.status(inventory_db_path())
+
+        # find_items_in_bins does the pattern matching and the walking order.
+        match = find_items_in_bins(counting_sheet.bin_index(inventory), patterns)
         bin_items = match["items"]
         if not bin_items:
             return jsonify({
-                "error": "No Shipmondo bins matched those patterns.",
+                "error": "No bins in the local inventory database matched those "
+                         "patterns.",
                 "unmatched_patterns": match["unmatched_patterns"][:50],
             }), 404
         if len(bin_items) > MAX_COUNT_SHEET_SKUS:
@@ -1610,73 +1956,15 @@ def create_app() -> Flask:
                          f"covers at most {MAX_COUNT_SHEET_SKUS}. Narrow the patterns."
             }), 400
 
-        try:
-            stock = await asyncio.to_thread(
-                fetch_on_hand_by_skus, [item["sku"] for item in bin_items]
-            )
-        except Exception as exc:
-            current_app.logger.exception(
-                "Failed to fetch on-hand inventory for the count sheet", exc_info=exc
-            )
-            return jsonify({"error": "Failed to fetch inventory from Shopify."}), 502
-
         # One group per bin, in walking order, so the printed sheet follows the
         # shelves.  find_items_in_bins already sorted by bin then SKU.
-        groups: list[dict] = []
-        by_bin: dict[str, dict] = {}
-        total_units = 0
-        counted_skus = 0
-        missing_in_shopify = 0
-        skipped_empty = 0
-
-        for item in bin_items:
-            variant = stock.get(item["sku"])
-            # Only stock Shopify still knows about and says is non-empty is worth
-            # walking to.  Both counts are reported back so a bin full of skipped
-            # SKUs reads as stale Shipmondo data rather than a short sheet.
-            if variant is None:
-                missing_in_shopify += 1
-                continue
-            on_hand = variant["on_hand"]
-            if on_hand == 0:
-                skipped_empty += 1
-                continue
-            total_units += on_hand
-            counted_skus += 1
-
-            group = by_bin.get(item["bin"])
-            if group is None:
-                group = {"bin": item["bin"], "lines": []}
-                by_bin[item["bin"]] = group
-                groups.append(group)
-            group["lines"].append({
-                "sku": item["sku"],
-                "product_title": variant["product_title"],
-                "variant_title": variant["variant_title"],
-                "vendor": variant["vendor"],
-                "barcode": variant["barcode"] or item["barcode"],
-                "on_hand": on_hand,
-                "available": variant["available"],
-                "committed": variant["committed"],
-            })
-
-        if not groups:
-            return jsonify({
-                "error": f"None of the {len(bin_items)} SKUs in those bins has "
-                         "stock in Shopify; there is nothing to count."
-            }), 404
+        sheet = counting_sheet.build_count_sheet(inventory, bin_items)
 
         return jsonify({
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "bins_cache_updated": cache_updated,
-            "bins": groups,
-            "totals": {
-                "bins": len(groups),
-                "skus": counted_skus,
-                "units": total_units,
-                "skipped_empty": skipped_empty,
-                "missing_in_shopify": missing_in_shopify,
-            },
+            "inventory_synced_at": status["last_synced"],
+            "bins": sheet["bins"],
+            "totals": sheet["totals"],
             "patterns": patterns[:50],
             "pattern_count": len(patterns),
             "unmatched_patterns": match["unmatched_patterns"][:50],

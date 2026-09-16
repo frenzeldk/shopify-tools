@@ -121,6 +121,24 @@ main {
   background-color: #7f8c8d;
 }
 
+.btn-export {
+  background-color: #16a085;
+}
+
+.btn-export:hover:not(:disabled) {
+  background-color: #12806a;
+}
+
+/* Replacing the local inventory throws away counted figures, so the button
+   that does it is coloured like the warning it carries. */
+.btn-danger {
+  background-color: #c0392b;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: #a5281b;
+}
+
 /* Messages */
 .error-message,
 .info-message {
@@ -158,6 +176,162 @@ main {
   padding-left: 1.2rem;
 }
 
+
+/* ── Local inventory database panel ────────────────────────────────────────── */
+
+.db-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 2rem;
+  margin-bottom: 1.1rem;
+}
+
+.status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.status-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #7f8c8d;
+}
+
+.status-value {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+/* Locally changed rows are the data a refresh would destroy; worth noticing
+   before pressing the button next to it. */
+.status-value-flagged {
+  color: #b9770e;
+}
+
+/* ── Add-product form ─────────────────────────────────────────────────────── */
+
+.section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.section-head h2 {
+  margin: 0;
+}
+
+/* Two columns on a desktop, one on a phone: the form is filled in standing at
+   a shelf as often as at a desk. */
+.add-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0 1rem;
+}
+
+.add-grid .input-group input {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #d5dde5;
+  border-radius: 4px;
+  font-size: 0.95rem;
+}
+
+.add-grid .input-group input:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.add-grid .input-group label small {
+  font-weight: 400;
+  color: #7f8c8d;
+}
+
+/* The buttons span the grid so they sit under the fields, not beside them. */
+.add-actions {
+  grid-column: 1 / -1;
+  margin-top: 0.25rem;
+}
+
+/* ── Show-hidden toggle ───────────────────────────────────────────────────── */
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  font-size: 0.92rem;
+  color: #2c3e50;
+  cursor: pointer;
+}
+
+.toggle-row input {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+}
+
+.toggle-row small {
+  color: #7f8c8d;
+}
+
+/* ── Warning prompt ───────────────────────────────────────────────────────── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(20, 29, 38, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 1000;
+}
+
+.modal-dialog {
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+  padding: 1.5rem;
+  max-width: 34rem;
+  width: 100%;
+}
+
+.modal-dialog h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1.15rem;
+  color: #922b21;
+}
+
+.modal-dialog p {
+  margin: 0 0 0.7rem;
+  font-size: 0.93rem;
+  line-height: 1.55;
+  color: #2c3e50;
+}
+
+.modal-warning {
+  background-color: #fdf3e3;
+  border-left: 4px solid #e67e22;
+  border-radius: 4px;
+  padding: 0.6rem 0.75rem;
+  color: #7e5109;
+}
+
+.modal-note {
+  color: #7f8c8d;
+  font-size: 0.85rem;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+  margin-top: 1.1rem;
+}
 
 /* ── Packing slip ──────────────────────────────────────────────────────────
    Dense by design: a count sheet is walked with a pen, so the priority is
@@ -278,6 +452,81 @@ main {
   color: #5a6c7d;
 }
 
+/* ── Rows ─────────────────────────────────────────────────────────────────── */
+
+/* Screen-only column: the printed sheet keeps the blank margin a pen needs. */
+.col-edit {
+  width: 10%;
+  white-space: nowrap;
+}
+
+.qty-input {
+  width: 4.5rem;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid #d5dde5;
+  border-radius: 3px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  text-align: right;
+}
+
+.qty-input:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.qty-input-saved {
+  border-color: #27ae60;
+}
+
+.qty-input-error {
+  border-color: #e74c3c;
+}
+
+.save-state {
+  margin-left: 0.25rem;
+  font-size: 0.8rem;
+  color: #7f8c8d;
+}
+
+.save-state-ok {
+  color: #27ae60;
+}
+
+.save-state-bad {
+  color: #e74c3c;
+  font-weight: 700;
+}
+
+/* A quantity that no longer matches the last fetch; the star carries the
+   Shopify figure in its tooltip. */
+.slip-table td.qty-modified {
+  color: #b9770e;
+}
+
+.qty-was {
+  margin-left: 0.1rem;
+  cursor: help;
+}
+
+/* Hidden SKUs — empty, or gone from Shopify — read as secondary when the
+   toggle brings them onto the sheet. */
+.slip-table tbody tr.row-hidden td {
+  color: #7f8c8d;
+}
+
+.row-tag {
+  margin-left: 0.4rem;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  background-color: #eef2f6;
+  color: #7f8c8d;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
 .slip-footer {
   display: flex;
   flex-wrap: wrap;
@@ -394,5 +643,9 @@ main {
 
   .col-barcode {
     display: none;
+  }
+
+  .qty-input {
+    width: 3.6rem;
   }
 }

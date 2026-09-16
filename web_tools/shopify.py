@@ -353,17 +353,15 @@ def calculate_brand_inventory_value(brand_name: str = None) -> float:
     return total_value
 
 
-# ── On-hand counts by SKU ─────────────────────────────────────────────────────
+# ── On-hand counts ────────────────────────────────────────────────────────────
 #
 # The counting sheet needs the quantity a picker should physically find, which is
-# `on_hand` (available + committed), not `available`.  Shopify has no "fetch these
-# N SKUs" call, so the SKUs are OR-ed into the variant search query in batches.
+# `on_hand` (available + committed), not `available`.  Two ways in: by SKU, where
+# Shopify has no "fetch these N SKUs" call so the SKUs are OR-ed into the variant
+# search query in batches, and the whole catalogue, which fills the Counting
+# page's local inventory database.
 
-__ON_HAND_QUERY__ = gql("""
-query ($cursor: String, $query: String!) {
-  productVariants(first: 100, after: $cursor, query: $query) {
-    edges {
-      node {
+_ON_HAND_NODE_FIELDS = """
         sku
         title
         barcode
@@ -373,6 +371,9 @@ query ($cursor: String, $query: String!) {
         }
         inventoryItem {
           tracked
+          unitCost {
+            amount
+          }
           inventoryLevels(first: 20) {
             edges {
               node {
@@ -387,6 +388,14 @@ query ($cursor: String, $query: String!) {
             }
           }
         }
+"""
+
+__ON_HAND_QUERY__ = gql("""
+query ($cursor: String, $query: String!) {
+  productVariants(first: 100, after: $cursor, query: $query) {
+    edges {
+      node {
+%s
       }
     }
     pageInfo {
@@ -395,7 +404,23 @@ query ($cursor: String, $query: String!) {
     }
   }
 }
-""")
+""" % _ON_HAND_NODE_FIELDS)
+
+__ALL_ON_HAND_QUERY__ = gql("""
+query ($cursor: String) {
+  productVariants(first: 100, after: $cursor) {
+    edges {
+      node {
+%s
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+""" % _ON_HAND_NODE_FIELDS)
 
 # SKUs per search query.  Shopify rejects very long query strings, and a wide
 # `OR` chain also costs more query points than several narrow ones.
@@ -412,14 +437,65 @@ def _sku_query_term(sku: str) -> str:
     return f'sku:"{escaped}"'
 
 
+def _on_hand_row(node: dict) -> dict:
+    """Fold one variant node into the on-hand shape both fetchers return.
+
+    Quantities are summed across every location holding the item; ``locations``
+    keeps the per-location on-hand split.
+    """
+    inventory_item = node.get("inventoryItem") or {}
+    totals = {"on_hand": 0, "available": 0, "committed": 0}
+    locations: list[dict] = []
+    levels = (inventory_item.get("inventoryLevels") or {}).get("edges", [])
+    for level in levels:
+        level_node = level["node"]
+        quantities = {
+            q["name"]: q["quantity"] or 0
+            for q in level_node.get("quantities", [])
+        }
+        for name in totals:
+            totals[name] += quantities.get(name, 0)
+        locations.append({
+            "name": (level_node.get("location") or {}).get("name", ""),
+            "on_hand": quantities.get("on_hand", 0),
+        })
+
+    # Per-unit cost in the store currency.  None when Shopify holds no cost for
+    # the item, which a cost report must be able to show as unknown rather than
+    # as free.
+    raw_cost = (inventory_item.get("unitCost") or {}).get("amount")
+    try:
+        unit_cost = None if raw_cost in (None, "") else float(raw_cost)
+    except (TypeError, ValueError):
+        unit_cost = None
+
+    product = node.get("product") or {}
+    variant_title = node.get("title") or ""
+    if variant_title == _PLACEHOLDER_VARIANT_TITLE:
+        variant_title = ""
+    return {
+        "sku": (node.get("sku") or "").strip(),
+        "variant_title": variant_title,
+        "product_title": product.get("title") or "",
+        "vendor": product.get("vendor") or "",
+        "barcode": node.get("barcode") or "",
+        "tracked": bool(inventory_item.get("tracked")),
+        "unit_cost": unit_cost,
+        "on_hand": totals["on_hand"],
+        "available": totals["available"],
+        "committed": totals["committed"],
+        "locations": locations,
+    }
+
+
 def fetch_on_hand_by_skus(skus: list[str]) -> dict[str, dict]:
     """Return on-hand stock for ``skus``, keyed by SKU.
 
     Each value is ``{"sku", "variant_title", "product_title", "vendor",
-    "barcode", "tracked", "on_hand", "available", "committed", "locations"}``.
-    Quantities are summed across every location holding the item; ``locations``
-    lists the per-location on-hand split.  SKUs Shopify does not know are absent
-    from the result — the caller decides how to show them.
+    "barcode", "tracked", "unit_cost", "on_hand", "available", "committed",
+    "locations"}``.
+    SKUs Shopify does not know are absent from the result — the caller decides
+    how to show them.
     """
     wanted = {sku for sku in skus if sku}
     if not wanted:
@@ -439,46 +515,12 @@ def fetch_on_hand_by_skus(skus: list[str]) -> dict[str, dict]:
             )
             connection = result["productVariants"]
             for edge in connection["edges"]:
-                node = edge["node"]
-                sku = (node.get("sku") or "").strip()
+                row = _on_hand_row(edge["node"])
                 # Shopify's search matches on tokens, so a query for "AB-1" can
                 # also return "AB-10"; keep only the SKUs actually asked for.
-                if sku not in wanted or sku in found:
+                if row["sku"] not in wanted or row["sku"] in found:
                     continue
-
-                inventory_item = node.get("inventoryItem") or {}
-                totals = {"on_hand": 0, "available": 0, "committed": 0}
-                locations: list[dict] = []
-                levels = (inventory_item.get("inventoryLevels") or {}).get("edges", [])
-                for level in levels:
-                    level_node = level["node"]
-                    quantities = {
-                        q["name"]: q["quantity"] or 0
-                        for q in level_node.get("quantities", [])
-                    }
-                    for name in totals:
-                        totals[name] += quantities.get(name, 0)
-                    locations.append({
-                        "name": (level_node.get("location") or {}).get("name", ""),
-                        "on_hand": quantities.get("on_hand", 0),
-                    })
-
-                product = node.get("product") or {}
-                variant_title = node.get("title") or ""
-                if variant_title == _PLACEHOLDER_VARIANT_TITLE:
-                    variant_title = ""
-                found[sku] = {
-                    "sku": sku,
-                    "variant_title": variant_title,
-                    "product_title": product.get("title") or "",
-                    "vendor": product.get("vendor") or "",
-                    "barcode": node.get("barcode") or "",
-                    "tracked": bool(inventory_item.get("tracked")),
-                    "on_hand": totals["on_hand"],
-                    "available": totals["available"],
-                    "committed": totals["committed"],
-                    "locations": locations,
-                }
+                found[row["sku"]] = row
 
             page_info = connection["pageInfo"]
             if not page_info["hasNextPage"]:
@@ -489,6 +531,48 @@ def fetch_on_hand_by_skus(skus: list[str]) -> dict[str, dict]:
         "fetch_on_hand_by_skus: matched %d of %d SKUs", len(found), len(wanted)
     )
     return found
+
+
+def fetch_all_on_hand() -> list[dict]:
+    """Return on-hand stock for every variant in the shop that has a SKU.
+
+    Rows have the same shape as :func:`fetch_on_hand_by_skus` values.  This
+    walks the whole catalogue, so it is only ever run on explicit request — it
+    is what fills the Counting page's local inventory database.
+
+    Variants without a SKU are skipped: the local database is keyed by SKU, and
+    a variant with none cannot be matched to a bin or counted.
+    """
+    _log.info("fetch_all_on_hand: starting full inventory fetch")
+    rows: list[dict] = []
+    without_sku = 0
+    cursor: str | None = None
+    pages = 0
+
+    while True:
+        result = _execute(__ALL_ON_HAND_QUERY__, variable_values={"cursor": cursor})
+        connection = result["productVariants"]
+        for edge in connection["edges"]:
+            row = _on_hand_row(edge["node"])
+            if not row["sku"]:
+                without_sku += 1
+                continue
+            rows.append(row)
+
+        pages += 1
+        if pages % 25 == 0:
+            _log.info("fetch_all_on_hand: %d variants so far", len(rows))
+
+        page_info = connection["pageInfo"]
+        if not page_info["hasNextPage"]:
+            break
+        cursor = page_info["endCursor"]
+
+    _log.info(
+        "fetch_all_on_hand: fetched %d variants with a SKU (%d without)",
+        len(rows), without_sku,
+    )
+    return rows
 
 
 def update_variant_barcode(sku: str, barcode: str) -> tuple[bool, str]:
